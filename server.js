@@ -1,5 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer');
 const cors = require('cors');
 
 const app = express();
@@ -32,22 +32,7 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Launch browser ────────────────────────────────────────────────────────────
 async function launchBrowser() {
-  const fs = require('fs');
-  const paths = [
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-  ];
-  let executablePath = null;
-  for (const p of paths) {
-    try { fs.accessSync(p); executablePath = p; break; } catch (e) {}
-  }
-  if (!executablePath) throw new Error('No Chromium found. Check build command includes: apt-get install -y chromium');
-
-  console.log('Using Chromium:', executablePath);
   return await puppeteer.launch({
-    executablePath,
     headless: 'new',
     defaultViewport: { width: 1280, height: 800 },
     args: [
