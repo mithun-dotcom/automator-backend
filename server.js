@@ -30,16 +30,6 @@ app.get('/', (req, res) => res.json({ status: 'MithMill Automator backend runnin
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-// ── Reliable type into input ───────────────────────────────────────────────────
-async function typeInto(page, selector, value) {
-  await page.waitForSelector(selector, { visible: true, timeout: 8000 });
-  await page.click(selector, { clickCount: 3 });
-  await delay(150);
-  await page.keyboard.press('Backspace');
-  await delay(100);
-  await page.type(selector, value, { delay: 80 });
-}
-
 // ── Launch browser ────────────────────────────────────────────────────────────
 async function launchBrowser() {
   const args = [
@@ -61,16 +51,58 @@ async function launchBrowser() {
   throw new Error('Could not launch any Chrome/Chromium browser.');
 }
 
+// ── Wait for the new user form to fully render ────────────────────────────────
+// The form is a React SPA — we must wait for actual input elements to appear
+async function waitForForm(page) {
+  console.log('Waiting for form to render...');
+
+  // Scroll down to trigger lazy rendering
+  await page.evaluate(() => window.scrollTo(0, 500));
+  await delay(1000);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await delay(1000);
+
+  // Wait until we see at least 2 visible text inputs (First name + Last name)
+  let attempts = 0;
+  while (attempts < 20) {
+    const inputCount = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input'))
+        .filter(i => i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'radio')
+        .length
+    );
+    console.log(`Form render attempt ${attempts + 1}: ${inputCount} visible inputs`);
+    if (inputCount >= 2) {
+      console.log('Form is ready with', inputCount, 'inputs');
+      return inputCount;
+    }
+    await delay(1000);
+    attempts++;
+  }
+  throw new Error('Form did not render after 20 seconds — Google Admin may be blocked or not loading');
+}
+
 // ── Google Admin login ────────────────────────────────────────────────────────
 async function loginGoogleAdmin(page, email, password) {
   sendStatus('Logging in to Google Admin...', 'info');
   await page.goto('https://admin.google.com', { waitUntil: 'networkidle2', timeout: 30000 });
   await delay(2000);
   for (const sel of ['input[type="email"]', '#identifierId']) {
-    try { await typeInto(page, sel, email); await page.keyboard.press('Enter'); await delay(3000); break; } catch (e) {}
+    try {
+      await page.waitForSelector(sel, { visible: true, timeout: 5000 });
+      await page.click(sel, { clickCount: 3 });
+      await page.type(sel, email, { delay: 80 });
+      await page.keyboard.press('Enter');
+      await delay(3000); break;
+    } catch (e) {}
   }
   for (const sel of ['input[type="password"]', 'input[name="Passwd"]']) {
-    try { await typeInto(page, sel, password); await page.keyboard.press('Enter'); await delay(4000); break; } catch (e) {}
+    try {
+      await page.waitForSelector(sel, { visible: true, timeout: 6000 });
+      await page.click(sel, { clickCount: 3 });
+      await page.type(sel, password, { delay: 80 });
+      await page.keyboard.press('Enter');
+      await delay(4000); break;
+    } catch (e) {}
   }
   try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }); } catch (e) {}
   const url = page.url();
@@ -84,215 +116,208 @@ async function loginGoogleAdmin(page, email, password) {
 }
 
 // ── Create one user ───────────────────────────────────────────────────────────
-// Form structure (confirmed from screenshot):
-//   First name * | Last name *
-//   Primary email * [input] @ [domain <select>▼]
-//   Secondary email  | Phone number
-//   Manage user's password... (already expanded showing Password section)
-//   Password * [input]
-//   ADD NEW USER button
 async function createGoogleUser(page, user) {
   await page.goto('https://admin.google.com/ac/users/new', { waitUntil: 'networkidle2', timeout: 30000 });
-  await delay(4000);
+  await delay(3000);
 
-  // Dump all inputs for debugging
-  const inputDump = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('input, select')).filter(i => i.offsetParent !== null)
-      .map(i => ({ tag: i.tagName, type: i.type, name: i.name, id: i.id, placeholder: i.placeholder, ariaLabel: i.getAttribute('aria-label'), value: i.value }))
+  // Wait for form to fully render
+  const inputCount = await waitForForm(page);
+
+  // Full dump after form is ready
+  const dump = await page.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll('input, select, textarea'))
+      .filter(i => i.offsetParent !== null)
+      .map(i => ({
+        tag: i.tagName, type: i.type || '', name: i.name || '',
+        id: i.id || '', placeholder: i.placeholder || '',
+        ariaLabel: i.getAttribute('aria-label') || '',
+        value: i.value || '', class: i.className.substring(0, 40)
+      }));
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter(b => b.offsetParent !== null)
+      .map(b => b.textContent.trim().substring(0, 40));
+    return { inputs, buttons };
+  });
+  console.log('FORM DUMP inputs:', JSON.stringify(dump.inputs));
+  console.log('FORM DUMP buttons:', JSON.stringify(dump.buttons));
+
+  // Get all visible text inputs in order
+  const visibleInputs = dump.inputs.filter(i =>
+    i.tag === 'INPUT' && i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'radio'
   );
-  console.log('Form elements:', JSON.stringify(inputDump));
+  console.log('Visible text inputs count:', visibleInputs.length);
 
-  // ── 1. First Name ──────────────────────────────────────────────────────────
-  await fillByLabel(page, 'First name', user.firstName);
-  await delay(500);
-
-  // ── 2. Last Name ───────────────────────────────────────────────────────────
-  await fillByLabel(page, 'Last name', user.lastName);
-  await delay(500);
-
-  // ── 3. Primary Email (username only, before the @) ─────────────────────────
-  await fillByLabel(page, 'Primary email', user.username);
-  await delay(500);
-
-  // ── 4. Domain select dropdown ──────────────────────────────────────────────
-  // From screenshot: it's a <select> element showing the domain name with ▼
-  // It sits right after the @ symbol next to the Primary email input
-  await selectDomain(page, user.domain);
-  await delay(500);
-
-  // ── 5. Click "Create password" radio ─────────────────────────────────────
-  // Default is "Automatically generate" — we must switch to "Create password"
-  // to reveal the password input field
-  try {
-    const radioResult = await page.evaluate(() => {
-      const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
-        .filter(r => r.offsetParent !== null);
-      for (const radio of radios) {
-        const container = radio.closest('label') || radio.parentElement;
-        const text = (container ? container.textContent : '').toLowerCase();
-        if (text.includes('create password')) {
-          radio.click();
-          return { ok: true, text: container.textContent.trim().substring(0, 50) };
-        }
-      }
-      // Fallback: second radio is always "Create password"
-      if (radios.length >= 2) {
-        radios[1].click();
-        return { ok: true, fallback: true, count: radios.length };
-      }
-      return { ok: false, count: radios.length };
-    });
-    console.log('Create password radio result:', JSON.stringify(radioResult));
-    await delay(1200); // wait for password field to animate in
-  } catch (e) { console.log('Radio click error:', e.message); }
-
-  // ── 6. Password ─────────────────────────────────────────────────────────────
-  await fillByLabel(page, 'Password', user.password);
-  await delay(500);
-
-  // ── 7. Uncheck "Ask user to change their password when they sign in" ────────
-  // This checkbox must be UNCHECKED so users don't get forced to change password
-  // which would break Smartlead OAuth login
-  try {
-    const unchecked = await page.evaluate(() => {
-      const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'))
-        .filter(c => c.offsetParent !== null);
-      for (const cb of checkboxes) {
-        const label = document.querySelector(`label[for="${cb.id}"]`) ||
-          cb.closest('label') || cb.parentElement;
-        const labelText = label ? label.textContent.toLowerCase() : '';
-        if (labelText.includes('change') && labelText.includes('password')) {
-          if (cb.checked) {
-            cb.click(); // uncheck it
-            return { unchecked: true, was: 'checked' };
-          }
-          return { unchecked: false, was: 'already unchecked' };
-        }
-      }
-      return { unchecked: false, was: 'not found' };
-    });
-    console.log('Password change checkbox:', JSON.stringify(unchecked));
-  } catch (e) { console.log('Checkbox error:', e.message); }
+  // ── Fill fields by position (most reliable since we know the form layout) ──
+  // Position 0 = First name, 1 = Last name, 2 = Primary email (username)
+  await fillNthInput(page, 0, user.firstName, 'First name');
   await delay(400);
+  await fillNthInput(page, 1, user.lastName, 'Last name');
+  await delay(400);
+  await fillNthInput(page, 2, user.username, 'Primary email');
+  await delay(800);
 
-  // ── 8. Submit ──────────────────────────────────────────────────────────────
-  const submitted = await clickAddNewUser(page);
-  if (!submitted) sendStatus('⚠ Could not find ADD NEW USER button', 'warn');
-  await delay(4000);
-  console.log('After submit:', page.url());
-}
+  // ── Select domain ──────────────────────────────────────────────────────────
+  await selectDomain(page, user.domain);
+  await delay(800);
 
-// ── Fill input by its label ───────────────────────────────────────────────────
-async function fillByLabel(page, labelText, value) {
-  // Google Admin uses Material Design inputs where the label floats above the input
-  // The label is a <label> or a div with class like "mat-form-field-label"
-  // The input is associated via id or proximity
+  // ── Scroll down to see password section ───────────────────────────────────
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await delay(1000);
 
-  const result = await page.evaluate((labelText, value) => {
-    // Method 1: find input with matching aria-label or placeholder
-    const direct = Array.from(document.querySelectorAll('input')).find(i =>
-      i.offsetParent !== null && (
-        (i.getAttribute('aria-label') || '').toLowerCase().includes(labelText.toLowerCase()) ||
-        (i.placeholder || '').toLowerCase().includes(labelText.toLowerCase()) ||
-        (i.name || '').toLowerCase().includes(labelText.toLowerCase())
-      )
-    );
-    if (direct) {
-      direct.focus();
-      return { found: true, method: 'direct', id: direct.id, name: direct.name };
+  // ── Re-dump after scroll to see password section ──────────────────────────
+  const dump2 = await page.evaluate(() => ({
+    inputs: Array.from(document.querySelectorAll('input'))
+      .filter(i => i.offsetParent !== null)
+      .map(i => ({ type: i.type, name: i.name, id: i.id, ariaLabel: i.getAttribute('aria-label') })),
+    buttons: Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter(b => b.offsetParent !== null)
+      .map(b => b.textContent.trim().substring(0, 40))
+  }));
+  console.log('AFTER SCROLL inputs:', JSON.stringify(dump2.inputs));
+  console.log('AFTER SCROLL buttons:', JSON.stringify(dump2.buttons));
+
+  // ── Click "Create password" radio ─────────────────────────────────────────
+  const radioResult = await page.evaluate(() => {
+    const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
+      .filter(r => r.offsetParent !== null);
+    console.log('Radios:', radios.length, radios.map(r => {
+      const p = r.closest('label') || r.parentElement;
+      return p ? p.textContent.trim().substring(0, 40) : r.id;
+    }));
+    for (const r of radios) {
+      const p = r.closest('label') || r.parentElement;
+      const txt = (p ? p.textContent : '').toLowerCase();
+      if (txt.includes('create')) { r.click(); return 'create radio clicked'; }
     }
+    if (radios.length >= 2) { radios[1].click(); return 'second radio (fallback)'; }
+    return `no radio found (${radios.length} total)`;
+  });
+  console.log('Radio result:', radioResult);
+  await delay(1500);
 
-    // Method 2: find label by text content, then get its associated input
-    const allLabels = Array.from(document.querySelectorAll('label, mat-label, .mat-form-field-label, [class*="label"], span'));
-    const matchingLabel = allLabels.find(l =>
-      l.offsetParent !== null &&
-      l.textContent.trim().toLowerCase().includes(labelText.toLowerCase()) &&
-      l.textContent.trim().length < 50
-    );
-    if (matchingLabel) {
-      // Try htmlFor
-      if (matchingLabel.htmlFor) {
-        const input = document.getElementById(matchingLabel.htmlFor);
-        if (input) { input.focus(); return { found: true, method: 'htmlFor', id: input.id }; }
-      }
-      // Try closest form field
-      const container = matchingLabel.closest('mat-form-field, .form-field, .mat-form-field, div');
-      if (container) {
-        const input = container.querySelector('input, textarea');
-        if (input) { input.focus(); return { found: true, method: 'container', id: input.id }; }
-      }
-      // Try sibling/parent input
-      let el = matchingLabel;
-      for (let i = 0; i < 5; i++) {
-        el = el.parentElement;
-        if (!el) break;
-        const input = el.querySelector('input');
-        if (input && input.offsetParent !== null) {
-          input.focus();
-          return { found: true, method: 'parent', id: input.id };
-        }
-      }
+  // ── Fill password (appears after clicking Create password) ────────────────
+  const pwdResult = await page.evaluate((pwd) => {
+    const pwdInputs = Array.from(document.querySelectorAll('input[type="password"]'))
+      .filter(i => i.offsetParent !== null);
+    console.log('Password inputs:', pwdInputs.length);
+    if (pwdInputs.length > 0) {
+      pwdInputs[0].focus();
+      pwdInputs[0].click();
+      return { found: true, id: pwdInputs[0].id };
     }
     return { found: false };
-  }, labelText, value);
+  }, user.password);
+  console.log('Password input result:', JSON.stringify(pwdResult));
 
-  if (result.found) {
+  if (pwdResult.found) {
     await delay(200);
+    await page.keyboard.down('Control');
+    await page.keyboard.press('a');
+    await page.keyboard.up('Control');
+    await page.keyboard.type(user.password, { delay: 80 });
+    sendStatus(`Password filled`, 'info');
+  } else {
+    // Try clicking Create password first
+    const createPwdBtnResult = await page.evaluate(() => {
+      const all = Array.from(document.querySelectorAll('*')).filter(el =>
+        el.offsetParent !== null &&
+        el.textContent.trim().toLowerCase().includes('create password') &&
+        el.children.length <= 3
+      );
+      if (all.length > 0) { all[0].click(); return all[0].textContent.trim(); }
+      return null;
+    });
+    console.log('Create password button:', createPwdBtnResult);
+    if (createPwdBtnResult) {
+      await delay(1500);
+      try {
+        await page.waitForSelector('input[type="password"]', { visible: true, timeout: 5000 });
+        await page.click('input[type="password"]', { clickCount: 3 });
+        await page.type('input[type="password"]', user.password, { delay: 80 });
+      } catch (e) { console.log('Password fill after button click failed:', e.message); }
+    }
+  }
+  await delay(500);
+
+  // ── Uncheck "Ask user to change password" ─────────────────────────────────
+  await page.evaluate(() => {
+    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'))
+      .filter(c => c.offsetParent !== null);
+    for (const cb of checkboxes) {
+      const p = cb.closest('label') || cb.parentElement;
+      const txt = (p ? p.textContent : '').toLowerCase();
+      if (txt.includes('change') || txt.includes('reset')) {
+        if (cb.checked) { cb.click(); console.log('Unchecked change-password checkbox'); }
+      }
+    }
+  });
+  await delay(400);
+
+  // ── Submit ─────────────────────────────────────────────────────────────────
+  const submitResult = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter(b => b.offsetParent !== null);
+    console.log('Submit buttons:', buttons.map(b => b.textContent.trim().substring(0, 30)));
+    for (const b of buttons) {
+      const txt = b.textContent.trim().toUpperCase();
+      if (txt.includes('ADD') && txt.includes('USER')) { b.click(); return `clicked: ${txt}`; }
+      if (txt === 'SAVE' || txt === 'CREATE') { b.click(); return `clicked: ${txt}`; }
+    }
+    // Last non-cancel button
+    const nonCancel = buttons.filter(b => !b.textContent.trim().toUpperCase().includes('CANCEL'));
+    if (nonCancel.length > 0) {
+      const last = nonCancel[nonCancel.length - 1];
+      last.click();
+      return `clicked last: ${last.textContent.trim()}`;
+    }
+    return 'no submit button found';
+  });
+  console.log('Submit result:', submitResult);
+  await delay(4000);
+  console.log('After submit URL:', page.url());
+}
+
+// ── Fill nth visible text input ───────────────────────────────────────────────
+async function fillNthInput(page, n, value, label) {
+  const result = await page.evaluate((n, val) => {
+    const inputs = Array.from(document.querySelectorAll('input'))
+      .filter(i => i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'radio' && i.type !== 'password');
+    const el = inputs[n];
+    if (!el) return { ok: false, total: inputs.length };
+    el.focus(); el.click();
+    return { ok: true, id: el.id, name: el.name, placeholder: el.placeholder, ariaLabel: el.getAttribute('aria-label') };
+  }, n, value);
+
+  console.log(`fillNthInput(${n}, "${label}"):`, JSON.stringify(result));
+
+  if (result.ok) {
+    await delay(150);
     await page.keyboard.down('Control');
     await page.keyboard.press('a');
     await page.keyboard.up('Control');
     await delay(100);
     await page.keyboard.press('Backspace');
     await page.keyboard.type(value, { delay: 80 });
-    console.log(`✓ Filled "${labelText}" → "${value}" (method: ${result.method}, id: ${result.id})`);
+    console.log(`✓ ${label} filled`);
     return true;
   }
-
-  // Fallback: map label to nth visible input index
-  const indexMap = {
-    'first name': 0,
-    'last name': 1,
-    'primary email': 2,
-    'password': 3,
-  };
-  const idx = indexMap[labelText.toLowerCase()];
-  if (idx !== undefined) {
-    const filled = await page.evaluate((idx, value) => {
-      const inputs = Array.from(document.querySelectorAll('input'))
-        .filter(i => i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'radio');
-      const el = inputs[idx];
-      if (!el) return false;
-      el.focus();
-      el.click();
-      return true;
-    }, idx, value);
-    if (filled) {
-      await delay(200);
-      await page.keyboard.down('Control');
-      await page.keyboard.press('a');
-      await page.keyboard.up('Control');
-      await delay(100);
-      await page.keyboard.type(value, { delay: 80 });
-      console.log(`✓ Filled "${labelText}" → "${value}" (fallback index: ${idx})`);
-      return true;
-    }
-  }
-
-  console.log(`✗ Could not fill "${labelText}"`);
+  console.log(`✗ ${label} not found (total inputs: ${result.total})`);
   return false;
 }
 
-// ── Select domain from <select> dropdown ──────────────────────────────────────
-// From screenshot: it's a proper <select> element with ▼ arrow showing domain name
+// ── Select domain ─────────────────────────────────────────────────────────────
 async function selectDomain(page, domain) {
   sendStatus(`Selecting domain @${domain}...`, 'info');
 
-  // Primary: it's a <select> element right after the @ sign
-  const viaSelect = await page.evaluate((domain) => {
-    const selects = Array.from(document.querySelectorAll('select')).filter(s => s.offsetParent !== null);
-    console.log('Found selects:', selects.length, selects.map(s => ({ id: s.id, options: Array.from(s.options).map(o => o.text) })));
-
+  // Method 1: native <select>
+  const r1 = await page.evaluate((domain) => {
+    const selects = Array.from(document.querySelectorAll('select'));
+    console.log('Selects found:', selects.length, selects.map(s => ({
+      id: s.id, visible: !!s.offsetParent,
+      options: Array.from(s.options).map(o => o.text)
+    })));
     for (const sel of selects) {
+      if (!sel.offsetParent) continue;
       const match = Array.from(sel.options).find(o =>
         o.text.toLowerCase().includes(domain.toLowerCase()) ||
         o.value.toLowerCase().includes(domain.toLowerCase())
@@ -300,101 +325,68 @@ async function selectDomain(page, domain) {
       if (match) {
         sel.value = match.value;
         sel.dispatchEvent(new Event('change', { bubbles: true }));
-        sel.dispatchEvent(new Event('input', { bubbles: true }));
-        return { ok: true, selected: match.text };
+        return { ok: true, value: match.text };
       }
     }
-    return { ok: false, selectCount: selects.length };
+    return { ok: false };
   }, domain);
+  console.log('Select method 1:', JSON.stringify(r1));
+  if (r1.ok) { await delay(500); sendStatus(`✓ Domain @${domain} selected`, 'success'); return; }
 
-  if (viaSelect.ok) {
-    await delay(500);
-    sendStatus(`✓ Domain @${domain} selected (${viaSelect.selected})`, 'success');
-    return;
-  }
-
-  console.log('Native select result:', JSON.stringify(viaSelect));
-
-  // Secondary: Puppeteer select() method on any select element
+  // Method 2: Puppeteer page.select()
   try {
     const selects = await page.$$('select');
-    for (const selectEl of selects) {
-      const visible = await page.evaluate(el => el.offsetParent !== null, selectEl);
-      if (!visible) continue;
-      const options = await page.evaluate(el =>
-        Array.from(el.options).map(o => ({ value: o.value, text: o.text })), selectEl
-      );
-      console.log('Select options:', JSON.stringify(options));
-      const match = options.find(o =>
-        o.text.toLowerCase().includes(domain.toLowerCase()) ||
-        o.value.toLowerCase().includes(domain.toLowerCase())
-      );
+    for (const s of selects) {
+      const vis = await page.evaluate(el => !!el.offsetParent, s);
+      if (!vis) continue;
+      const opts = await page.evaluate(el => Array.from(el.options).map(o => ({ v: o.value, t: o.text })), s);
+      console.log('page.select() options:', JSON.stringify(opts));
+      const match = opts.find(o => o.t.toLowerCase().includes(domain.toLowerCase()) || o.v.toLowerCase().includes(domain.toLowerCase()));
       if (match) {
-        await page.select('select', match.value);
+        await page.select('select', match.v);
         await delay(500);
         sendStatus(`✓ Domain @${domain} selected via page.select()`, 'success');
         return;
       }
     }
-  } catch (e) { console.log('page.select() failed:', e.message); }
+  } catch (e) { console.log('page.select() error:', e.message); }
 
-  // Tertiary: it might be a custom dropdown (div pretending to be select)
-  // Click element showing current domain text, then click target domain
-  const clicked = await page.evaluate((domain) => {
-    // Find any clickable element that looks like a domain name
-    const domainPattern = /^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$/;
-    const candidates = Array.from(document.querySelectorAll('*')).filter(el =>
-      el.offsetParent !== null &&
-      el.children.length <= 1 &&
-      domainPattern.test(el.textContent.trim())
+  // Method 3: look for domain text directly on page and click it
+  const r3 = await page.evaluate((domain) => {
+    // Find the domain shown next to @ — could be a div, span, or custom element
+    const allVisible = Array.from(document.querySelectorAll('*')).filter(el =>
+      el.offsetParent !== null && el.children.length <= 2
     );
-    console.log('Domain-like elements:', candidates.map(c => c.textContent.trim()));
+    // Find element showing any domain (contains a dot, no spaces)
+    const domainRe = /^@?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    const candidates = allVisible.filter(el => domainRe.test(el.textContent.trim()));
+    console.log('Domain candidates:', candidates.map(c => ({ tag: c.tagName, text: c.textContent.trim(), role: c.getAttribute('role') })));
     if (candidates.length > 0) {
       candidates[0].click();
       return { clicked: true, text: candidates[0].textContent.trim() };
     }
     return { clicked: false };
   }, domain);
+  console.log('Method 3:', JSON.stringify(r3));
 
-  if (clicked.clicked) {
-    console.log('Clicked domain element:', clicked.text);
-    await delay(800);
-    // Now pick from opened list
+  if (r3.clicked) {
+    await delay(1000);
     const picked = await page.evaluate((domain) => {
-      const opts = Array.from(document.querySelectorAll('li, [role="option"], [role="menuitem"]'))
+      const opts = Array.from(document.querySelectorAll('li, [role="option"], [role="menuitem"], [role="listitem"]'))
         .filter(el => el.offsetParent !== null);
+      console.log('Dropdown items:', opts.map(o => o.textContent.trim()));
       const match = opts.find(o => o.textContent.trim().toLowerCase().includes(domain.toLowerCase()));
       if (match) { match.click(); return match.textContent.trim(); }
       return null;
     }, domain);
     if (picked) {
       await delay(400);
-      sendStatus(`✓ Domain @${domain} selected via custom dropdown`, 'success');
+      sendStatus(`✓ Domain @${domain} selected via dropdown`, 'success');
       return;
     }
   }
 
-  sendStatus(`⚠ Could not select @${domain} — proceeding with default domain`, 'warn');
-}
-
-// ── Click ADD NEW USER button ──────────────────────────────────────────────────
-async function clickAddNewUser(page) {
-  // From screenshot: button text is "ADD NEW USER" (uppercase)
-  for (const txt of ['ADD NEW USER', 'Add new user', 'Add user', 'Create user', 'Save']) {
-    try {
-      const btns = await page.$x(`//button[normalize-space(.)='${txt}'] | //button[contains(., '${txt}')]`);
-      if (btns.length > 0) {
-        await btns[0].click();
-        console.log('Clicked:', txt);
-        return true;
-      }
-    } catch (e) {}
-  }
-  try {
-    const btn = await page.$('button[type="submit"]');
-    if (btn) { await btn.click(); return true; }
-  } catch (e) {}
-  return false;
+  sendStatus(`⚠ Domain @${domain} not selected — check Render logs`, 'warn');
 }
 
 // ── Smartlead login ───────────────────────────────────────────────────────────
@@ -408,18 +400,22 @@ async function loginSmartlead(page, email, password) {
     sendStatus('✓ Already logged in to Smartlead', 'success'); return;
   }
 
-  const inputs = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('input')).filter(i => i.offsetParent !== null)
-      .map(i => ({ type: i.type, name: i.name, placeholder: i.placeholder, id: i.id }))
-  );
-  console.log('Smartlead inputs:', JSON.stringify(inputs));
-
   for (const sel of ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="mail" i]']) {
-    try { await typeInto(page, sel, email); break; } catch (e) {}
+    try {
+      await page.waitForSelector(sel, { visible: true, timeout: 4000 });
+      await page.click(sel, { clickCount: 3 });
+      await page.type(sel, email, { delay: 80 });
+      break;
+    } catch (e) {}
   }
   await delay(400);
   for (const sel of ['input[type="password"]', 'input[name="password"]']) {
-    try { await typeInto(page, sel, password); break; } catch (e) {}
+    try {
+      await page.waitForSelector(sel, { visible: true, timeout: 4000 });
+      await page.click(sel, { clickCount: 3 });
+      await page.type(sel, password, { delay: 80 });
+      break;
+    } catch (e) {}
   }
   await delay(400);
 
@@ -439,17 +435,15 @@ async function loginSmartlead(page, email, password) {
   try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 12000 }); } catch (e) {}
 
   const finalUrl = page.url();
-  const pageText = await page.evaluate(() => document.body.innerText.substring(0, 400));
-  console.log('After Smartlead login URL:', finalUrl);
-  console.log('After Smartlead login text:', pageText);
+  console.log('Smartlead final URL:', finalUrl);
 
   if (finalUrl.includes('app.smartlead.ai') && !finalUrl.includes('login') && !finalUrl.includes('sign-in')) {
     sendStatus('✓ Logged in to Smartlead', 'success'); return;
   }
-  throw new Error(`Smartlead login failed. URL: ${finalUrl} — check Render logs.`);
+  throw new Error(`Smartlead login failed. URL: ${finalUrl}`);
 }
 
-// ── Connect one account to Smartlead via OAuth ────────────────────────────────
+// ── Connect account to Smartlead ──────────────────────────────────────────────
 async function connectAccountToSmartlead(browser, page, email, password) {
   await page.goto('https://app.smartlead.ai/app/email-accounts', { waitUntil: 'networkidle2', timeout: 30000 });
   await delay(2000);
@@ -540,7 +534,7 @@ app.post('/run', async (req, res) => {
           console.error('Error:', e.stack);
         }
       }
-      sendStatus('Phase 1 complete. Starting Smartlead connections...', 'success', 50);
+      sendStatus('Phase 1 complete. Starting Smartlead...', 'success', 50);
 
       sendStatus('Phase 2: Connecting accounts to Smartlead...', 'info', 52);
       await loginSmartlead(page, smartleadEmail, smartleadPassword);
@@ -554,10 +548,9 @@ app.post('/run', async (req, res) => {
           await connectAccountToSmartlead(browser, page, fullEmail, user.password);
           sendStatus(`✓ Connected: ${fullEmail}`, 'success', pct + 1);
         } catch (e) {
-          sendStatus(`✗ Failed to connect ${fullEmail}: ${e.message}`, 'error', pct);
+          sendStatus(`✗ Failed: ${fullEmail} — ${e.message}`, 'error', pct);
         }
       }
-
       sendStatus('🎉 All done!', 'success', 100);
     } catch (e) {
       sendStatus(`❌ Fatal error: ${e.message}`, 'error');
