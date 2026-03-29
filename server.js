@@ -8,7 +8,6 @@ app.use(express.json({ limit: '10mb' }));
 
 let sseClients = [];
 
-// ── SSE ───────────────────────────────────────────────────────────────────────
 function sendStatus(message, type = 'info', progress = null) {
   const data = { message, type, progress, timestamp: new Date().toISOString() };
   console.log(`[${type.toUpperCase()}] ${message}`);
@@ -40,27 +39,15 @@ async function launchBrowser() {
     '--window-size=1280,900', '--single-process', '--no-zygote',
   ];
   try {
-    const browser = await puppeteer.launch({
-      headless: 'new', args,
-      defaultViewport: { width: 1280, height: 900 },
-    });
+    const b = await puppeteer.launch({ headless: 'new', args, defaultViewport: { width: 1280, height: 900 } });
     console.log('Launched with bundled Chromium');
-    return browser;
-  } catch (e) {
-    console.log('Bundled Chromium failed, trying system Chrome:', e.message);
-  }
-  for (const executablePath of [
-    '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium',
-  ]) {
+    return b;
+  } catch (e) { console.log('Bundled Chromium failed:', e.message); }
+  for (const ep of ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser']) {
     try {
-      const browser = await puppeteer.launch({
-        headless: 'new', executablePath, args,
-        defaultViewport: { width: 1280, height: 900 },
-      });
-      console.log(`Launched with ${executablePath}`);
-      return browser;
-    } catch (e) { console.log(`Failed at ${executablePath}`); }
+      const b = await puppeteer.launch({ headless: 'new', executablePath: ep, args, defaultViewport: { width: 1280, height: 900 } });
+      console.log('Launched with', ep); return b;
+    } catch (e) {}
   }
   throw new Error('Could not launch any Chrome/Chromium browser.');
 }
@@ -70,8 +57,7 @@ async function loginGoogleAdmin(page, email, password) {
   sendStatus('Logging in to Google Admin...', 'info');
   await page.goto('https://admin.google.com', { waitUntil: 'networkidle2', timeout: 30000 });
   await delay(2000);
-
-  for (const sel of ['input[type="email"]', '#identifierId', 'input[name="identifier"]']) {
+  for (const sel of ['input[type="email"]', '#identifierId']) {
     try {
       await page.waitForSelector(sel, { visible: true, timeout: 5000 });
       await page.click(sel, { clickCount: 3 });
@@ -80,7 +66,7 @@ async function loginGoogleAdmin(page, email, password) {
       await delay(3000); break;
     } catch (e) {}
   }
-  for (const sel of ['input[type="password"]', 'input[name="password"]', 'input[name="Passwd"]']) {
+  for (const sel of ['input[type="password"]', 'input[name="Passwd"]']) {
     try {
       await page.waitForSelector(sel, { visible: true, timeout: 6000 });
       await page.click(sel, { clickCount: 3 });
@@ -90,7 +76,6 @@ async function loginGoogleAdmin(page, email, password) {
     } catch (e) {}
   }
   try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }); } catch (e) {}
-
   const url = page.url();
   if (url.includes('admin.google.com') && !url.includes('signin')) {
     sendStatus('✓ Logged in to Google Admin', 'success'); return;
@@ -101,41 +86,93 @@ async function loginGoogleAdmin(page, email, password) {
   throw new Error('Google Admin login failed. Check credentials.');
 }
 
-// ── Fill text input ───────────────────────────────────────────────────────────
-async function fillField(page, fieldType, value) {
-  const map = {
-    firstName: ['input[name="firstName"]', 'input[aria-label*="First name" i]', 'input[placeholder*="First" i]', '#firstName'],
-    lastName:  ['input[name="lastName"]',  'input[aria-label*="Last name" i]',  'input[placeholder*="Last" i]',  '#lastName'],
-    username:  ['input[name="username"]',  'input[aria-label*="username" i]',   'input[placeholder*="username" i]', '#username'],
-  };
-  for (const sel of (map[fieldType] || [])) {
-    try {
-      await page.waitForSelector(sel, { visible: true, timeout: 3000 });
-      await page.click(sel, { clickCount: 3 });
-      await page.type(sel, value, { delay: 50 });
-      return;
-    } catch (e) {}
-  }
-  const idx = { firstName: 0, lastName: 1, username: 2 }[fieldType] ?? 0;
-  await page.evaluate((idx, val) => {
-    const inputs = Array.from(document.querySelectorAll('input'))
-      .filter(i => i.offsetParent !== null && i.type !== 'hidden');
-    const el = inputs[idx];
-    if (el) {
-      el.focus(); el.value = val;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+// ── Create one user in Google Admin ──────────────────────────────────────────
+// All interactions done via page.evaluate() to avoid detached frame issues
+async function createGoogleUser(page, user) {
+  // Navigate fresh every time
+  await page.goto('https://admin.google.com/ac/users/new', { waitUntil: 'networkidle2', timeout: 30000 });
+  await delay(3000);
+
+  // Wait for form to be ready
+  await page.waitForFunction(() => {
+    const inputs = document.querySelectorAll('input');
+    return inputs.length >= 2;
+  }, { timeout: 15000 });
+
+  await delay(1000);
+
+  // Fill ALL fields in a single evaluate call to avoid frame detachment
+  const filled = await page.evaluate((firstName, lastName, username) => {
+    const results = [];
+
+    // Helper: find and fill input
+    function fillInput(selectors, value, label) {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) {
+          el.focus();
+          el.value = '';
+          // Use native input setter to trigger React/Angular change detection
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeInputValueSetter.call(el, value);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+          results.push(`✓ ${label}: ${value}`);
+          return true;
+        }
+      }
+      // Fallback: try visible inputs by order
+      const visibleInputs = Array.from(document.querySelectorAll('input'))
+        .filter(i => i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'password');
+      const idx = label === 'firstName' ? 0 : label === 'lastName' ? 1 : 2;
+      if (visibleInputs[idx]) {
+        const el = visibleInputs[idx];
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(el, value);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        results.push(`✓ ${label} (fallback): ${value}`);
+        return true;
+      }
+      results.push(`✗ ${label}: not found`);
+      return false;
     }
-  }, idx, value);
+
+    fillInput(['input[name="firstName"]', 'input[aria-label*="First" i]', '#firstName'], firstName, 'firstName');
+    fillInput(['input[name="lastName"]', 'input[aria-label*="Last" i]', '#lastName'], lastName, 'lastName');
+    fillInput(['input[name="username"]', 'input[aria-label*="username" i]', '#username'], username, 'username');
+
+    return results;
+  }, user.firstName, user.lastName, user.username);
+
+  console.log('Fill results:', filled);
+  await delay(1500);
+
+  // Select domain — done separately after fields are filled
+  await selectDomain(page, user.domain);
+  await delay(800);
+
+  // Handle password — re-query page fresh
+  await handlePassword(page, user.password);
+  await delay(600);
+
+  // Submit
+  await submitUserForm(page);
+  await delay(3000);
+
+  // Verify creation by checking URL or success message
+  const currentUrl = page.url();
+  const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+  console.log('After submit URL:', currentUrl);
+  console.log('After submit text:', pageText.substring(0, 200));
 }
 
-// ── Select domain dropdown next to username ───────────────────────────────────
-// Google Admin new user page: [username] @ [domain dropdown]
-// The domain dropdown in Google Admin is a custom <div> that opens a listbox
+// ── Select domain from dropdown ───────────────────────────────────────────────
 async function selectDomain(page, domain) {
   sendStatus(`Selecting domain @${domain}...`, 'info');
 
-  // Strategy 1: native <select> with domain option
+  // Strategy 1: native <select>
   const viaSelect = await page.evaluate((domain) => {
     for (const sel of Array.from(document.querySelectorAll('select'))) {
       const match = Array.from(sel.options).find(o =>
@@ -150,76 +187,88 @@ async function selectDomain(page, domain) {
     }
     return false;
   }, domain);
-  if (viaSelect) { await delay(500); sendStatus(`✓ Domain @${domain} selected`, 'success'); return; }
+  if (viaSelect) { await delay(500); sendStatus(`✓ Domain @${domain} selected via <select>`, 'success'); return; }
 
-  // Strategy 2: dump all visible text on page to find the domain selector element
-  // Then click it and pick from dropdown list
-  const domainElementFound = await page.evaluate((domain) => {
-    // Find ALL clickable elements on the page
-    const clickable = Array.from(document.querySelectorAll(
-      '[role="button"], [role="combobox"], [role="listbox"], button, [tabindex]'
-    )).filter(el => el.offsetParent !== null);
+  // Strategy 2: find the domain text currently shown on the page (e.g. "@primarydomain.com")
+  // and click it to open the dropdown, then select the target domain
+  const domainClicked = await page.evaluate((targetDomain) => {
+    // Look for elements that contain "@" + some domain text
+    const allEls = Array.from(document.querySelectorAll('*'))
+      .filter(el =>
+        el.children.length === 0 &&          // leaf node
+        el.offsetParent !== null &&           // visible
+        el.textContent.trim().startsWith('@') // starts with @
+      );
 
-    // Find one that shows a domain-like text (contains a dot, short text)
-    for (const el of clickable) {
-      const text = el.textContent.trim();
-      if (text.includes('.') && text.length < 80 && !text.includes(' ') && text.split('.').length >= 2) {
-        el.click();
-        return { clicked: true, text };
-      }
+    if (allEls.length > 0) {
+      // Click the parent container (the dropdown trigger)
+      const trigger = allEls[0].closest('[role="button"]') ||
+                      allEls[0].closest('button') ||
+                      allEls[0].parentElement;
+      if (trigger) { trigger.click(); return { clicked: true, found: allEls[0].textContent.trim() }; }
+      allEls[0].click();
+      return { clicked: true, found: allEls[0].textContent.trim() };
+    }
+
+    // Also try: any element whose full text IS a domain (no spaces, has a dot)
+    const domainLike = Array.from(document.querySelectorAll('[role="button"], span, div, button'))
+      .filter(el => {
+        const t = el.textContent.trim();
+        return el.offsetParent !== null && /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(t);
+      });
+
+    if (domainLike.length > 0) {
+      domainLike[0].click();
+      return { clicked: true, found: domainLike[0].textContent.trim() };
     }
     return { clicked: false };
   }, domain);
 
-  if (domainElementFound.clicked) {
-    sendStatus(`Clicked domain element showing: ${domainElementFound.text}`, 'info');
+  if (domainClicked.clicked) {
+    sendStatus(`Opened domain dropdown (was showing: ${domainClicked.found})`, 'info');
     await delay(1000);
 
-    // Now pick the matching domain from the opened dropdown
+    // Now pick the target domain from opened list
     const picked = await page.evaluate((domain) => {
       const options = Array.from(document.querySelectorAll(
-        '[role="option"], [role="menuitem"], [role="listitem"], li, .dropdown-item'
+        '[role="option"], [role="menuitem"], li, .goog-menuitem, .md-option'
       )).filter(el => el.offsetParent !== null);
+
+      console.log('Dropdown options found:', options.map(o => o.textContent.trim()));
+
       const match = options.find(o => o.textContent.toLowerCase().includes(domain.toLowerCase()));
-      if (match) { match.click(); return true; }
-      // If only one option visible, click it anyway
-      if (options.length === 1) { options[0].click(); return true; }
-      return false;
+      if (match) { match.click(); return { ok: true, text: match.textContent.trim() }; }
+
+      // If target domain not found but options exist, log them
+      return { ok: false, options: options.map(o => o.textContent.trim()).slice(0, 10) };
     }, domain);
 
-    if (picked) { await delay(500); sendStatus(`✓ Domain @${domain} selected`, 'success'); return; }
+    if (picked.ok) {
+      await delay(500);
+      sendStatus(`✓ Domain @${domain} selected`, 'success');
+      return;
+    } else {
+      sendStatus(`Domain dropdown opened but @${domain} not found. Options: ${JSON.stringify(picked.options)}`, 'warn');
+    }
   }
 
-  // Strategy 3: screenshot the page HTML to debug — log what's near the username field
-  const debugInfo = await page.evaluate(() => {
-    const usernameInput = document.querySelector('input[name="username"]') ||
-      document.querySelector('input[aria-label*="username" i]');
-    if (!usernameInput) return 'No username input found';
-    const parent = usernameInput.closest('form') || usernameInput.parentElement?.parentElement?.parentElement;
-    return parent ? parent.innerHTML.substring(0, 2000) : 'No parent found';
-  });
-  console.log('DEBUG - HTML near username field:', debugInfo.substring(0, 500));
-
-  // Strategy 4: try clicking any element containing the current primary domain text
-  // then selecting our target domain
+  // Strategy 3: maybe the domain is shown differently — try XPath
   try {
-    const allElements = await page.$$('[role="option"], option, li');
-    for (const el of allElements) {
-      const text = await page.evaluate(e => e.textContent.trim(), el);
-      if (text.toLowerCase().includes(domain.toLowerCase())) {
-        await el.click();
-        await delay(500);
-        sendStatus(`✓ Domain @${domain} selected via direct option click`, 'success');
-        return;
-      }
+    const handle = await page.$x(`//*[contains(text(),'${domain}')]`);
+    if (handle.length > 0) {
+      await handle[0].click();
+      await delay(500);
+      sendStatus(`✓ Domain @${domain} clicked directly`, 'success');
+      return;
     }
   } catch (e) {}
 
-  sendStatus(`⚠ Domain @${domain} could not be selected — will proceed but user may land on wrong domain`, 'warn');
+  sendStatus(`⚠ Could not select @${domain} — domain dropdown may need manual inspection`, 'warn');
 }
 
-// ── Handle password ───────────────────────────────────────────────────────────
+// ── Handle password field ─────────────────────────────────────────────────────
 async function handlePassword(page, password) {
+  // First try direct password input
   const pwdSels = ['input[type="password"]', 'input[name="password"]', 'input[aria-label*="password" i]'];
   for (const sel of pwdSels) {
     try {
@@ -231,14 +280,16 @@ async function handlePassword(page, password) {
       }
     } catch (e) {}
   }
-  for (const txt of ['Set password', 'Create password', 'Enter password']) {
+
+  // Click "Set password" / "Create password" button first
+  for (const txt of ['Set password', 'Create password', 'Enter password', 'Auto-generate']) {
     try {
       const btns = await page.$x(`//button[contains(., '${txt}')] | //span[contains(., '${txt}')]`);
       if (btns.length > 0) {
-        await btns[0].click(); await delay(1000);
+        await btns[0].click(); await delay(1200);
         for (const sel of pwdSels) {
           try {
-            await page.waitForSelector(sel, { visible: true, timeout: 3000 });
+            await page.waitForSelector(sel, { visible: true, timeout: 4000 });
             await page.click(sel, { clickCount: 3 });
             await page.type(sel, password, { delay: 50 });
             return;
@@ -251,39 +302,29 @@ async function handlePassword(page, password) {
 
 // ── Submit user form ──────────────────────────────────────────────────────────
 async function submitUserForm(page) {
-  for (const txt of ['Add new user', 'Add user', 'Create', 'Save']) {
+  for (const txt of ['Add new user', 'Add user', 'Create user', 'Create', 'Save']) {
     try {
       const btns = await page.$x(`//button[contains(., '${txt}')]`);
       if (btns.length > 0) { await btns[0].click(); await delay(3000); return; }
     } catch (e) {}
   }
-  try { const btn = await page.$('button[type="submit"]'); if (btn) await btn.click(); } catch (e) {}
+  // Fallback: submit button
+  try {
+    const btn = await page.$('button[type="submit"]');
+    if (btn) { await btn.click(); await delay(3000); }
+  } catch (e) {}
 }
 
 // ── Smartlead login ───────────────────────────────────────────────────────────
-// Correct URL is /login not /auth/sign-in
 async function loginSmartlead(page, email, password) {
   sendStatus('Logging in to Smartlead...', 'info');
-
-  // Try both known URLs
-  const loginUrls = [
-    'https://app.smartlead.ai/login',
-    'https://app.smartlead.ai/auth/login',
-    'https://app.smartlead.ai/auth/sign-in',
-  ];
-
-  for (const loginUrl of loginUrls) {
+  for (const loginUrl of ['https://app.smartlead.ai/login', 'https://app.smartlead.ai/auth/sign-in']) {
     try {
       await page.goto(loginUrl, { waitUntil: 'networkidle2', timeout: 20000 });
       await delay(2000);
-
-      // Check if login form is present
-      const hasForm = await page.$('input[type="email"], input[name="email"], input[placeholder*="email" i]');
+      const hasForm = await page.$('input[type="email"], input[name="email"]');
       if (!hasForm) continue;
 
-      sendStatus(`Found login form at ${loginUrl}`, 'info');
-
-      // Fill email
       for (const sel of ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]']) {
         try {
           await page.waitForSelector(sel, { visible: true, timeout: 3000 });
@@ -291,9 +332,7 @@ async function loginSmartlead(page, email, password) {
           await page.type(sel, email, { delay: 60 }); break;
         } catch (e) {}
       }
-      await delay(500);
-
-      // Fill password
+      await delay(400);
       for (const sel of ['input[type="password"]', 'input[name="password"]']) {
         try {
           await page.waitForSelector(sel, { visible: true, timeout: 3000 });
@@ -301,11 +340,11 @@ async function loginSmartlead(page, email, password) {
           await page.type(sel, password, { delay: 60 }); break;
         } catch (e) {}
       }
-      await delay(500);
+      await delay(400);
 
-      // Click login button or press Enter
+      // Click login button
       let submitted = false;
-      for (const txt of ['Log in', 'Login', 'Sign in', 'Sign In']) {
+      for (const txt of ['Log in', 'Login', 'Sign in', 'Sign In', 'Continue']) {
         try {
           const btns = await page.$x(`//button[contains(., '${txt}')]`);
           if (btns.length > 0) { await btns[0].click(); submitted = true; break; }
@@ -316,28 +355,16 @@ async function loginSmartlead(page, email, password) {
       await delay(4000);
       try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }); } catch (e) {}
 
-      const currentUrl = page.url();
-      if (currentUrl.includes('app.smartlead.ai') && !currentUrl.includes('login') && !currentUrl.includes('sign-in')) {
-        sendStatus('✓ Logged in to Smartlead', 'success');
-        return;
+      const url = page.url();
+      if (url.includes('app.smartlead.ai') && !url.includes('login') && !url.includes('sign-in')) {
+        sendStatus('✓ Logged in to Smartlead', 'success'); return;
       }
-
-      // Check for error messages on page
-      const pageText = await page.evaluate(() => document.body.innerText);
-      if (pageText.includes('Invalid') || pageText.includes('incorrect') || pageText.includes('wrong')) {
-        throw new Error('Smartlead says credentials are invalid. Double-check email and password.');
-      }
-
-    } catch (e) {
-      if (e.message.includes('credentials')) throw e;
-      console.log(`Login failed at ${loginUrl}:`, e.message);
-    }
+    } catch (e) { console.log('Smartlead login attempt failed:', e.message); }
   }
-
-  throw new Error('Smartlead login failed on all known URLs. Check credentials and try again.');
+  throw new Error('Smartlead login failed. Please verify your Smartlead email and password are correct.');
 }
 
-// ── Connect account to Smartlead via OAuth ────────────────────────────────────
+// ── Connect account to Smartlead ──────────────────────────────────────────────
 async function connectAccountToSmartlead(browser, page, email, password) {
   await page.goto('https://app.smartlead.ai/app/email-accounts', { waitUntil: 'networkidle2', timeout: 30000 });
   await delay(2000);
@@ -349,30 +376,22 @@ async function connectAccountToSmartlead(browser, page, email, password) {
     } catch (e) {}
   }
   await delay(1000);
-
-  for (const txt of ['Google', 'Gmail', 'Connect with Google', 'Sign in with Google', 'Google Workspace']) {
+  for (const txt of ['Google', 'Gmail', 'Connect with Google', 'Google Workspace']) {
     try {
-      const els = await page.$x(
-        `//button[contains(., '${txt}')] | //div[@role='button'][contains(., '${txt}')] | //a[contains(., '${txt}')]`
-      );
+      const els = await page.$x(`//button[contains(., '${txt}')] | //div[@role='button'][contains(., '${txt}')] | //a[contains(., '${txt}')]`);
       if (els.length > 0) { await els[0].click(); await delay(2000); break; }
     } catch (e) {}
   }
 
-  // Wait for OAuth popup
   const popup = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('OAuth popup did not open within 15s')), 15000);
-    browser.once('targetcreated', async target => {
-      clearTimeout(timer);
-      resolve(await target.page());
-    });
+    browser.once('targetcreated', async target => { clearTimeout(timer); resolve(await target.page()); });
   });
 
   await popup.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
   await delay(2000);
 
-  // Fill email in OAuth popup
-  for (const sel of ['input[type="email"]', '#identifierId', 'input[name="identifier"]']) {
+  for (const sel of ['input[type="email"]', '#identifierId']) {
     try {
       await popup.waitForSelector(sel, { visible: true, timeout: 5000 });
       await popup.click(sel, { clickCount: 3 });
@@ -381,8 +400,6 @@ async function connectAccountToSmartlead(browser, page, email, password) {
       await delay(2500); break;
     } catch (e) {}
   }
-
-  // Fill password in OAuth popup
   for (const sel of ['input[type="password"]', 'input[name="Passwd"]']) {
     try {
       await popup.waitForSelector(sel, { visible: true, timeout: 6000 });
@@ -392,30 +409,23 @@ async function connectAccountToSmartlead(browser, page, email, password) {
       await delay(3000); break;
     } catch (e) {}
   }
-
-  // Click Allow
   try {
-    const allowBtns = await popup.$x('//button[contains(., "Allow")] | //button[contains(., "Continue")]');
-    if (allowBtns.length > 0) { await allowBtns[0].click(); await delay(2000); }
+    const allow = await popup.$x('//button[contains(., "Allow")] | //button[contains(., "Continue")]');
+    if (allow.length > 0) { await allow[0].click(); await delay(2000); }
   } catch (e) {}
-
   try { await popup.close(); } catch (e) {}
 }
 
 // ── /run ─────────────────────────────────────────────────────────────────────
 app.post('/run', async (req, res) => {
   const { users, googleEmail, googlePassword, smartleadEmail, smartleadPassword } = req.body;
-
   if (!users?.length)     return res.status(400).json({ error: 'No users provided' });
   if (!googleEmail)       return res.status(400).json({ error: 'Google Admin email required' });
   if (!googlePassword)    return res.status(400).json({ error: 'Google Admin password required' });
   if (!smartleadEmail)    return res.status(400).json({ error: 'Smartlead email required' });
   if (!smartleadPassword) return res.status(400).json({ error: 'Smartlead password required' });
-
   const missingDomain = users.find(u => !u.domain?.trim());
-  if (missingDomain) return res.status(400).json({
-    error: `User "${missingDomain.username}" has no domain. Fix your CSV.`
-  });
+  if (missingDomain) return res.status(400).json({ error: `User "${missingDomain.username}" has no domain.` });
 
   res.json({ ok: true, total: users.length });
 
@@ -429,7 +439,7 @@ app.post('/run', async (req, res) => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       });
 
-      // Phase 1: Create users in Google Admin
+      // Phase 1: Create users
       sendStatus('Phase 1: Creating users in Google Admin...', 'info', 2);
       await loginGoogleAdmin(page, googleEmail, googlePassword);
 
@@ -439,17 +449,11 @@ app.post('/run', async (req, res) => {
         const pct = Math.round(2 + (i / users.length) * 48);
         sendStatus(`[${i + 1}/${users.length}] Creating: ${fullEmail}`, 'info', pct);
         try {
-          await page.goto('https://admin.google.com/ac/users/new', { waitUntil: 'networkidle2', timeout: 30000 });
-          await delay(2500);
-          await fillField(page, 'firstName', user.firstName);   await delay(400);
-          await fillField(page, 'lastName', user.lastName);     await delay(400);
-          await fillField(page, 'username', user.username);     await delay(800);
-          await selectDomain(page, user.domain);                await delay(500);
-          await handlePassword(page, user.password);            await delay(400);
-          await submitUserForm(page);                           await delay(3000);
+          await createGoogleUser(page, user);
           sendStatus(`✓ Created: ${fullEmail}`, 'success', pct + 1);
         } catch (e) {
-          sendStatus(`✗ Failed to create ${fullEmail}: ${e.message}`, 'error', pct);
+          sendStatus(`✗ Failed: ${fullEmail} — ${e.message}`, 'error', pct);
+          console.error('Create user error:', e);
         }
       }
 
@@ -472,10 +476,11 @@ app.post('/run', async (req, res) => {
         }
       }
 
-      sendStatus('🎉 All done! All users created and connected to Smartlead.', 'success', 100);
+      sendStatus('🎉 All done!', 'success', 100);
 
     } catch (e) {
       sendStatus(`❌ Fatal error: ${e.message}`, 'error');
+      console.error('Fatal error:', e);
     } finally {
       if (browser) await browser.close().catch(() => {});
     }
