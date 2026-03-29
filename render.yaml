@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: automator-backend
+    runtime: node
+    buildCommand: apt-get update && apt-get install -y chromium && npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
