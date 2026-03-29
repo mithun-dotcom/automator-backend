@@ -30,331 +30,464 @@ app.get('/', (req, res) => res.json({ status: 'MithMill Automator backend runnin
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-// ── Find system Chromium path on Render (Linux) ───────────────────────────────
-function getChromiumPath() {
+// ── Launch browser ────────────────────────────────────────────────────────────
+async function launchBrowser() {
+  const fs = require('fs');
   const paths = [
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
-    '/snap/bin/chromium',
   ];
-  const fs = require('fs');
+  let executablePath = null;
   for (const p of paths) {
-    try { fs.accessSync(p); return p; } catch (e) {}
+    try { fs.accessSync(p); executablePath = p; break; } catch (e) {}
   }
-  return null;
-}
+  if (!executablePath) throw new Error('No Chromium found. Check build command includes: apt-get install -y chromium');
 
-// ── Launch low-memory browser ─────────────────────────────────────────────────
-async function launchBrowser() {
-  const executablePath = getChromiumPath();
-  if (!executablePath) throw new Error('No system Chromium found. Install chromium on the server.');
-
-  console.log('Using Chromium at:', executablePath);
-
+  console.log('Using Chromium:', executablePath);
   return await puppeteer.launch({
     executablePath,
     headless: 'new',
-    // Small viewport saves memory
-    defaultViewport: { width: 1024, height: 768 },
+    defaultViewport: { width: 1280, height: 800 },
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--disable-blink-features=AutomationControlled',
       '--single-process',
       '--no-zygote',
-      // Memory saving flags
       '--disable-extensions',
-      '--disable-plugins',
-      '--disable-images',           // Don't load images — saves memory & bandwidth
-      '--disable-javascript-harmony-shipping',
-      '--memory-pressure-off',
-      '--max_old_space_size=256',   // Limit V8 heap to 256MB
-      '--js-flags=--max-old-space-size=256',
+      '--disable-blink-features=AutomationControlled',
     ],
   });
 }
 
-// ── Open a new page with resource blocking ────────────────────────────────────
+// ── Open new page ─────────────────────────────────────────────────────────────
 async function newPage(browser) {
   const page = await browser.newPage();
-
-  // Block images, fonts, media to save memory and speed up loading
-  await page.setRequestInterception(true);
-  page.on('request', req => {
-    const type = req.resourceType();
-    if (['image', 'font', 'media', 'stylesheet'].includes(type)) {
-      req.abort();
-    } else {
-      req.continue();
-    }
-  });
-
-  // Remove webdriver flag
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
-
+  // Block images and fonts to save memory
+  await page.setRequestInterception(true);
+  page.on('request', req => {
+    if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
+    else req.continue();
+  });
   return page;
 }
 
-// ── Wait for form inputs to appear ───────────────────────────────────────────
-async function waitForInputs(page, minCount = 2, maxWait = 20000) {
+// ── Click element by visible text ─────────────────────────────────────────────
+async function clickByText(page, text, timeout = 10000) {
   const start = Date.now();
-  while (Date.now() - start < maxWait) {
-    const count = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('input'))
-        .filter(i => i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'radio')
-        .length
-    );
-    if (count >= minCount) { console.log(`Form ready: ${count} inputs`); return count; }
-    await delay(1000);
+  while (Date.now() - start < timeout) {
+    const found = await page.evaluate((text) => {
+      const els = Array.from(document.querySelectorAll('a, button, [role="button"], [role="menuitem"], li, span, div'))
+        .filter(el => el.offsetParent !== null && el.textContent.trim() === text);
+      if (els.length > 0) { els[0].click(); return true; }
+      // partial match fallback
+      const partial = Array.from(document.querySelectorAll('a, button, [role="button"], span, div'))
+        .filter(el => el.offsetParent !== null && el.textContent.trim().includes(text) && el.textContent.trim().length < text.length + 20);
+      if (partial.length > 0) { partial[0].click(); return true; }
+      return false;
+    }, text);
+    if (found) { await delay(800); return true; }
+    await delay(500);
   }
-  throw new Error(`Form did not render in ${maxWait / 1000}s`);
+  return false;
 }
 
-// ── Fill nth visible text input ───────────────────────────────────────────────
-async function fillNthInput(page, n, value, label) {
-  const found = await page.evaluate((n) => {
-    const inputs = Array.from(document.querySelectorAll('input'))
-      .filter(i => i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'checkbox' && i.type !== 'radio' && i.type !== 'password');
-    const el = inputs[n];
-    if (!el) return null;
-    el.focus(); el.click();
-    return { id: el.id, name: el.name, placeholder: el.placeholder };
-  }, n);
+// ── Type into a focused/clicked input ────────────────────────────────────────
+async function typeIntoSelector(page, selector, value, timeout = 8000) {
+  await page.waitForSelector(selector, { visible: true, timeout });
+  await page.click(selector, { clickCount: 3 });
+  await delay(100);
+  await page.keyboard.press('Backspace');
+  await delay(50);
+  await page.type(selector, value, { delay: 70 });
+}
 
-  if (!found) { console.log(`✗ ${label} (index ${n}): not found`); return false; }
+// ── Step 1: Login to Google Admin ─────────────────────────────────────────────
+async function loginGoogleAdmin(page, email, password) {
+  sendStatus('Navigating to Google Admin...', 'info');
+  await page.goto('https://admin.google.com', { waitUntil: 'networkidle2', timeout: 30000 });
+  await delay(2000);
+
+  // Fill email
+  for (const sel of ['input[type="email"]', '#identifierId', 'input[name="identifier"]']) {
+    try {
+      await typeIntoSelector(page, sel, email, 5000);
+      await page.keyboard.press('Enter');
+      await delay(3000);
+      break;
+    } catch (e) {}
+  }
+
+  // Fill password
+  for (const sel of ['input[type="password"]', 'input[name="Passwd"]', 'input[name="password"]']) {
+    try {
+      await typeIntoSelector(page, sel, password, 6000);
+      await page.keyboard.press('Enter');
+      await delay(4000);
+      break;
+    } catch (e) {}
+  }
+
+  try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }); } catch (e) {}
+
+  const url = page.url();
+  console.log('After login URL:', url);
+  if (url.includes('admin.google.com') && !url.includes('signin') && !url.includes('challenge')) {
+    sendStatus('✓ Logged in to Google Admin', 'success');
+    return;
+  }
+  const bodyText = await page.evaluate(() => document.body.innerText);
+  if (bodyText.includes('2-Step') || bodyText.includes('verification') || bodyText.includes('Verify'))
+    throw new Error('2-Step Verification required — please disable 2FA on this Google Admin account first.');
+  throw new Error('Google Admin login failed — check email and password.');
+}
+
+// ── Step 2: Navigate to Users and click Add new user ─────────────────────────
+async function goToAddUser(page) {
+  sendStatus('Opening Add New User form...', 'info');
+
+  // Go directly to the users page with the journey parameter that opens the add user panel
+  await page.goto('https://admin.google.com/ac/users?journey=218', { waitUntil: 'networkidle2', timeout: 30000 });
+  await delay(3000);
+
+  // Wait for the form to appear — look for First name input
+  let formReady = false;
+  for (let i = 0; i < 15; i++) {
+    const hasForm = await page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll('input'))
+        .filter(inp => inp.offsetParent !== null && inp.type !== 'hidden' && inp.type !== 'checkbox' && inp.type !== 'radio');
+      return inputs.length >= 1;
+    });
+    if (hasForm) { formReady = true; break; }
+    await delay(1000);
+  }
+
+  if (!formReady) {
+    // Try clicking "Add new user" button if form didn't open automatically
+    sendStatus('Clicking Add new user button...', 'info');
+    const clicked = await clickByText(page, 'Add new user');
+    if (!clicked) await clickByText(page, 'Add user');
+    await delay(2000);
+  }
+
+  console.log('Add user form URL:', page.url());
+  sendStatus('✓ Add New User form ready', 'success');
+}
+
+// ── Step 3: Fill First Name, Last Name, Username, Domain ─────────────────────
+async function fillUserInfo(page, user) {
+  // Log all current inputs for debugging
+  const inputInfo = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('input'))
+      .filter(i => i.offsetParent !== null)
+      .map(i => ({ type: i.type, name: i.name, id: i.id, placeholder: i.placeholder, ariaLabel: i.getAttribute('aria-label') }))
+  );
+  console.log('Form inputs:', JSON.stringify(inputInfo));
+
+  // Fill First Name — index 0
+  await fillInputByIndex(page, 0, user.firstName, 'First name');
+  await delay(400);
+
+  // Fill Last Name — index 1
+  await fillInputByIndex(page, 1, user.lastName, 'Last name');
+  await delay(400);
+
+  // Fill Username (Primary email) — index 2
+  await fillInputByIndex(page, 2, user.username, 'Username');
+  await delay(600);
+
+  // Select domain from dropdown next to @
+  await selectDomain(page, user.domain);
+  await delay(500);
+}
+
+// ── Fill input by its position among visible text inputs ──────────────────────
+async function fillInputByIndex(page, index, value, label) {
+  const clicked = await page.evaluate((index) => {
+    const inputs = Array.from(document.querySelectorAll('input'))
+      .filter(i =>
+        i.offsetParent !== null &&
+        i.type !== 'hidden' &&
+        i.type !== 'checkbox' &&
+        i.type !== 'radio' &&
+        i.type !== 'password'
+      );
+    if (!inputs[index]) return { ok: false, total: inputs.length };
+    inputs[index].focus();
+    inputs[index].click();
+    return { ok: true, id: inputs[index].id, name: inputs[index].name, placeholder: inputs[index].placeholder };
+  }, index);
+
+  console.log(`fillInputByIndex(${index}, ${label}):`, JSON.stringify(clicked));
+  if (!clicked.ok) { sendStatus(`⚠ ${label} field not found`, 'warn'); return false; }
 
   await delay(150);
   await page.keyboard.down('Control');
   await page.keyboard.press('a');
   await page.keyboard.up('Control');
   await delay(80);
+  await page.keyboard.press('Backspace');
   await page.keyboard.type(value, { delay: 70 });
-  console.log(`✓ ${label}: "${value}" → ${JSON.stringify(found)}`);
   return true;
 }
 
-// ── Select domain dropdown ────────────────────────────────────────────────────
+// ── Select domain from the <select> dropdown next to @ ───────────────────────
 async function selectDomain(page, domain) {
-  sendStatus(`Selecting @${domain}...`, 'info');
+  sendStatus(`Selecting domain @${domain}...`, 'info');
 
-  // Try native <select> first
+  // Log all selects
+  const selectInfo = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('select'))
+      .map(s => ({ id: s.id, name: s.name, visible: !!s.offsetParent, options: Array.from(s.options).map(o => o.text) }))
+  );
+  console.log('All selects:', JSON.stringify(selectInfo));
+
+  // Method 1: native <select> with matching option
   const r1 = await page.evaluate((domain) => {
     const selects = Array.from(document.querySelectorAll('select')).filter(s => s.offsetParent !== null);
-    for (const sel of selects) {
-      const match = Array.from(sel.options).find(o =>
+    for (const s of selects) {
+      const match = Array.from(s.options).find(o =>
         o.text.toLowerCase().includes(domain.toLowerCase()) ||
         o.value.toLowerCase().includes(domain.toLowerCase())
       );
       if (match) {
-        sel.value = match.value;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        return { ok: true, text: match.text };
+        s.value = match.value;
+        s.dispatchEvent(new Event('change', { bubbles: true }));
+        s.dispatchEvent(new Event('input', { bubbles: true }));
+        return { ok: true, selected: match.text };
       }
     }
-    // Log all selects for debugging
-    return { ok: false, selects: selects.map(s => Array.from(s.options).map(o => o.text)) };
+    return { ok: false };
   }, domain);
 
-  console.log('Domain select result:', JSON.stringify(r1));
-  if (r1.ok) { await delay(400); sendStatus(`✓ @${domain} selected`, 'success'); return; }
+  if (r1.ok) {
+    await delay(400);
+    sendStatus(`✓ Domain @${domain} selected`, 'success');
+    return;
+  }
 
-  // Try page.select() via Puppeteer
+  // Method 2: Puppeteer page.select()
   try {
     const handles = await page.$$('select');
     for (const h of handles) {
       const vis = await page.evaluate(el => !!el.offsetParent, h);
       if (!vis) continue;
-      const opts = await page.evaluate(el =>
-        Array.from(el.options).map(o => ({ v: o.value, t: o.text })), h
-      );
-      const match = opts.find(o =>
-        o.t.toLowerCase().includes(domain.toLowerCase()) ||
-        o.v.toLowerCase().includes(domain.toLowerCase())
-      );
+      const opts = await page.evaluate(el => Array.from(el.options).map(o => ({ v: o.value, t: o.text })), h);
+      const match = opts.find(o => o.t.toLowerCase().includes(domain.toLowerCase()) || o.v.toLowerCase().includes(domain.toLowerCase()));
       if (match) {
         await page.select('select', match.v);
         await delay(400);
-        sendStatus(`✓ @${domain} selected via page.select()`, 'success');
+        sendStatus(`✓ Domain @${domain} selected`, 'success');
         return;
       }
     }
   } catch (e) { console.log('page.select error:', e.message); }
 
-  // Try clicking a custom dropdown element showing the domain
+  // Method 3: click the domain element currently showing (custom dropdown)
   const r3 = await page.evaluate((domain) => {
+    // Find visible element whose text is a domain pattern
     const re = /^@?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    const el = Array.from(document.querySelectorAll('*')).find(e =>
-      e.offsetParent !== null && e.children.length <= 2 && re.test(e.textContent.trim())
-    );
-    if (el) { el.click(); return { clicked: true, text: el.textContent.trim() }; }
+    const candidates = Array.from(document.querySelectorAll('*'))
+      .filter(el => el.offsetParent !== null && el.children.length <= 2 && re.test(el.textContent.trim()));
+    console.log('Domain candidates:', candidates.map(c => c.textContent.trim()));
+    if (candidates.length > 0) {
+      candidates[0].click();
+      return { clicked: true, text: candidates[0].textContent.trim() };
+    }
     return { clicked: false };
   }, domain);
 
   if (r3.clicked) {
+    console.log('Clicked domain element:', r3.text);
     await delay(800);
+    // Pick target domain from open list
     const picked = await page.evaluate((domain) => {
-      const opts = Array.from(document.querySelectorAll('li,[role="option"],[role="menuitem"]'))
+      const opts = Array.from(document.querySelectorAll('li, [role="option"], [role="menuitem"]'))
         .filter(el => el.offsetParent !== null && el.textContent.toLowerCase().includes(domain.toLowerCase()));
       if (opts.length > 0) { opts[0].click(); return opts[0].textContent.trim(); }
       return null;
     }, domain);
-    if (picked) { await delay(400); sendStatus(`✓ @${domain} selected`, 'success'); return; }
+    if (picked) { await delay(400); sendStatus(`✓ Domain @${domain} selected`, 'success'); return; }
   }
 
-  sendStatus(`⚠ Could not select @${domain}`, 'warn');
+  sendStatus(`⚠ Could not select @${domain} — check Render logs for 'All selects'`, 'warn');
 }
 
-// ── Click Create password radio and fill password ─────────────────────────────
-async function fillPassword(page, password) {
-  // Click "Create password" radio (second radio button)
-  const radioResult = await page.evaluate(() => {
-    const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
-      .filter(r => r.offsetParent !== null);
-    for (const r of radios) {
-      const txt = ((r.closest('label') || r.parentElement || {}).textContent || '').toLowerCase();
-      if (txt.includes('create')) { r.click(); return `clicked: ${txt.substring(0, 30)}`; }
-    }
-    if (radios.length >= 2) { radios[1].click(); return 'clicked 2nd radio (fallback)'; }
-    return `no radio (${radios.length} found)`;
-  });
-  console.log('Radio:', radioResult);
-  await delay(1200);
+// ── Step 4: Click "Manage user's password..." ─────────────────────────────────
+async function clickManagePassword(page) {
+  sendStatus('Opening password section...', 'info');
 
-  // Fill password field
+  const clicked = await page.evaluate(() => {
+    // Find the "Manage user's password..." link/button
+    const all = Array.from(document.querySelectorAll('a, button, [role="button"], div, span'))
+      .filter(el => el.offsetParent !== null);
+    const match = all.find(el => el.textContent.toLowerCase().includes('manage') && el.textContent.toLowerCase().includes('password'));
+    if (match) { match.click(); return { ok: true, text: match.textContent.trim().substring(0, 60) }; }
+    return { ok: false };
+  });
+
+  console.log('Manage password click:', JSON.stringify(clicked));
+  if (clicked.ok) {
+    await delay(1500);
+    sendStatus('✓ Password section opened', 'success');
+  } else {
+    // May already be open — check if radios are visible
+    const radiosVisible = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input[type="radio"]')).some(r => r.offsetParent !== null)
+    );
+    if (radiosVisible) {
+      sendStatus('Password section already open', 'info');
+    } else {
+      sendStatus('⚠ Could not find "Manage password" link', 'warn');
+    }
+  }
+}
+
+// ── Step 5: Select "Create password" radio ────────────────────────────────────
+async function selectCreatePassword(page) {
+  sendStatus('Selecting "Create password"...', 'info');
+
+  // Wait for radios to appear
+  let radiosFound = false;
+  for (let i = 0; i < 8; i++) {
+    const count = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input[type="radio"]')).filter(r => r.offsetParent !== null).length
+    );
+    if (count > 0) { radiosFound = true; break; }
+    await delay(500);
+  }
+
+  const result = await page.evaluate(() => {
+    const radios = Array.from(document.querySelectorAll('input[type="radio"]')).filter(r => r.offsetParent !== null);
+    console.log('Radios:', radios.length, radios.map(r => {
+      const lbl = r.closest('label') || r.parentElement;
+      return lbl ? lbl.textContent.trim().substring(0, 50) : r.id;
+    }));
+    // Find "Create password" radio
+    for (const r of radios) {
+      const lbl = (r.closest('label') || r.parentElement || {}).textContent || '';
+      if (lbl.toLowerCase().includes('create')) {
+        r.click();
+        return { ok: true, label: lbl.trim().substring(0, 50) };
+      }
+    }
+    // Fallback: second radio is "Create password"
+    if (radios.length >= 2) {
+      radios[1].click();
+      return { ok: true, label: 'second radio (fallback)' };
+    }
+    return { ok: false, count: radios.length };
+  });
+
+  console.log('Create password radio:', JSON.stringify(result));
+  if (result.ok) {
+    await delay(1200); // wait for password field to animate in
+    sendStatus('✓ "Create password" selected', 'success');
+  } else {
+    sendStatus('⚠ Could not find password radio buttons', 'warn');
+  }
+}
+
+// ── Step 6: Fill password + uncheck "ask to change" ──────────────────────────
+async function fillPasswordAndUncheck(page, password) {
+  // Wait for password input to appear
   try {
-    await page.waitForSelector('input[type="password"]', { visible: true, timeout: 5000 });
+    await page.waitForSelector('input[type="password"]', { visible: true, timeout: 6000 });
     await page.click('input[type="password"]', { clickCount: 3 });
     await delay(100);
     await page.type('input[type="password"]', password, { delay: 70 });
-    console.log('✓ Password filled');
+    sendStatus('✓ Password filled', 'success');
   } catch (e) {
-    console.log('Password field not found after radio click:', e.message);
+    sendStatus('⚠ Password field not found — ' + e.message, 'warn');
+    console.log('Password error:', e.message);
   }
 
-  // Uncheck "Ask user to change password"
-  await page.evaluate(() => {
-    const cbs = Array.from(document.querySelectorAll('input[type="checkbox"]'))
-      .filter(c => c.offsetParent !== null);
-    for (const cb of cbs) {
-      const txt = ((cb.closest('label') || cb.parentElement || {}).textContent || '').toLowerCase();
-      if ((txt.includes('change') || txt.includes('reset')) && cb.checked) {
-        cb.click();
-        console.log('Unchecked change-password checkbox');
-      }
-    }
-  });
-}
-
-// ── Submit form ───────────────────────────────────────────────────────────────
-async function submitForm(page) {
-  const result = await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
-      .filter(b => b.offsetParent !== null);
-    console.log('Buttons:', btns.map(b => b.textContent.trim().substring(0, 30)));
-    for (const b of btns) {
-      const t = b.textContent.trim().toUpperCase();
-      if (t.includes('ADD') || t.includes('SAVE') || t.includes('CREATE')) {
-        if (!t.includes('CANCEL')) { b.click(); return `clicked: ${t}`; }
-      }
-    }
-    // Last non-cancel button
-    const nc = btns.filter(b => !b.textContent.trim().toUpperCase().includes('CANCEL'));
-    if (nc.length > 0) { nc[nc.length - 1].click(); return `last button: ${nc[nc.length - 1].textContent.trim()}`; }
-    return 'no button found';
-  });
-  console.log('Submit:', result);
-}
-
-// ── Google Admin login ────────────────────────────────────────────────────────
-async function loginGoogleAdmin(page, email, password) {
-  sendStatus('Logging in to Google Admin...', 'info');
-  await page.goto('https://admin.google.com', { waitUntil: 'networkidle2', timeout: 30000 });
-  await delay(2000);
-
-  for (const sel of ['input[type="email"]', '#identifierId']) {
-    try {
-      await page.waitForSelector(sel, { visible: true, timeout: 5000 });
-      await page.click(sel, { clickCount: 3 });
-      await page.type(sel, email, { delay: 80 });
-      await page.keyboard.press('Enter');
-      await delay(3000); break;
-    } catch (e) {}
-  }
-  for (const sel of ['input[type="password"]', 'input[name="Passwd"]']) {
-    try {
-      await page.waitForSelector(sel, { visible: true, timeout: 6000 });
-      await page.click(sel, { clickCount: 3 });
-      await page.type(sel, password, { delay: 80 });
-      await page.keyboard.press('Enter');
-      await delay(4000); break;
-    } catch (e) {}
-  }
-  try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }); } catch (e) {}
-
-  const url = page.url();
-  if (url.includes('admin.google.com') && !url.includes('signin')) {
-    sendStatus('✓ Logged in to Google Admin', 'success'); return;
-  }
-  const txt = await page.evaluate(() => document.body.innerText);
-  if (txt.includes('2-Step') || txt.includes('verification'))
-    throw new Error('2FA detected — disable it first.');
-  throw new Error('Google Admin login failed.');
-}
-
-// ── Create one user ───────────────────────────────────────────────────────────
-async function createGoogleUser(page, user) {
-  await page.goto('https://admin.google.com/ac/users/new', { waitUntil: 'networkidle2', timeout: 30000 });
-  await delay(2000);
-
-  // Scroll to trigger lazy render
-  await page.evaluate(() => { window.scrollTo(0, 300); });
-  await delay(500);
-  await page.evaluate(() => { window.scrollTo(0, 0); });
-
-  // Wait for form
-  await waitForInputs(page, 2, 20000);
-
-  // Debug dump
-  const dump = await page.evaluate(() => ({
-    inputs: Array.from(document.querySelectorAll('input'))
-      .filter(i => i.offsetParent !== null)
-      .map(i => ({ type: i.type, name: i.name, id: i.id, placeholder: i.placeholder, ariaLabel: i.getAttribute('aria-label') })),
-    selects: Array.from(document.querySelectorAll('select'))
-      .map(s => ({ id: s.id, visible: !!s.offsetParent, opts: Array.from(s.options).map(o => o.text) })),
-    buttons: Array.from(document.querySelectorAll('button,[role="button"]'))
-      .filter(b => b.offsetParent !== null)
-      .map(b => b.textContent.trim().substring(0, 30)),
-  }));
-  console.log('DUMP:', JSON.stringify(dump));
-
-  // Fill fields by index
-  await fillNthInput(page, 0, user.firstName, 'firstName');  await delay(350);
-  await fillNthInput(page, 1, user.lastName, 'lastName');    await delay(350);
-  await fillNthInput(page, 2, user.username, 'username');    await delay(600);
-
-  // Domain
-  await selectDomain(page, user.domain);
-  await delay(600);
-
-  // Scroll to password section
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await delay(800);
-
-  // Password
-  await fillPassword(page, user.password);
   await delay(400);
 
-  // Submit
-  await submitForm(page);
-  await delay(3500);
+  // Uncheck "Ask user to change their password when they sign in"
+  const cbResult = await page.evaluate(() => {
+    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'))
+      .filter(c => c.offsetParent !== null);
+    console.log('Checkboxes:', checkboxes.length, checkboxes.map(c => {
+      const lbl = c.closest('label') || c.parentElement;
+      return lbl ? lbl.textContent.trim().substring(0, 60) : c.id;
+    }));
+    for (const cb of checkboxes) {
+      const lbl = (cb.closest('label') || cb.parentElement || {}).textContent || '';
+      if (lbl.toLowerCase().includes('change') || lbl.toLowerCase().includes('ask')) {
+        const wasCheked = cb.checked;
+        if (cb.checked) cb.click();
+        return { unchecked: true, was: wasCheked, label: lbl.trim().substring(0, 60) };
+      }
+    }
+    return { unchecked: false, total: checkboxes.length };
+  });
+  console.log('Checkbox result:', JSON.stringify(cbResult));
+  if (cbResult.unchecked) sendStatus('✓ "Change password" checkbox unchecked', 'success');
+}
 
-  console.log('After submit:', page.url());
+// ── Step 7: Click ADD NEW USER ────────────────────────────────────────────────
+async function clickAddNewUser(page) {
+  sendStatus('Submitting form...', 'info');
+
+  const result = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter(b => b.offsetParent !== null);
+    console.log('All buttons:', buttons.map(b => b.textContent.trim().substring(0, 30)));
+
+    for (const b of buttons) {
+      const txt = b.textContent.trim().toUpperCase();
+      if (txt.includes('ADD') && txt.includes('USER')) { b.click(); return { clicked: true, text: txt }; }
+    }
+    for (const b of buttons) {
+      const txt = b.textContent.trim().toUpperCase();
+      if (txt === 'SAVE' || txt === 'CREATE') { b.click(); return { clicked: true, text: txt }; }
+    }
+    // Last non-cancel, non-cancel button
+    const viable = buttons.filter(b => {
+      const t = b.textContent.trim().toUpperCase();
+      return !t.includes('CANCEL') && !t.includes('CLOSE') && t.length > 0;
+    });
+    if (viable.length > 0) {
+      const last = viable[viable.length - 1];
+      last.click();
+      return { clicked: true, text: last.textContent.trim(), fallback: true };
+    }
+    return { clicked: false };
+  });
+
+  console.log('Submit result:', JSON.stringify(result));
+  await delay(4000);
+  console.log('After submit URL:', page.url());
+  if (result.clicked) sendStatus('✓ User form submitted', 'success');
+  else sendStatus('⚠ Could not find ADD NEW USER button', 'warn');
+}
+
+// ── Full create user flow ─────────────────────────────────────────────────────
+async function createGoogleUser(page, user) {
+  // Step: Go to Add User form
+  await goToAddUser(page);
+
+  // Step: Fill user info
+  await fillUserInfo(page, user);
+
+  // Step: Click Manage password
+  await clickManagePassword(page);
+
+  // Step: Select Create password
+  await selectCreatePassword(page);
+
+  // Step: Fill password + uncheck
+  await fillPasswordAndUncheck(page, user.password);
+
+  // Step: Submit
+  await clickAddNewUser(page);
 }
 
 // ── Smartlead login ───────────────────────────────────────────────────────────
@@ -365,23 +498,15 @@ async function loginSmartlead(page, email, password) {
 
   const url = page.url();
   if (url.includes('app.smartlead.ai') && !url.includes('login')) {
-    sendStatus('✓ Already logged in', 'success'); return;
+    sendStatus('✓ Already logged in to Smartlead', 'success'); return;
   }
 
   for (const sel of ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="mail" i]']) {
-    try {
-      await page.waitForSelector(sel, { visible: true, timeout: 4000 });
-      await page.click(sel, { clickCount: 3 });
-      await page.type(sel, email, { delay: 80 }); break;
-    } catch (e) {}
+    try { await typeIntoSelector(page, sel, email, 4000); break; } catch (e) {}
   }
   await delay(300);
   for (const sel of ['input[type="password"]', 'input[name="password"]']) {
-    try {
-      await page.waitForSelector(sel, { visible: true, timeout: 4000 });
-      await page.click(sel, { clickCount: 3 });
-      await page.type(sel, password, { delay: 80 }); break;
-    } catch (e) {}
+    try { await typeIntoSelector(page, sel, password, 4000); break; } catch (e) {}
   }
   await delay(300);
 
@@ -479,52 +604,47 @@ app.post('/run', async (req, res) => {
       sendStatus('Launching browser...', 'info', 0);
       browser = await launchBrowser();
 
-      // ── Phase 1: Create users ──────────────────────────────────────────────
+      // ── Phase 1: Create users in Google Admin ──────────────────────────────
       sendStatus('Phase 1: Creating users in Google Admin...', 'info', 2);
-      {
-        const page = await newPage(browser);
-        await loginGoogleAdmin(page, googleEmail, googlePassword);
+      const adminPage = await newPage(browser);
+      await loginGoogleAdmin(adminPage, googleEmail, googlePassword);
 
-        for (let i = 0; i < users.length; i++) {
-          const user = users[i];
-          const fullEmail = `${user.username}@${user.domain}`;
-          const pct = Math.round(2 + (i / users.length) * 48);
-          sendStatus(`[${i + 1}/${users.length}] Creating: ${fullEmail}`, 'info', pct);
-          try {
-            await createGoogleUser(page, user);
-            sendStatus(`✓ Created: ${fullEmail}`, 'success', pct + 1);
-          } catch (e) {
-            sendStatus(`✗ Failed: ${fullEmail} — ${e.message}`, 'error', pct);
-            console.error(e.stack);
-          }
-          // Force GC between users
-          if (global.gc) global.gc();
+      for (let i = 0; i < users.length; i++) {
+        const user = users[i];
+        const fullEmail = `${user.username}@${user.domain}`;
+        const pct = Math.round(2 + (i / users.length) * 48);
+        sendStatus(`[${i + 1}/${users.length}] Creating: ${fullEmail}`, 'info', pct);
+        try {
+          await createGoogleUser(adminPage, user);
+          sendStatus(`✓ Created: ${fullEmail}`, 'success', pct + 1);
+        } catch (e) {
+          sendStatus(`✗ Failed: ${fullEmail} — ${e.message}`, 'error', pct);
+          console.error(e.stack);
         }
-        await page.close();
+        if (global.gc) global.gc();
       }
+      await adminPage.close();
       sendStatus('Phase 1 complete.', 'success', 50);
 
       // ── Phase 2: Connect to Smartlead ──────────────────────────────────────
       sendStatus('Phase 2: Connecting to Smartlead...', 'info', 52);
-      {
-        const page = await newPage(browser);
-        await loginSmartlead(page, smartleadEmail, smartleadPassword);
+      const slPage = await newPage(browser);
+      await loginSmartlead(slPage, smartleadEmail, smartleadPassword);
 
-        for (let i = 0; i < users.length; i++) {
-          const user = users[i];
-          const fullEmail = `${user.username}@${user.domain}`;
-          const pct = 52 + Math.round((i / users.length) * 46);
-          sendStatus(`[${i + 1}/${users.length}] Connecting: ${fullEmail}`, 'info', pct);
-          try {
-            await connectAccountToSmartlead(browser, page, fullEmail, user.password);
-            sendStatus(`✓ Connected: ${fullEmail}`, 'success', pct + 1);
-          } catch (e) {
-            sendStatus(`✗ Failed: ${fullEmail} — ${e.message}`, 'error', pct);
-          }
-          if (global.gc) global.gc();
+      for (let i = 0; i < users.length; i++) {
+        const user = users[i];
+        const fullEmail = `${user.username}@${user.domain}`;
+        const pct = 52 + Math.round((i / users.length) * 46);
+        sendStatus(`[${i + 1}/${users.length}] Connecting: ${fullEmail}`, 'info', pct);
+        try {
+          await connectAccountToSmartlead(browser, slPage, fullEmail, user.password);
+          sendStatus(`✓ Connected: ${fullEmail}`, 'success', pct + 1);
+        } catch (e) {
+          sendStatus(`✗ Failed: ${fullEmail} — ${e.message}`, 'error', pct);
         }
-        await page.close();
+        if (global.gc) global.gc();
       }
+      await slPage.close();
 
       sendStatus('🎉 All done!', 'success', 100);
     } catch (e) {
@@ -532,10 +652,9 @@ app.post('/run', async (req, res) => {
       console.error('Fatal:', e.stack);
     } finally {
       if (browser) await browser.close().catch(() => {});
-      if (global.gc) global.gc();
     }
   })();
 });
 
 const PORT = process.env.PORT || 3456;
-app.listen(PORT, () => console.log(`\n✅ MithMill Automator backend running on port ${PORT}\n`));
+app.listen(PORT, () => console.log(`\n✅ MithMill Automator running on port ${PORT}\n`));
