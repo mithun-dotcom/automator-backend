@@ -1,0 +1,21 @@
+{
+  "name": "mithmill-client-portal",
+  "version": "1.0.0",
+  "description": "Mithmill client portal: mailboxes, orders, billing and renewal reminders",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.14",
+    "pg": "^8.12.0"
+  }
+}
