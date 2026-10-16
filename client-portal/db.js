@@ -12,13 +12,23 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+// DATABASE_SCHEMA keeps every portal table in its own Postgres schema, so the
+// portal can share a database with another app without touching its tables.
+const SCHEMA = process.env.DATABASE_SCHEMA || 'public';
+if (!/^[a-z_][a-z0-9_]*$/.test(SCHEMA)) {
+  console.error('DATABASE_SCHEMA must be a lowercase identifier');
+  process.exit(1);
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  options: `-c search_path=${SCHEMA}`,
 });
 
 async function migrate() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA}`);
   await pool.query(sql);
 }
 

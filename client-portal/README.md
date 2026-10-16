@@ -51,6 +51,7 @@ https://<your-app>.onrender.com/api/cron/billing?key=<CRON_SECRET>
 | `CRON_SECRET` | recommended | Protects `/api/cron/billing` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | optional | Email delivery. Without these, emails are skipped: notifications still appear in the portal, and invite links are shown to the admin to send by hand. |
 | `BILLING_TZ` | optional | Defaults to `Asia/Dhaka` |
+| `DATABASE_SCHEMA` | optional | Postgres schema for the portal's tables (default `public`). Set it to `client_portal` when you share a database with another app. |
 | `DATABASE_SSL` | optional | `true` when you connect through Render's *external* database URL |
 | `NODE_ENV` | optional | `production` makes the login cookie HTTPS-only |
 
