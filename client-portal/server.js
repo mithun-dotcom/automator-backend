@@ -893,7 +893,22 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 // ---------------------------------------------------------------- static + errors
 
-app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
+// The page is served with its CSS/JS URLs stamped with a per-deploy version,
+// and nothing is cached without re-checking, so a deploy reaches every
+// browser on the next page load instead of hiding behind a stale copy.
+const fs = require('fs');
+const ASSET_VERSION = crypto.createHash('sha1')
+  .update(['app.js', 'styles.css'].map((f) => fs.readFileSync(path.join(__dirname, 'public', f))).join(''))
+  .digest('hex').slice(0, 10);
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8')
+  .replace('href="styles.css"', `href="styles.css?v=${ASSET_VERSION}"`)
+  .replace('src="app.js"', `src="app.js?v=${ASSET_VERSION}"`);
+const sendIndex = (req, res) => res.set('Cache-Control', 'no-cache').type('html').send(INDEX_HTML);
+app.get(['/', '/index.html'], sendIndex);
+app.use(express.static(path.join(__dirname, 'public'), {
+  index: false,
+  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+}));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
