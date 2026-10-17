@@ -124,3 +124,18 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   sort_order  INT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS invoice_items_invoice ON invoice_items (invoice_id);
+
+-- Admin-editable settings (key/value). Missing keys fall back to defaults in code.
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- The onboarding CSV uploaded with an order, AES-256-GCM encrypted (it holds passwords).
+CREATE TABLE IF NOT EXISTS order_files (
+  order_id   INT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+  filename   TEXT NOT NULL,
+  row_count  INT NOT NULL,
+  data       BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

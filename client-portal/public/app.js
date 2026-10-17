@@ -80,7 +80,7 @@ function onSubmit(form, fn) {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = form.querySelector('[type=submit]');
-    const err = form.querySelector('.error');
+    const err = form.querySelector('.error:not(.csv-err)');
     if (err) err.textContent = '';
     if (btn) btn.disabled = true;
     try {
@@ -91,6 +91,44 @@ function onSubmit(form, fn) {
       if (btn && btn.isConnected) btn.disabled = false;
     }
   });
+}
+
+// Onboarding CSV: same rules as the server (onboarding.js), checked on upload
+// so the client sees problems straight away.
+function parseCsv(text) {
+  const rows = []; let row = []; let field = ''; let quoted = false;
+  const s = text.replace(/^﻿/, '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quoted) {
+      if (c === '"' && s[i + 1] === '"') { field += '"'; i++; } else if (c === '"') quoted = false; else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && s[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((v) => v.trim() !== ''));
+}
+
+function checkOnboardingCsv(text) {
+  const norm = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const all = parseCsv(text);
+  if (all.length < 2) throw new Error('The CSV has no rows under the header. Add one row per mailbox user.');
+  const header = all[0].map(norm);
+  const col = (name) => header.indexOf(norm(name));
+  const need = ['Domain name', 'Full name', 'Username'];
+  const missing = need.filter((n) => col(n) === -1);
+  if (missing.length) throw new Error(`The CSV is missing these columns: ${missing.join(', ')}. Please use the sample file.`);
+  const rows = all.slice(1).map((r) => ({ domain: (r[col('Domain name')] || '').trim(), name: (r[col('Full name')] || '').trim(), user: (r[col('Username')] || '').trim() }));
+  rows.forEach((r, i) => { if (!r.domain || !r.name || !r.user) throw new Error(`Row ${i + 2}: domain name, full name and username are required`); });
+  const domains = [...new Set(rows.map((r) => r.domain.toLowerCase()))];
+  return { users: rows.length, domains, usernames: rows.map((r) => `${r.name} - ${r.user}@${r.domain}`) };
+}
+
+function cancelNote() {
+  return `<div class="note note-info"><span class="note-icon">✉️</span><div><strong>Need to cancel?</strong> ${esc(state.dash.cancelNote)}</div></div>`;
 }
 
 // ------------------------------------------------------------------ state + router
@@ -257,6 +295,7 @@ function renderDashboard() {
         <div class="card-head"><h2>Your batches</h2></div>
         ${batchesTable(orders)}
       </div>
+      ${cancelNote()}
     </div>`);
 }
 
@@ -271,6 +310,7 @@ function renderBilling() {
     <div class="page-head"><div><h1>Billing</h1><p class="muted">Your monthly charges, renewals and invoices.</p></div></div>
     <div class="stack">
       ${paymentNote()}
+      ${cancelNote()}
       <div class="stats">
         <div class="card stat"><div class="label">Monthly billing</div><div class="value">${money(stats.monthlyBilling)}</div></div>
         <div class="card stat"><div class="label">Outstanding</div><div class="value">${money(stats.outstanding)}</div></div>
@@ -344,14 +384,28 @@ function renderOrder() {
         <h2>${esc(price.label)} details</h2>
         <p class="muted small" style="margin:4px 0 16px">${money(price.price_per_mailbox)} per mailbox / month</p>
 
+        <div class="csv-box">
+          <div class="csv-head">
+            <div><h3>Onboarding sheet (CSV)</h3>
+              <div class="muted small">One row per mailbox user: domain, full name, username, passwords, domain and sequencer access, profile picture link and domain forward.
+              ${state.dash.csvRequiredMin > 0 ? `<strong>Required for orders of ${state.dash.csvRequiredMin} or more mailboxes.</strong>` : ''}</div></div>
+            <a class="btn btn-sm" href="/api/onboarding-template.csv" download>⬇ Download sample CSV</a>
+          </div>
+          <div class="row">
+            <label class="btn btn-sm btn-primary file-btn">⬆ Upload filled CSV<input type="file" id="csv-file" accept=".csv,text/csv" hidden></label>
+            <span class="small" id="csv-status">${data.onboarding_filename ? `✅ ${esc(data.onboarding_filename)}: ${data.csv_users} users across ${data.csv_domains} domain${data.csv_domains === 1 ? '' : 's'} <button type="button" class="btn btn-sm btn-ghost" id="csv-remove">Remove</button>` : '<span class="muted">No file uploaded</span>'}</span>
+          </div>
+          <div class="error csv-err" id="csv-error" role="alert"></div>
+        </div>
+
         <div class="grid-2">
           <div class="field"><label for="quantity">Number of mailboxes</label><input id="quantity" name="quantity" type="number" min="1" max="10000" required value="${v('quantity')}"></div>
           <div class="field"><label>Estimated monthly cost</label><input id="est" disabled value="${money((Number(data.quantity) || 0) * price.price_per_mailbox)}"></div>
         </div>
 
         <div class="grid-2">
-          <div class="field"><label for="domains">Domain names</label><textarea id="domains" name="domains" required placeholder="acme-mail.com&#10;getacme.co">${v('domains')}</textarea><div class="hint">One domain per line.</div></div>
-          <div class="field"><label for="usernames">Usernames</label><textarea id="usernames" name="usernames" required placeholder="John Smith - john&#10;Jane Doe - jane.doe">${v('usernames')}</textarea><div class="hint">One per line: full name and the part before the @.</div></div>
+          <div class="field"><label for="domains">Domain names</label><textarea id="domains" name="domains" placeholder="acme-mail.com&#10;getacme.co">${v('domains')}</textarea><div class="hint">One domain per line.${data.onboarding_csv ? ' Filled in from your CSV.' : ''}</div></div>
+          <div class="field"><label for="usernames">Usernames</label><textarea id="usernames" name="usernames" placeholder="John Smith - john&#10;Jane Doe - jane.doe">${v('usernames')}</textarea><div class="hint">One per line: full name and the part before the @.</div></div>
         </div>
 
         <h3 class="section-title">Domain access</h3>
@@ -394,6 +448,7 @@ function renderOrder() {
           <div class="card-pad"><dl>
             ${row('Inbox type', price.label)}
             ${row('Mailboxes', String(data.quantity))}
+            ${row('Onboarding CSV', data.onboarding_filename ? `${data.onboarding_filename} (${data.csv_users} users)` : '')}
             ${row('Domains', lines(data.domains).join('\n'))}
             ${row('Usernames', lines(data.usernames).join('\n'))}
             ${row('Domain access', ACCESS_LABEL[data.domain_access_method])}
@@ -431,10 +486,48 @@ function renderOrder() {
       form.querySelector('#est').value = money((Number(e.target.value) || 0) * price.price_per_mailbox);
     };
     document.getElementById('back2').onclick = () => { save(); state.order.step = 1; renderOrder(); };
+    document.getElementById('csv-file').onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const errEl = document.getElementById('csv-error');
+      errEl.textContent = '';
+      try {
+        if (file.size > 4 * 1024 * 1024) throw new Error('The CSV is larger than 4 MB');
+        const text = await file.text();
+        const info = checkOnboardingCsv(text);
+        save();
+        Object.assign(data, {
+          onboarding_csv: text, onboarding_filename: file.name, csv_users: info.users, csv_domains: info.domains.length,
+          quantity: String(info.users),
+          domains: lines(data.domains).length ? data.domains : info.domains.join('\n'),
+          usernames: lines(data.usernames).length ? data.usernames : info.usernames.join('\n'),
+        });
+        renderOrder();
+        toast(`CSV loaded: ${info.users} users`);
+      } catch (ex) {
+        errEl.textContent = ex.message;
+        e.target.value = '';
+      }
+    };
+    const removeBtn = document.getElementById('csv-remove');
+    if (removeBtn) {
+      removeBtn.onclick = () => {
+        save();
+        ['onboarding_csv', 'onboarding_filename', 'csv_users', 'csv_domains'].forEach((k) => delete data[k]);
+        renderOrder();
+      };
+    }
     onSubmit(form, async (d) => {
       Object.assign(data, d);
-      if (!lines(d.domains).length) throw new Error('Add at least one domain');
-      if (!lines(d.usernames).length) throw new Error('Add at least one username');
+      const min = state.dash.csvRequiredMin;
+      if (min > 0 && Number(d.quantity) >= min && !data.onboarding_csv) {
+        throw new Error(`Orders of ${min} or more mailboxes need the onboarding CSV. Download the sample, fill it in and upload it above.`);
+      }
+      if (data.onboarding_csv && Number(d.quantity) !== data.csv_users) {
+        throw new Error(`Your CSV has ${data.csv_users} users but the order is for ${d.quantity} mailboxes. Make them match (one CSV row per mailbox).`);
+      }
+      if (!data.onboarding_csv && !lines(d.domains).length) throw new Error('Add at least one domain');
+      if (!data.onboarding_csv && !lines(d.usernames).length) throw new Error('Add at least one username');
       state.order.step = 3;
       renderOrder();
       window.scrollTo(0, 0);
@@ -459,7 +552,7 @@ function renderOrder() {
 
 // ------------------------------------------------------------------ admin
 
-const ADMIN_TABS = [['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices'], ['#/admin/settings', 'Pricing & reminders']];
+const ADMIN_TABS = [['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices'], ['#/admin/settings', 'Settings']];
 
 async function renderAdmin(page, arg, sub) {
   state.admin = await api('GET', '/api/admin/overview');
@@ -516,6 +609,7 @@ function adminOrders() {
               ${kv('Sequencer notes', o.sequencer_notes)}
               ${kv('Client notes', o.notes)}
             </dl>
+            ${o.csv_rows ? `<div><a class="btn btn-primary btn-sm" href="/api/admin/orders/${o.id}/onboarding.csv">⬇ Download onboarding CSV (${o.csv_rows} rows)</a></div>` : '<div class="muted small">No onboarding CSV uploaded.</div>'}
           </div>
           <form class="order-form" data-id="${o.id}">
             <div class="field"><label>Status</label>
@@ -911,10 +1005,23 @@ function renderInvoiceView(inv, isAdmin) {
 }
 
 function adminSettings() {
-  const { pricing, mailEnabled, today } = state.admin;
+  const { pricing, mailEnabled, today, settings } = state.admin;
   shell(ADMIN_TABS, '#/admin/settings', `
-    <div class="page-head"><div><h1>Pricing & reminders</h1></div></div>
+    <div class="page-head"><div><h1>Settings</h1></div></div>
     <div class="stack">
+      <form class="card card-pad" id="settings">
+        <h2 style="margin-bottom:14px">Orders &amp; clients</h2>
+        <div class="field"><label for="s-emails">Send new-order notifications to</label>
+          <input id="s-emails" name="order_notify_emails" required value="${esc(settings.order_notify_emails)}">
+          <div class="hint">One or more emails, separated by commas.</div></div>
+        <div class="field"><label for="s-min">Require the onboarding CSV for orders of at least</label>
+          <input id="s-min" name="csv_required_min" type="number" min="0" max="10000" required value="${esc(settings.csv_required_min)}" style="max-width:160px">
+          <div class="hint">Mailboxes. Set to 0 to make the CSV optional for every order.</div></div>
+        <div class="field"><label for="s-cancel">Cancellation note shown to clients</label>
+          <textarea id="s-cancel" name="cancel_note" style="font-family:inherit;min-height:72px" required>${esc(settings.cancel_note)}</textarea></div>
+        <button class="btn btn-primary" type="submit">Save settings</button>
+        <div class="error"></div>
+      </form>
       <form class="card card-pad" id="prices">
         <h2>Standard price per mailbox (USD / month)</h2>
         <p class="muted small" style="margin:4px 0 16px">Used for every client without custom pricing. Set a client's own prices under <a href="#/admin/clients">Clients &amp; invites</a> → Edit pricing. Existing batches keep the price they were ordered at; you can change it on the order.</p>
@@ -932,6 +1039,10 @@ function adminSettings() {
       </div>
     </div>`);
 
+  onSubmit(document.getElementById('settings'), async (d) => {
+    await api('PUT', '/api/admin/settings', d);
+    toast('Settings saved');
+  });
   onSubmit(document.getElementById('prices'), async (d) => {
     await api('PUT', '/api/admin/pricing', { prices: Object.entries(d).map(([inbox_type, v]) => ({ inbox_type, price_per_mailbox: v })) });
     toast('Prices saved');

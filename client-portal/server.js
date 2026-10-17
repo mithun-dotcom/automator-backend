@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken');
 const { pool, query, migrate } = require('./db');
 const { sendMail, enabled: mailEnabled } = require('./mailer');
 const billing = require('./billing');
+const onboarding = require('./onboarding');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -24,7 +25,8 @@ if (!SESSION_SECRET) {
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '200kb' }));
+// Large enough for an onboarding CSV of a few thousand mailboxes.
+app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 
 // ---------------------------------------------------------------- helpers
@@ -176,6 +178,7 @@ const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o
 
 app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const uid = req.user.id;
+  const settings = await getSettings();
   const [orders, invoices, notifications, pricing] = await Promise.all([
     query(`SELECT ${ORDER_COLUMNS} FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
            WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [uid]),
@@ -208,8 +211,32 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
     pricing: pricing.rows,
     paymentNote: billing.PAYMENT_NOTE,
     today: billing.today(),
+    csvRequiredMin: Number(settings.csv_required_min),
+    cancelNote: settings.cancel_note,
   });
 }));
+
+// ---------------------------------------------------------------- settings
+
+const SETTING_DEFAULTS = {
+  order_notify_emails: process.env.ORDER_NOTIFY_EMAILS || ADMIN_EMAIL,
+  csv_required_min: '10',
+  cancel_note: `To cancel a subscription, email us at ${ADMIN_EMAIL || 'our support address'} or send us a message ` +
+    'wherever you are connected with us (WhatsApp, Telegram, Slack, Skype…). Subscriptions can\'t be cancelled from the portal.',
+};
+
+async function getSettings() {
+  const { rows } = await query('SELECT key, value FROM settings');
+  const out = { ...SETTING_DEFAULTS };
+  for (const r of rows) if (r.key in out) out[r.key] = r.value;
+  return out;
+}
+
+const emailList = (v) => String(v || '').split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(isEmail);
+
+app.get('/api/onboarding-template.csv', (req, res) => {
+  res.attachment('mithmill-onboarding-template.csv').type('text/csv').send(onboarding.TEMPLATE);
+});
 
 const ACCESS_METHODS = ['delegate', 'registrar_login', 'client_dns'];
 const SEQUENCERS = ['Instantly', 'Smartlead', 'Lemlist', 'Reply.io', 'Other', 'None'];
@@ -220,12 +247,31 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
     [req.user.id, str(b.inbox_type, 50)]);
   if (!price) throw new HttpError(400, 'Choose an inbox type');
 
-  const quantity = Number.parseInt(b.quantity, 10);
+  // Onboarding sheet: optional, required for big orders, and the source of
+  // domains/usernames when those fields are left empty.
+  const settings = await getSettings();
+  let sheet = null;
+  if (b.onboarding_csv) {
+    try {
+      sheet = onboarding.validate(b.onboarding_csv);
+    } catch (err) {
+      throw new HttpError(400, err.message);
+    }
+  }
+  const quantity = Number.parseInt(b.quantity, 10) || (sheet ? sheet.users : NaN);
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 10000) {
     throw new HttpError(400, 'Number of mailboxes must be between 1 and 10000');
   }
-  const domains = str(b.domains, 20000);
-  const usernames = str(b.usernames, 20000);
+  if (sheet && quantity !== sheet.users) {
+    throw new HttpError(400, `Your CSV has ${sheet.users} users but the order is for ${quantity} mailboxes. Make them match (one CSV row per mailbox).`);
+  }
+  const csvMin = Number(settings.csv_required_min);
+  if (csvMin > 0 && quantity >= csvMin && !sheet) {
+    throw new HttpError(400, `Orders of ${csvMin} or more mailboxes need the onboarding CSV. Download the sample, fill it in and upload it.`);
+  }
+  const domains = str(b.domains, 20000) || (sheet ? sheet.domains.join('\n') : '');
+  const usernames = str(b.usernames, 20000) ||
+    (sheet ? sheet.rows.map((r) => `${r['Full name']} - ${r.Username}@${r['Domain name']}`).join('\n').slice(0, 20000) : '');
   if (!domains) throw new HttpError(400, 'Add at least one domain');
   if (!usernames) throw new HttpError(400, 'Add at least one username');
   const accessMethod = str(b.domain_access_method, 50);
@@ -246,19 +292,26 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
      accessMethod, str(b.registrar, 200), registrarEmail, str(b.domain_access_notes),
      sequencer, str(b.sequencer_workspace, 200), sequencerEmail, str(b.sequencer_notes), str(b.notes)],
   );
+  if (sheet) {
+    // Stored re-serialized in the template's column order, so the admin's download is clean.
+    const csv = onboarding.toCsv([onboarding.COLUMNS, ...sheet.rows.map((r) => onboarding.COLUMNS.map((c) => r[c]))]);
+    await query('INSERT INTO order_files (order_id, filename, row_count, data) VALUES ($1, $2, $3, $4)',
+      [order.id, str(b.onboarding_filename, 200) || 'onboarding.csv', sheet.users, onboarding.encrypt(csv)]);
+  }
 
   const total = billing.money(quantity * price.price_per_mailbox);
-  await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [
-    req.user.id, `Order #${order.id} received`,
-    `We received your order for ${quantity} ${price.label} mailboxes (${total}/month). We'll let you know as soon as they're active.`,
-  ]);
-  if (ADMIN_EMAIL) {
+  await billing.notify(req.user, `Order #${order.id} received`,
+    `We received your order for ${quantity} ${price.label} mailboxes (${total}/month). We'll let you know as soon as they're active.`);
+
+  const notifyTo = emailList(settings.order_notify_emails);
+  if (notifyTo.length) {
     sendMail({
-      to: ADMIN_EMAIL,
+      to: notifyTo.join(', '),
       subject: `New order #${order.id}: ${quantity} × ${price.label} from ${req.user.company || req.user.email}`,
       text: `${req.user.name} <${req.user.email}> placed order #${order.id}.\n\n` +
-        `Type: ${price.label}\nMailboxes: ${quantity}\nMonthly: ${total}\n\nDomains:\n${domains}\n\n` +
-        `Open the admin panel: ${baseUrl(req)}/#/admin`,
+        `Type: ${price.label}\nMailboxes: ${quantity}\nMonthly: ${total}\n` +
+        `Onboarding CSV: ${sheet ? `uploaded (${sheet.users} rows) - download it from the order in the admin panel` : 'not uploaded'}\n\n` +
+        `Domains:\n${domains}\n\nOpen the admin panel: ${baseUrl(req)}/#/admin`,
     });
   }
   res.status(201).json({ id: order.id });
@@ -276,8 +329,10 @@ admin.use(auth, adminOnly);
 
 admin.get('/overview', asyncRoute(async (req, res) => {
   const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
-    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.user_id, u.email, u.name, u.company
+    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.user_id, u.email, u.name, u.company,
+             f.row_count AS csv_rows, f.filename AS csv_filename
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
+           LEFT JOIN order_files f ON f.order_id = o.id
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
     query(`SELECT u.id, u.email, u.name, u.company, u.created_at,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active'), 0)::int AS active_mailboxes,
@@ -293,7 +348,7 @@ admin.get('/overview', asyncRoute(async (req, res) => {
   ]);
   res.json({
     orders: orders.rows, clients: clients.rows, invites: invites.rows,
-    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, mailEnabled: mailEnabled(), today: billing.today(),
+    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, settings: await getSettings(), mailEnabled: mailEnabled(), today: billing.today(),
   });
 }));
 
@@ -567,6 +622,36 @@ admin.patch('/invoices/:id', asyncRoute(async (req, res) => {
     const { rows: [user] } = await query('SELECT id, email, name FROM users WHERE id = $1', [inv.user_id]);
     await billing.notify(user, `Payment received: ${billing.money(inv.amount)}`,
       `Thank you! We've received your payment for invoice #${inv.id} (${inv.description}).`);
+  }
+  res.json({ ok: true });
+}));
+
+admin.get('/orders/:id/onboarding.csv', asyncRoute(async (req, res) => {
+  const { rows: [f] } = await query('SELECT * FROM order_files WHERE order_id = $1', [Number(req.params.id)]);
+  if (!f) throw new HttpError(404, 'No onboarding CSV for this order');
+  res.attachment(`order-${f.order_id}-onboarding.csv`).type('text/csv').send(onboarding.decrypt(f.data));
+}));
+
+admin.put('/settings', asyncRoute(async (req, res) => {
+  const b = req.body;
+  const updates = {};
+  if (b.order_notify_emails !== undefined) {
+    const list = emailList(b.order_notify_emails);
+    if (!list.length) throw new HttpError(400, 'Add at least one valid email for order notifications');
+    updates.order_notify_emails = list.join(', ');
+  }
+  if (b.csv_required_min !== undefined) {
+    const n = Number(b.csv_required_min);
+    if (!Number.isInteger(n) || n < 0 || n > 10000) throw new HttpError(400, 'CSV threshold must be a whole number (0 = never required)');
+    updates.csv_required_min = String(n);
+  }
+  if (b.cancel_note !== undefined) {
+    const note = str(b.cancel_note, 2000);
+    if (!note) throw new HttpError(400, 'The cancellation note can\'t be empty');
+    updates.cancel_note = note;
+  }
+  for (const [k, v] of Object.entries(updates)) {
+    await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [k, v]);
   }
   res.json({ ok: true });
 }));

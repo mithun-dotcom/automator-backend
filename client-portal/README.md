@@ -22,6 +22,10 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Onboarding CSV
+
+On the order form, clients download a sample CSV (one row per mailbox user: domain name, users per domain, full name, username, preferred password, domain access email/username, domain provider password and login URL, sequencer access email/password/workspace, profile picture Drive link, domain forward), fill it in and upload it. It's checked on upload, fills in the domains, usernames and mailbox count, and is required for orders at or above the threshold set under **Settings** (default 10). The file is stored encrypted, and only admins can download it from the order.
+
 ## Renewal reminders
 
 Each active batch renews monthly. Before each renewal date the client gets an in-portal notification, plus an email when SMTP is configured:
@@ -51,6 +55,8 @@ https://<your-app>.onrender.com/api/cron/billing?key=<CRON_SECRET>
 | `APP_URL` | recommended | Public URL, used in invite links and emails |
 | `CRON_SECRET` | recommended | Protects `/api/cron/billing` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | optional | Email delivery. Without these, emails are skipped: notifications still appear in the portal, and invite links are shown to the admin to send by hand. |
+| `ORDER_NOTIFY_EMAILS` | optional | Default recipients of new-order emails (comma-separated). Editable later under Settings. Defaults to `ADMIN_EMAIL`. |
+| `DATA_ENCRYPTION_KEY` | recommended | 64 hex characters. Encrypts uploaded onboarding CSVs (they contain passwords). Falls back to a key derived from `SESSION_SECRET`. Don't change it once files are uploaded. |
 | `BILLING_TZ` | optional | Defaults to `Asia/Dhaka` |
 | `DATABASE_SCHEMA` | optional | Postgres schema for the portal's tables (default `public`). Set it to `client_portal` when you share a database with another app. |
 | `DATABASE_SSL` | optional | `true` when you connect through Render's *external* database URL |
