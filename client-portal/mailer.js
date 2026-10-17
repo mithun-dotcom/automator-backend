@@ -8,6 +8,10 @@ const transport = SMTP_HOST
       port: Number(SMTP_PORT || 587),
       secure: Number(SMTP_PORT) === 465,
       auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
+      // Fail fast so an unreachable mail server doesn't hang the admin's request.
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
     })
   : null;
 
