@@ -107,3 +107,20 @@ CREATE TABLE IF NOT EXISTS client_pricing (
   price_per_mailbox NUMERIC(10,2) NOT NULL CHECK (price_per_mailbox >= 0),
   PRIMARY KEY (user_id, inbox_type)
 );
+
+-- Fully editable invoices: header fields plus any number of line items.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS issue_date DATE;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS discount NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS invoice_items (
+  id          SERIAL PRIMARY KEY,
+  invoice_id  INT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  inbox_type  TEXT NOT NULL DEFAULT '',  -- a pricing.inbox_type, 'other', or '' for none
+  batch_name  TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  quantity    NUMERIC(10,2) NOT NULL CHECK (quantity > 0),
+  unit_price  NUMERIC(10,2) NOT NULL CHECK (unit_price >= 0),
+  sort_order  INT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS invoice_items_invoice ON invoice_items (invoice_id);

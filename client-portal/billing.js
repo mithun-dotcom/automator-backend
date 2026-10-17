@@ -63,17 +63,31 @@ async function notify(user, title, body) {
 
 // ---- Invoices
 
-async function ensureRenewalInvoice(order, periodStart) {
+// Issues the invoice for one billing period of a batch, with a matching line
+// item. Does nothing if that period is already invoiced.
+async function createOrderInvoice(order, periodStart, description, itemDescription) {
   const amount = order.quantity * order.price_per_mailbox;
-  await query(
-    `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date)
-     VALUES ($1, $2, $3, $4, $5, $3)
+  const { rows: [inv] } = await query(
+    `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date, issue_date)
+     VALUES ($1, $2, $3, $4, $5, $3, $6)
      ON CONFLICT (order_id, period_start) WHERE order_id IS NOT NULL AND period_start IS NOT NULL
-     DO NOTHING`,
-    [order.user_id, order.id, periodStart,
-     `Batch #${order.id} renewal: ${order.quantity} × ${order.label} mailboxes (from ${prettyDate(periodStart)})`,
-     amount],
+     DO NOTHING RETURNING id`,
+    [order.user_id, order.id, periodStart, description, amount, today()],
   );
+  if (inv) {
+    await query(
+      `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [inv.id, order.inbox_type, `Batch #${order.id}`, itemDescription, order.quantity, order.price_per_mailbox],
+    );
+  }
+  return inv;
+}
+
+function ensureRenewalInvoice(order, periodStart) {
+  return createOrderInvoice(order, periodStart,
+    `Batch #${order.id} renewal: ${order.quantity} × ${order.label} mailboxes (from ${prettyDate(periodStart)})`,
+    `Monthly renewal from ${prettyDate(periodStart)}`);
 }
 
 // ---- The billing run: roll renewals forward, issue renewal invoices and send
@@ -139,5 +153,5 @@ async function runBilling() {
 }
 
 module.exports = {
-  PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling,
+  PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
 };

@@ -113,10 +113,10 @@ async function route() {
     if (parts[0] === 'password') return renderPassword();
     if (state.me.role === 'admin') {
       if (parts[0] !== 'admin') return go('#/admin');
-      return await renderAdmin(parts[1] || 'orders');
+      return await renderAdmin(parts[1] || 'orders', parts[2], parts[3]);
     }
     if (parts[0] === 'admin') return go('#/dashboard');
-    return await renderClient(parts[0]);
+    return await renderClient(parts[0], parts[1]);
   } catch (ex) {
     $app.innerHTML = `<div class="boot">${esc(ex.message)}</div>`;
   }
@@ -215,8 +215,9 @@ function renderPassword() {
 
 const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/order', 'New order'], ['#/billing', 'Billing']];
 
-async function renderClient(page) {
+async function renderClient(page, arg) {
   state.dash = await api('GET', '/api/dashboard');
+  if (page === 'invoice' && arg) return renderInvoiceView(await api('GET', `/api/invoices/${encodeURIComponent(arg)}`), false);
   if (page === 'order') return renderOrder();
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
@@ -286,10 +287,10 @@ function renderBilling() {
       <div class="card">
         <div class="card-head"><h2>Invoices</h2></div>
         ${invoices.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Invoice</th><th>Description</th><th>Due</th><th>Status</th><th class="num">Amount</th></tr></thead>
+          <thead><tr><th>Invoice</th><th>Description</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
           <tbody>${invoices.map((i) => {
             const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
-            return `<tr><td>#${i.id}</td><td>${esc(i.description)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}${i.paid_at ? `<div class="muted small">${fmtDate(i.paid_at)}</div>` : ''}</td><td class="num">${money(i.amount)}</td></tr>`;
+            return `<tr><td><a href="#/invoice/${i.id}">#${i.id}</a></td><td>${esc(i.description)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}${i.paid_at ? `<div class="muted small">${fmtDate(i.paid_at)}</div>` : ''}</td><td class="num">${money(i.amount)}</td><td><a class="btn btn-sm" href="#/invoice/${i.id}">View</a></td></tr>`;
           }).join('')}</tbody>
         </table></div>` : '<div class="empty">No invoices yet.</div>'}
       </div>
@@ -460,8 +461,13 @@ function renderOrder() {
 
 const ADMIN_TABS = [['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices'], ['#/admin/settings', 'Pricing & reminders']];
 
-async function renderAdmin(page) {
+async function renderAdmin(page, arg, sub) {
   state.admin = await api('GET', '/api/admin/overview');
+  if (page === 'invoice') {
+    if (arg === 'new') return invoiceEditor(null);
+    const inv = await api('GET', `/api/admin/invoices/${encodeURIComponent(arg)}`);
+    return sub === 'edit' ? invoiceEditor(inv) : renderInvoiceView(inv, true);
+  }
   const pages = { orders: adminOrders, clients: adminClients, invoices: adminInvoices, settings: adminSettings };
   (pages[page] || adminOrders)();
 }
@@ -649,61 +655,257 @@ function adminClients() {
   });
 }
 
+function typeLabel(type, pricing) {
+  if (type === 'other') return 'Other';
+  const p = pricing.find((x) => x.inbox_type === type);
+  return p ? p.label : '';
+}
+
+async function setInvoiceStatus(id, status) {
+  if (status === 'void' && !confirm(`Void invoice #${id}?`)) return false;
+  await api('PATCH', `/api/admin/invoices/${id}`, { status });
+  toast(`Invoice #${id} updated`);
+  return true;
+}
+
 function adminInvoices() {
-  const { invoices, clients, orders, today } = state.admin;
+  const { invoices, today } = state.admin;
   shell(ADMIN_TABS, '#/admin/invoices', `
-    <div class="page-head"><div><h1>Invoices</h1><p class="muted">Renewal invoices are created automatically 7 days before each renewal. Add one-off invoices here.</p></div></div>
-    <div class="stack">
-      <form class="card card-pad" id="newinv">
-        <h2 style="margin-bottom:14px">Create invoice</h2>
-        <div class="grid-2">
-          <div class="field"><label for="v-user">Client</label>
-            <select id="v-user" name="user_id" required><option value="">Choose…</option>
-              ${clients.map((c) => `<option value="${c.id}">${esc(c.company || c.name)} (${esc(c.email)})</option>`).join('')}</select></div>
-          <div class="field"><label for="v-order">Batch (optional)</label><select id="v-order" name="order_id"><option value="">None</option></select></div>
-        </div>
-        <div class="field"><label for="v-desc">Description</label><input id="v-desc" name="description" required></div>
-        <div class="grid-2">
-          <div class="field"><label for="v-amt">Amount (USD)</label><input id="v-amt" name="amount" type="number" step="0.01" min="0.01" required></div>
-          <div class="field"><label for="v-due">Due date</label><input id="v-due" name="due_date" type="date" required value="${esc(today)}"></div>
-        </div>
-        <button class="btn btn-primary" type="submit">Create & notify client</button>
-        <div class="error"></div>
-      </form>
-      <div class="card">
-        <div class="card-head"><h2>All invoices</h2></div>
-        ${invoices.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>#</th><th>Client</th><th>Description</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
-          <tbody>${invoices.map((i) => {
-            const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
-            return `<tr><td>${i.id}</td><td>${esc(i.company || i.email)}</td><td>${esc(i.description)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
-            <td><div class="row" style="flex-wrap:nowrap">
-              ${i.status !== 'paid' ? `<button class="btn btn-sm" data-inv="${i.id}" data-status="paid">Mark paid</button>` : `<button class="btn btn-sm" data-inv="${i.id}" data-status="unpaid">Mark unpaid</button>`}
-              ${i.status !== 'void' ? `<button class="btn btn-sm btn-ghost" data-inv="${i.id}" data-status="void">Void</button>` : ''}
-            </div></td></tr>`;
-          }).join('')}</tbody></table></div>` : '<div class="empty">No invoices yet.</div>'}
-      </div>
+    <div class="page-head">
+      <div><h1>Invoices</h1><p class="muted">Renewal invoices are created automatically 7 days before each renewal. Create and edit any invoice here.</p></div>
+      <a class="btn btn-primary" href="#/admin/invoice/new">+ New invoice</a>
+    </div>
+    <div class="card">
+      ${invoices.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Client</th><th>Description</th><th>Issued</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody>${invoices.map((i) => {
+          const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
+          return `<tr><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
+          <td><div class="row" style="flex-wrap:nowrap">
+            <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
+            <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
+            ${i.status !== 'paid' ? `<button class="btn btn-sm" data-inv="${i.id}" data-status="paid">Mark paid</button>` : `<button class="btn btn-sm" data-inv="${i.id}" data-status="unpaid">Mark unpaid</button>`}
+            ${i.status !== 'void' ? `<button class="btn btn-sm btn-ghost" data-inv="${i.id}" data-status="void">Void</button>` : ''}
+          </div></td></tr>`;
+        }).join('')}</tbody></table></div>` : '<div class="empty">No invoices yet. <a href="#/admin/invoice/new">Create one</a>.</div>'}
     </div>`);
 
-  const userSel = document.getElementById('v-user');
-  userSel.onchange = () => {
-    const mine = orders.filter((o) => String(o.user_id) === userSel.value);
-    document.getElementById('v-order').innerHTML = '<option value="">None</option>' +
-      mine.map((o) => `<option value="${o.id}">#${o.id} ${esc(o.inbox_label)} × ${o.quantity}</option>`).join('');
-  };
-  onSubmit(document.getElementById('newinv'), async (d) => {
-    await api('POST', '/api/admin/invoices', d);
-    toast('Invoice created and client notified');
-    reloadAdmin();
-  });
   document.querySelectorAll('[data-inv]').forEach((b) => {
     b.onclick = async () => {
-      if (b.dataset.status === 'void' && !confirm(`Void invoice #${b.dataset.inv}?`)) return;
-      try {
-        await api('PATCH', `/api/admin/invoices/${b.dataset.inv}`, { status: b.dataset.status });
-        toast(`Invoice #${b.dataset.inv} updated`);
-        reloadAdmin();
-      } catch (ex) { toast(ex.message); }
+      try { if (await setInvoiceStatus(b.dataset.inv, b.dataset.status)) reloadAdmin(); } catch (ex) { toast(ex.message); }
+    };
+  });
+}
+
+// ---- invoice editor (new + edit)
+
+function invoiceEditor(inv) {
+  const { clients, orders, pricing, clientPricing, today } = state.admin;
+  const isNew = !inv;
+  const plus = (d, n) => { const t = new Date(`${d}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+  const ed = {
+    user_id: inv ? String(inv.user_id) : '',
+    order_id: inv && inv.order_id ? String(inv.order_id) : '',
+    issue_date: inv ? (inv.issue_date || String(inv.created_at).slice(0, 10)) : today,
+    due_date: inv ? inv.due_date : plus(today, 7),
+    discount: inv && inv.discount ? String(inv.discount) : '',
+    notes: inv ? inv.notes || '' : '',
+    items: inv ? inv.items.map((it) => ({ ...it, quantity: String(it.quantity), unit_price: String(it.unit_price) }))
+      : [{ inbox_type: '', batch_name: '', description: '', quantity: '1', unit_price: '' }],
+  };
+  const clientOrders = () => orders.filter((o) => String(o.user_id) === ed.user_id);
+  const priceFor = (type) => {
+    const own = clientPricing.find((cp) => String(cp.user_id) === ed.user_id && cp.inbox_type === type);
+    const std = pricing.find((p) => p.inbox_type === type);
+    return own ? own.price_per_mailbox : std ? std.price_per_mailbox : '';
+  };
+  const lineTotal = (it) => (Number(it.quantity) || 0) * (Number(it.unit_price) || 0);
+  const typeOptions = (sel) => `<option value="" ${sel === '' ? 'selected' : ''}>—</option>` +
+    pricing.map((p) => `<option value="${esc(p.inbox_type)}" ${sel === p.inbox_type ? 'selected' : ''}>${esc(p.label)}</option>`).join('') +
+    `<option value="other" ${sel === 'other' ? 'selected' : ''}>Other</option>`;
+
+  shell(ADMIN_TABS, '#/admin/invoices', `
+    <div class="page-head">
+      <div><h1>${isNew ? 'New invoice' : `Edit invoice #${inv.id}`}</h1><p class="muted">Add as many lines as you need. Every field is editable.</p></div>
+      <a class="btn" href="${isNew ? '#/admin/invoices' : `#/admin/invoice/${inv.id}`}">Cancel</a>
+    </div>
+    <form id="inv-form" class="stack">
+      <div class="card card-pad">
+        <div class="grid-2">
+          <div class="field"><label for="e-user">Client</label>
+            <select id="e-user" required><option value="">Choose…</option>
+              ${clients.map((c) => `<option value="${c.id}" ${String(c.id) === ed.user_id ? 'selected' : ''}>${esc(c.company || c.name)} (${esc(c.email)})</option>`).join('')}</select></div>
+          <div class="field"><label for="e-order">Linked batch (optional)</label><select id="e-order"></select>
+            <div class="hint">Choosing a batch adds a line for it.</div></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label for="e-issue">Issue date</label><input id="e-issue" type="date" required value="${esc(ed.issue_date)}"></div>
+          <div class="field"><label for="e-due">Due date</label><input id="e-due" type="date" required value="${esc(ed.due_date)}"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Invoice lines</h2><button type="button" class="btn btn-sm" id="add-line">+ Add line</button></div>
+        <div class="table-wrap"><table class="lines">
+          <thead><tr><th style="min-width:170px">Mailbox type</th><th style="min-width:150px">Batch name</th><th style="min-width:200px">Description</th><th class="num" style="width:90px">Qty</th><th class="num" style="width:120px">Unit price ($)</th><th class="num" style="width:110px">Amount</th><th style="width:44px"></th></tr></thead>
+          <tbody id="lines"></tbody>
+        </table></div>
+        <datalist id="batch-names"></datalist>
+        <div class="totals">
+          <div><span>Subtotal</span><span id="t-sub"></span></div>
+          <div><label for="e-discount">Discount ($)</label><input id="e-discount" type="number" step="0.01" min="0" value="${esc(ed.discount)}" placeholder="0.00"></div>
+          <div class="grand"><span>Total</span><span id="t-total"></span></div>
+        </div>
+      </div>
+
+      <div class="card card-pad">
+        <div class="field"><label for="e-notes">Notes (shown on the invoice)</label><textarea id="e-notes" style="font-family:inherit;min-height:80px" placeholder="e.g. Payment terms, bank details, thank-you note">${esc(ed.notes)}</textarea></div>
+        <label class="check"><input type="checkbox" id="e-notify" ${isNew ? 'checked' : ''}> ${isNew ? 'Notify the client (portal notification and email)' : 'Notify the client about this change'}</label>
+      </div>
+
+      <div class="row" style="justify-content:flex-end"><button class="btn btn-primary" type="submit">${isNew ? 'Create invoice' : 'Save changes'}</button></div>
+      <div class="error" id="e-error"></div>
+    </form>`);
+
+  const $ = (id) => document.getElementById(id);
+  const recalc = () => {
+    const sub = ed.items.reduce((t, it) => t + lineTotal(it), 0);
+    $('t-sub').textContent = money(sub);
+    $('t-total').textContent = money(Math.max(0, sub - (Number(ed.discount) || 0)));
+    document.querySelectorAll('[data-total]').forEach((td) => { td.textContent = money(lineTotal(ed.items[td.dataset.total])); });
+  };
+  const fillBatches = () => {
+    const list = clientOrders();
+    $('e-order').innerHTML = '<option value="">None</option>' + list.map((o) => `<option value="${o.id}" ${String(o.id) === ed.order_id ? 'selected' : ''}>Batch #${o.id}: ${esc(o.inbox_label)} × ${o.quantity}</option>`).join('');
+    $('batch-names').innerHTML = list.map((o) => `<option value="Batch #${o.id}">`).join('');
+  };
+  const renderLines = () => {
+    $('lines').innerHTML = ed.items.map((it, i) => `<tr>
+      <td><select data-i="${i}" data-k="inbox_type">${typeOptions(it.inbox_type)}</select></td>
+      <td><input data-i="${i}" data-k="batch_name" list="batch-names" value="${esc(it.batch_name)}" placeholder="e.g. Batch #12"></td>
+      <td><input data-i="${i}" data-k="description" value="${esc(it.description)}" placeholder="e.g. Monthly mailboxes"></td>
+      <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" min="0.01" required value="${esc(it.quantity)}" class="num"></td>
+      <td><input data-i="${i}" data-k="unit_price" type="number" step="0.01" min="0" required value="${esc(it.unit_price)}" class="num"></td>
+      <td class="num" data-total="${i}"></td>
+      <td><button type="button" class="btn btn-sm btn-ghost" data-remove="${i}" ${ed.items.length === 1 ? 'disabled' : ''} aria-label="Remove line">✕</button></td>
+    </tr>`).join('');
+    $('lines').querySelectorAll('[data-k]').forEach((el) => {
+      const handler = () => {
+        const it = ed.items[el.dataset.i];
+        it[el.dataset.k] = el.value;
+        // Picking a mailbox type fills in this client's price if none is set yet.
+        if (el.dataset.k === 'inbox_type' && it.unit_price === '' && el.value && el.value !== 'other') {
+          it.unit_price = String(priceFor(el.value));
+          el.closest('tr').querySelector('[data-k="unit_price"]').value = it.unit_price;
+        }
+        recalc();
+      };
+      el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', handler);
+    });
+    $('lines').querySelectorAll('[data-remove]').forEach((b) => {
+      b.onclick = () => { ed.items.splice(Number(b.dataset.remove), 1); renderLines(); };
+    });
+    recalc();
+  };
+
+  fillBatches();
+  renderLines();
+  $('e-user').onchange = (e) => {
+    ed.user_id = e.target.value; ed.order_id = '';
+    ed.items.forEach((it) => { if (it.inbox_type && it.inbox_type !== 'other') it.unit_price = String(priceFor(it.inbox_type)); });
+    fillBatches(); renderLines();
+  };
+  $('e-order').onchange = (e) => {
+    ed.order_id = e.target.value;
+    const o = orders.find((x) => String(x.id) === ed.order_id);
+    if (!o) return;
+    const line = { inbox_type: o.inbox_type, batch_name: `Batch #${o.id}`, description: `${o.inbox_label} mailboxes`, quantity: String(o.quantity), unit_price: String(o.price_per_mailbox) };
+    const blank = ed.items.length === 1 && !ed.items[0].inbox_type && !ed.items[0].batch_name && !ed.items[0].description && !ed.items[0].unit_price;
+    if (blank) ed.items[0] = line; else ed.items.push(line);
+    renderLines();
+  };
+  $('add-line').onclick = () => {
+    ed.items.push({ inbox_type: '', batch_name: '', description: '', quantity: '1', unit_price: '' });
+    renderLines();
+    $('lines').querySelector('tr:last-child select').focus();
+  };
+  $('e-issue').oninput = (e) => { ed.issue_date = e.target.value; };
+  $('e-due').oninput = (e) => { ed.due_date = e.target.value; };
+  $('e-discount').oninput = (e) => { ed.discount = e.target.value; recalc(); };
+  $('e-notes').oninput = (e) => { ed.notes = e.target.value; };
+
+  $('inv-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector('[type=submit]');
+    btn.disabled = true; $('e-error').textContent = '';
+    const body = {
+      user_id: ed.user_id, order_id: ed.order_id || null, issue_date: ed.issue_date, due_date: ed.due_date,
+      discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: $('e-notify').checked,
+    };
+    try {
+      const r = isNew ? await api('POST', '/api/admin/invoices', body) : await api('PUT', `/api/admin/invoices/${inv.id}`, body);
+      const id = isNew ? r.id : inv.id;
+      toast(isNew ? `Invoice #${id} created` : `Invoice #${id} saved`);
+      go(`#/admin/invoice/${id}`);
+    } catch (ex) {
+      $('e-error').textContent = ex.message;
+      btn.disabled = false;
+    }
+  });
+}
+
+// ---- invoice page (admin + client), printable
+
+function renderInvoiceView(inv, isAdmin) {
+  const today = isAdmin ? state.admin.today : state.dash.today;
+  const status = inv.status === 'unpaid' && inv.due_date < today ? 'overdue' : inv.status;
+  const subtotal = inv.items.reduce((t, it) => t + it.quantity * it.unit_price, 0);
+  const qty = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+  const back = isAdmin ? '#/admin/invoices' : '#/billing';
+
+  shell(isAdmin ? ADMIN_TABS : CLIENT_TABS, isAdmin ? '#/admin/invoices' : '#/billing', `
+    <div class="page-head no-print">
+      <a class="btn" href="${back}">← Back</a>
+      <div class="row">
+        ${isAdmin ? `<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
+          ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
+          ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
+        <button class="btn btn-primary" id="print">Print / Save PDF</button>
+      </div>
+    </div>
+    <article class="invoice-sheet">
+      <header class="inv-top">
+        <img src="logo-full.png" alt="MithMill" class="inv-logo">
+        <div class="inv-title"><div class="inv-word">INVOICE</div><div class="inv-num">#${inv.id}</div>${badge(status)}</div>
+      </header>
+      <section class="inv-meta">
+        <div><div class="inv-label">Billed to</div><strong>${esc(inv.company || inv.name)}</strong>${inv.company && inv.name ? `<div>${esc(inv.name)}</div>` : ''}<div>${esc(inv.email)}</div></div>
+        <div><div class="inv-label">Payable to</div><strong>Mixxbee LLC</strong><div>on behalf of Mithmill</div></div>
+        <div class="inv-dates">
+          <div><span class="inv-label">Issue date</span><span>${fmtDate(inv.issue_date || inv.created_at)}</span></div>
+          <div><span class="inv-label">Due date</span><span>${fmtDate(inv.due_date)}</span></div>
+          ${inv.paid_at ? `<div><span class="inv-label">Paid on</span><span>${fmtDate(inv.paid_at)}</span></div>` : ''}
+        </div>
+      </section>
+      <div class="table-wrap"><table class="inv-items">
+        <thead><tr><th>Mailbox type</th><th>Batch</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
+        <tbody>${inv.items.map((it) => `<tr>
+          <td>${esc(typeLabel(it.inbox_type, inv.pricing)) || '—'}</td><td>${esc(it.batch_name) || '—'}</td><td>${esc(it.description)}</td>
+          <td class="num">${qty(it.quantity)}</td><td class="num">${money(it.unit_price)}</td><td class="num">${money(it.quantity * it.unit_price)}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <div class="totals inv-totals">
+        <div><span>Subtotal</span><span>${money(subtotal)}</span></div>
+        ${inv.discount ? `<div><span>Discount</span><span>−${money(inv.discount)}</span></div>` : ''}
+        <div class="grand"><span>Total due</span><span>${money(inv.amount)}</span></div>
+      </div>
+      ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${esc(inv.notes)}</div></section>` : ''}
+      <div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>
+    </article>`);
+
+  document.getElementById('print').onclick = () => window.print();
+  document.querySelectorAll('[data-set]').forEach((b) => {
+    b.onclick = async () => {
+      try { if (await setInvoiceStatus(inv.id, b.dataset.set)) route(); } catch (ex) { toast(ex.message); }
     };
   });
 }

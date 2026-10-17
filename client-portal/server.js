@@ -5,7 +5,7 @@ const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-const { query, migrate } = require('./db');
+const { pool, query, migrate } = require('./db');
 const { sendMail, enabled: mailEnabled } = require('./mailer');
 const billing = require('./billing');
 
@@ -179,7 +179,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const [orders, invoices, notifications, pricing] = await Promise.all([
     query(`SELECT ${ORDER_COLUMNS} FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
            WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [uid]),
-    query(`SELECT id, order_id, description, amount, due_date, status, paid_at, created_at
+    query(`SELECT id, order_id, description, amount, issue_date, due_date, status, paid_at, created_at
            FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY due_date DESC, id DESC`, [uid]),
     query(`SELECT id, title, body, read_at, created_at FROM notifications
            WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`, [uid]),
@@ -321,6 +321,11 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
       `UPDATE invoices SET amount = $1 WHERE order_id = $2 AND period_start = $3 AND status = 'unpaid'`,
       [newPrice * newQty, id, order.next_billing_date],
     );
+    await query(
+      `UPDATE invoice_items SET quantity = $1, unit_price = $2
+        WHERE invoice_id IN (SELECT id FROM invoices WHERE order_id = $3 AND period_start = $4 AND status = 'unpaid')`,
+      [newQty, newPrice, id, order.next_billing_date],
+    );
     Object.assign(order, { price_per_mailbox: newPrice, quantity: newQty });
   }
 
@@ -356,13 +361,8 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
         [next, day, id],
       );
       if (req.body.create_invoice !== false && !order.activated_at) {
-        await query(
-          `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date)
-           VALUES ($1, $2, $3, $4, $5, $3) ON CONFLICT DO NOTHING`,
-          [order.user_id, id, start,
-           `Batch #${id}: ${order.quantity} × ${order.label} mailboxes, first month`,
-           order.quantity * order.price_per_mailbox],
-        );
+        await billing.createOrderInvoice(order, start,
+          `Batch #${id}: ${order.quantity} × ${order.label} mailboxes, first month`, 'First month');
       }
       await billing.notify(client, `Your ${order.quantity} ${order.label} mailboxes are active`,
         `Batch #${id} is now active. Your next renewal is on ${billing.prettyDate(next)} ` +
@@ -414,31 +414,145 @@ admin.delete('/invites/:id', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-admin.post('/invoices', asyncRoute(async (req, res) => {
-  const userId = Number(req.body.user_id);
-  const amount = Number(req.body.amount);
-  const description = str(req.body.description, 500);
-  const dueDate = str(req.body.due_date, 10);
-  const orderId = req.body.order_id ? Number(req.body.order_id) : null;
-  if (!userId) throw new HttpError(400, 'Choose a client');
-  if (!(amount > 0)) throw new HttpError(400, 'Amount must be more than 0');
-  if (!description) throw new HttpError(400, 'Add a description');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) throw new HttpError(400, 'Due date must be YYYY-MM-DD');
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-  const { rows: [user] } = await query('SELECT id, email, name FROM users WHERE id = $1', [userId]);
-  if (!user) throw new HttpError(404, 'Client not found');
+// Validates the invoice editor's payload. Returns the cleaned header and items.
+async function parseInvoice(body) {
+  const userId = Number(body.user_id);
+  const { rows: [user] } = await query("SELECT id, email, name FROM users WHERE id = $1 AND role = 'client'", [userId]);
+  if (!user) throw new HttpError(400, 'Choose a client');
+
+  const orderId = body.order_id ? Number(body.order_id) : null;
   if (orderId) {
     const { rows: [o] } = await query('SELECT 1 FROM orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
-    if (!o) throw new HttpError(400, 'That order does not belong to this client');
+    if (!o) throw new HttpError(400, 'That batch does not belong to this client');
   }
+  const issueDate = str(body.issue_date, 10) || billing.today();
+  const dueDate = str(body.due_date, 10);
+  if (!DATE_RE.test(issueDate)) throw new HttpError(400, 'Issue date must be a date');
+  if (!DATE_RE.test(dueDate)) throw new HttpError(400, 'Due date must be a date');
+
+  const { rows: types } = await query('SELECT inbox_type FROM pricing');
+  const validTypes = new Set(['', 'other', ...types.map((t) => t.inbox_type)]);
+  const rawItems = Array.isArray(body.items) ? body.items.slice(0, 100) : [];
+  const items = rawItems.map((it, i) => {
+    const item = {
+      inbox_type: str(it.inbox_type, 50),
+      batch_name: str(it.batch_name, 200),
+      description: str(it.description, 1000),
+      quantity: Number(it.quantity),
+      unit_price: Number(it.unit_price),
+    };
+    const n = i + 1;
+    if (!validTypes.has(item.inbox_type)) throw new HttpError(400, `Line ${n}: unknown mailbox type`);
+    if (!item.inbox_type && !item.description && !item.batch_name) throw new HttpError(400, `Line ${n}: add a type, batch name or description`);
+    if (!(item.quantity > 0)) throw new HttpError(400, `Line ${n}: quantity must be more than 0`);
+    if (!(item.unit_price >= 0)) throw new HttpError(400, `Line ${n}: price must be 0 or more`);
+    return item;
+  });
+  if (!items.length) throw new HttpError(400, 'Add at least one line');
+
+  const subtotal = items.reduce((t, it) => t + Math.round(it.quantity * it.unit_price * 100), 0) / 100;
+  const discount = body.discount ? Number(body.discount) : 0;
+  if (!(discount >= 0) || discount > subtotal) throw new HttpError(400, 'Discount must be between 0 and the subtotal');
+  const amount = Math.round((subtotal - discount) * 100) / 100;
+  if (!(amount > 0)) throw new HttpError(400, 'Invoice total must be more than 0');
+
+  const description = str(body.description, 500) || (items.length === 1
+    ? [items[0].batch_name, items[0].description].filter(Boolean).join(': ') || 'Invoice'
+    : `${items.length} items`);
+  return {
+    user, orderId, issueDate, dueDate, items, discount, amount, description, notes: str(body.notes, 5000),
+  };
+}
+
+async function writeItems(client, invoiceId, items) {
+  await client.query('DELETE FROM invoice_items WHERE invoice_id = $1', [invoiceId]);
+  for (const [i, it] of items.entries()) {
+    await client.query(
+      `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [invoiceId, it.inbox_type, it.batch_name, it.description, it.quantity, it.unit_price, i],
+    );
+  }
+}
+
+async function inTransaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function invoiceWithItems(id, userId) {
   const { rows: [inv] } = await query(
-    `INSERT INTO invoices (user_id, order_id, description, amount, due_date)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [userId, orderId, description, amount, dueDate],
+    `SELECT i.*, u.email, u.name, u.company FROM invoices i JOIN users u ON u.id = i.user_id
+      WHERE i.id = $1 ${userId ? "AND i.user_id = $2 AND i.status <> 'void'" : ''}`,
+    userId ? [id, userId] : [id],
   );
-  await billing.notify(user, `New invoice: ${billing.money(amount)}`,
-    `Invoice #${inv.id} for ${billing.money(amount)} (${description}) is due on ${billing.prettyDate(dueDate)}.`);
-  res.status(201).json({ id: inv.id });
+  if (!inv) throw new HttpError(404, 'Invoice not found');
+  const { rows: items } = await query(
+    'SELECT inbox_type, batch_name, description, quantity, unit_price FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id',
+    [id],
+  );
+  const { rows: pricing } = await query('SELECT inbox_type, label FROM pricing ORDER BY sort_order');
+  // Invoices from before line items existed show as a single line.
+  if (!items.length) items.push({ inbox_type: '', batch_name: '', description: inv.description, quantity: 1, unit_price: inv.amount + inv.discount });
+  return { ...inv, items, pricing, paymentNote: billing.PAYMENT_NOTE };
+}
+
+app.get('/api/invoices/:id', auth, asyncRoute(async (req, res) => {
+  res.json(await invoiceWithItems(Number(req.params.id), req.user.id));
+}));
+
+admin.get('/invoices/:id', asyncRoute(async (req, res) => {
+  res.json(await invoiceWithItems(Number(req.params.id)));
+}));
+
+admin.post('/invoices', asyncRoute(async (req, res) => {
+  const v = await parseInvoice(req.body);
+  const id = await inTransaction(async (client) => {
+    const { rows: [inv] } = await client.query(
+      `INSERT INTO invoices (user_id, order_id, description, amount, discount, due_date, issue_date, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes],
+    );
+    await writeItems(client, inv.id, v.items);
+    return inv.id;
+  });
+  if (req.body.notify !== false) {
+    await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
+      `Invoice #${id} for ${billing.money(v.amount)} (${v.description}) is due on ${billing.prettyDate(v.dueDate)}.`);
+  }
+  res.status(201).json({ id });
+}));
+
+admin.put('/invoices/:id', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const { rows: [existing] } = await query('SELECT id FROM invoices WHERE id = $1', [id]);
+  if (!existing) throw new HttpError(404, 'Invoice not found');
+  const v = await parseInvoice(req.body);
+  await inTransaction(async (client) => {
+    await client.query(
+      `UPDATE invoices SET user_id = $1, order_id = $2, description = $3, amount = $4, discount = $5,
+         due_date = $6, issue_date = $7, notes = $8 WHERE id = $9`,
+      [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes, id],
+    );
+    await writeItems(client, id, v.items);
+  });
+  if (req.body.notify === true) {
+    await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,
+      `Invoice #${id} has been updated. Total ${billing.money(v.amount)}, due on ${billing.prettyDate(v.dueDate)}.`);
+  }
+  res.json({ ok: true });
 }));
 
 admin.patch('/invoices/:id', asyncRoute(async (req, res) => {
