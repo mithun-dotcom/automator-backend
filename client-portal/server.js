@@ -466,12 +466,30 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
         await billing.notify(client, `Order #${id} is being set up`,
           `We've started setting up your ${order.quantity} ${order.label} mailboxes.`);
       } else if (status === 'cancelled') {
+        // Stop renewals: no next billing date, and unpaid upcoming invoices void.
+        await query('UPDATE orders SET next_billing_date = NULL WHERE id = $1', [id]);
+        await query(
+          `UPDATE invoices SET status = 'void'
+            WHERE order_id = $1 AND status = 'unpaid' AND period_start IS NOT NULL AND period_start >= $2`,
+          [id, billing.today()],
+        );
         await billing.notify(client, `Batch #${id} cancelled`,
           `Your ${order.quantity} ${order.label} mailboxes (batch #${id}) have been cancelled and will not renew.`);
       }
     }
   }
   res.json({ ok: true, invoiceId });
+}));
+
+// Removes a batch entirely (e.g. added by mistake). Its unpaid invoices are
+// voided; paid invoices stay as history.
+admin.delete('/orders/:id', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const { rows: [o] } = await query('SELECT id FROM orders WHERE id = $1', [id]);
+  if (!o) throw new HttpError(404, 'Batch not found');
+  await query("UPDATE invoices SET status = 'void' WHERE order_id = $1 AND status = 'unpaid'", [id]);
+  await query('DELETE FROM orders WHERE id = $1', [id]);
+  res.json({ ok: true });
 }));
 
 admin.post('/invites', asyncRoute(async (req, res) => {

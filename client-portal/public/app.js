@@ -320,7 +320,7 @@ function batchesTable(orders) {
       <td>${esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
       <td class="num">${o.quantity}</td>
       <td>${badge(o.status)}</td>
-      <td class="num">${money(cycleAmount(o))}</td>
+      <td class="num">${o.status === 'cancelled' ? '<span class="muted">—</span>' : money(cycleAmount(o))}</td>
       <td>${o.status === 'active' ? fmtDate(o.next_billing_date) : '—'}</td>
       <td>${fmtDate(o.created_at)}</td>
       <td>${o.status !== 'cancelled' ? `<button class="btn btn-sm btn-danger" data-cancel="${o.id}">Cancel</button>` : ''}</td>
@@ -842,7 +842,13 @@ function adminOrders(focusId) {
             <div class="hint" style="margin:-8px 0 14px">Shown to the client and listed per domain in their cancellation email. Use "Name - user@domain.com" so mailboxes are counted per domain.</div>
             <div class="field"><label>Batch name</label><input name="batch_name" value="${esc(o.batch_name || '')}" placeholder="e.g. Q4 outreach"></div>
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
-            <button class="btn btn-primary" type="submit">Save</button>
+            <div class="row" style="justify-content:space-between">
+              <button class="btn btn-primary" type="submit">Save</button>
+              <div class="row">
+                ${o.status !== 'cancelled' ? `<button type="button" class="btn btn-danger" data-cancel-sub="${o.id}">Cancel subscription</button>` : ''}
+                <button type="button" class="btn btn-ghost" data-delete-batch="${o.id}">Delete batch</button>
+              </div>
+            </div>
             <div class="error"></div>
           </form>
         </div>
@@ -871,6 +877,28 @@ function adminOrders(focusId) {
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
       reloadAdmin();
     });
+  });
+  document.querySelectorAll('[data-cancel-sub]').forEach((b) => {
+    b.onclick = async () => {
+      const o = orders.find((x) => String(x.id) === b.dataset.cancelSub);
+      if (!confirm(`Cancel the subscription for ${batchTitle(o)} (${o.company || o.email})?\n\nIt stops renewing, its unpaid upcoming invoices are voided, and it no longer counts in the client's dashboard. The client is notified.`)) return;
+      try {
+        await api('PATCH', `/api/admin/orders/${o.id}`, { status: 'cancelled' });
+        toast(`${batchTitle(o)} cancelled`);
+        reloadAdmin();
+      } catch (ex) { toast(ex.message); }
+    };
+  });
+  document.querySelectorAll('[data-delete-batch]').forEach((b) => {
+    b.onclick = async () => {
+      const o = orders.find((x) => String(x.id) === b.dataset.deleteBatch);
+      if (!confirm(`Delete ${batchTitle(o)} (${o.company || o.email}) permanently?\n\nUse this for batches added by mistake. Its unpaid invoices are voided; paid invoices stay as history. To end a real subscription, use Cancel subscription instead.`)) return;
+      try {
+        await api('DELETE', `/api/admin/orders/${o.id}`);
+        toast(`${batchTitle(o)} deleted`);
+        reloadAdmin();
+      } catch (ex) { toast(ex.message); }
+    };
   });
   document.querySelectorAll('[data-complete]').forEach((b) => {
     b.onclick = async () => {
@@ -1099,10 +1127,17 @@ function typeLabel(type, pricing) {
   return p ? p.label : '';
 }
 
-async function setInvoiceStatus(id, status) {
+async function setInvoiceStatus(id, status, orderId) {
   if (status === 'void' && !confirm(`Void invoice #${id}?`)) return false;
   await api('PATCH', `/api/admin/invoices/${id}`, { status });
   toast(`Invoice #${id} updated`);
+  // Voiding a bill doesn't end the subscription behind it; offer to do that too.
+  const order = status === 'void' && orderId && state.admin.orders.find((o) => String(o.id) === String(orderId));
+  if (order && order.status !== 'cancelled'
+    && confirm(`Invoice #${id} is voided.\n\nAlso cancel the subscription for ${batchTitle(order)}? It will stop renewing and no longer count in the client's dashboard.`)) {
+    await api('PATCH', `/api/admin/orders/${order.id}`, { status: 'cancelled' });
+    toast(`Invoice #${id} voided and ${batchTitle(order)} cancelled`);
+  }
   return true;
 }
 
@@ -1123,14 +1158,14 @@ function adminInvoices() {
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
             ${i.status !== 'paid' ? `<button class="btn btn-sm" data-inv="${i.id}" data-status="paid">Mark paid</button>` : `<button class="btn btn-sm" data-inv="${i.id}" data-status="unpaid">Mark unpaid</button>`}
-            ${i.status !== 'void' ? `<button class="btn btn-sm btn-ghost" data-inv="${i.id}" data-status="void">Void</button>` : ''}
+            ${i.status !== 'void' ? `<button class="btn btn-sm btn-ghost" data-inv="${i.id}" data-status="void" data-order="${i.order_id || ''}">Void</button>` : ''}
           </div></td></tr>`;
         }).join('')}</tbody></table></div>` : '<div class="empty">No invoices yet. <a href="#/admin/invoice/new">Create one</a>.</div>'}
     </div>`);
 
   document.querySelectorAll('[data-inv]').forEach((b) => {
     b.onclick = async () => {
-      try { if (await setInvoiceStatus(b.dataset.inv, b.dataset.status)) reloadAdmin(); } catch (ex) { toast(ex.message); }
+      try { if (await setInvoiceStatus(b.dataset.inv, b.dataset.status, b.dataset.order)) reloadAdmin(); } catch (ex) { toast(ex.message); }
     };
   });
 }
@@ -1400,7 +1435,7 @@ function renderInvoiceView(inv, isAdmin) {
   }
   document.querySelectorAll('[data-set]').forEach((b) => {
     b.onclick = async () => {
-      try { if (await setInvoiceStatus(inv.id, b.dataset.set)) route(); } catch (ex) { toast(ex.message); }
+      try { if (await setInvoiceStatus(inv.id, b.dataset.set, inv.order_id)) route(); } catch (ex) { toast(ex.message); }
     };
   });
 }
