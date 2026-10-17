@@ -161,25 +161,74 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 
+const ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  order: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
+  billing: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  orders: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  clients: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  invoices: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
+  settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
+};
+const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+const NAV_ICONS = {
+  '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
+  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/settings': 'settings',
+};
+
+// Layout borrowed from the MithMill commission portal: navy sidebar with the
+// nav and account, a sticky page header, and the page content. A page's
+// `.page-head` (title, subtitle, actions) is lifted into the sticky header.
 function shell(tabs, active, content) {
-  const unread = state.dash ? state.dash.notifications.filter((n) => !n.read_at).length : 0;
   const isClient = state.me.role !== 'admin';
+  const unread = isClient && state.dash ? state.dash.notifications.filter((n) => !n.read_at).length : 0;
+  const items = isClient ? [...tabs, ['#/notifications', 'Notifications']] : tabs;
+  const current = active || (location.hash.startsWith('#/notifications') ? '#/notifications' : '');
+  const nav = items.map(([href, label]) => `<a href="${href}" class="${href === current ? 'active' : ''}">${icon(NAV_ICONS[href])}<span class="label">${label}</span>${href === '#/notifications' && unread ? `<span class="sb-badge">${unread}</span>` : ''}</a>`).join('');
+  const logo = (sub) => `<a class="sb-logo" href="#/"><img src="logo-mark-white.png" alt=""><div><div class="sb-name">MithMill</div><div class="sb-sub">${sub}</div></div></a>`;
+
+  document.body.classList.remove('nav-open');
   $app.innerHTML = `
-    <header class="topbar">
-      <a class="brand" href="#/"><img class="logo" src="logo.png" alt="MithMill"></a>
-      <nav class="nav">${tabs.map(([href, label]) => `<a href="${href}" class="${href === active ? 'active' : ''}">${label}</a>`).join('')}</nav>
-      <div class="topbar-right">
-        ${isClient ? `<a class="btn btn-ghost btn-sm bell" href="#/notifications" aria-label="Notifications">🔔${unread ? `<span class="dot">${unread}</span>` : ''}</a>` : ''}
-        <a class="muted small" href="#/password" title="Change password">${esc(state.me.email)}</a>
-        <button class="btn btn-sm" id="logout">Log out</button>
+    <aside class="sidebar" aria-label="Main navigation">
+      <div class="row" style="flex-wrap:nowrap">${logo(isClient ? 'Client Portal' : 'Admin Portal')}<button class="sb-close" id="nav-close" aria-label="Close menu">${icon('close')}</button></div>
+      <div class="sb-sep"></div>
+      <nav class="sb-nav">${nav}</nav>
+      <div class="sb-user">
+        <div class="avatar">${esc((state.me.name || state.me.email || '?').charAt(0).toUpperCase())}</div>
+        <div class="sb-user-info"><div class="email" title="${esc(state.me.email)}">${esc(state.me.email)}</div><div class="role">${isClient ? esc(state.me.company || 'Client') : 'Admin'}</div></div>
+        <a class="sb-icon-btn" href="#/password" title="Change password" aria-label="Change password">${icon('key')}</a>
+        <button class="sb-icon-btn" id="logout" title="Log out" aria-label="Log out">${icon('logout')}</button>
       </div>
-    </header>
-    <main class="main">${content}</main>`;
+    </aside>
+    <div class="sb-backdrop" id="nav-backdrop"></div>
+    <div class="mobilebar"><img src="logo-mark-white.png" alt="MithMill"><button id="nav-open" aria-label="Open menu">${icon('menu')}</button></div>
+    <div class="content">
+      <header class="header"><div class="header-inner" id="header-slot"></div></header>
+      <main class="main">${content}</main>
+    </div>`;
+
+  const head = $app.querySelector('.main > .page-head');
+  if (head) document.getElementById('header-slot').appendChild(head);
+  document.getElementById('nav-open').onclick = () => document.body.classList.add('nav-open');
+  document.getElementById('nav-close').onclick = () => document.body.classList.remove('nav-open');
+  document.getElementById('nav-backdrop').onclick = () => document.body.classList.remove('nav-open');
   document.getElementById('logout').onclick = async () => {
     await api('POST', '/api/auth/logout');
     Object.assign(state, { me: null, dash: null, admin: null, order: null });
     go('#/login');
   };
+}
+
+function welcome(name, stats, eyebrow = 'Welcome back') {
+  return `<div class="welcome">
+    <div><div class="eyebrow">${esc(eyebrow)}</div><div class="name">${esc(name)}</div></div>
+    <div class="wstats">${stats.map(([v, l]) => `<div class="wstat"><div class="wv">${v}</div><div class="wl">${esc(l)}</div></div>`).join('')}</div>
+  </div>`;
 }
 
 // ------------------------------------------------------------------ auth pages
@@ -336,16 +385,16 @@ function renderDashboard() {
   const { stats, orders, user } = state.dash;
   shell(CLIENT_TABS, '#/dashboard', `
     <div class="page-head">
-      <div><h1>Hi ${esc(user.name || 'there')}</h1><p class="muted">${esc(user.company || user.email)}</p></div>
+      <div><h1>Dashboard</h1><p class="muted">${esc(user.company || user.email)}${stats.nextRenewal ? ` · Next renewal ${fmtDate(stats.nextRenewal)}` : ''}</p></div>
       <a class="btn btn-primary" href="#/order">+ New order</a>
     </div>
     <div class="stack">
-      <div class="stats">
-        <div class="card stat"><div class="label">Active mailboxes</div><div class="value">${stats.activeMailboxes}</div><div class="sub">${stats.activeBatches} active batch${stats.activeBatches === 1 ? '' : 'es'}</div></div>
-        <div class="card stat"><div class="label">Being set up</div><div class="value">${stats.pendingMailboxes}</div><div class="sub">pending mailboxes</div></div>
-        <div class="card stat"><div class="label">Monthly billing</div><div class="value">${money(stats.monthlyBilling)}</div><div class="sub">Next renewal ${fmtDate(stats.nextRenewal)}</div></div>
-        <div class="card stat"><div class="label">Outstanding</div><div class="value">${money(stats.outstanding)}</div><div class="sub">${stats.unpaidInvoices} unpaid invoice${stats.unpaidInvoices === 1 ? '' : 's'} · <a href="#/billing">View</a></div></div>
-      </div>
+      ${welcome((user.name || user.company || 'there').split(' ')[0], [
+        [stats.activeMailboxes, 'Active mailboxes'],
+        [stats.pendingMailboxes, 'Being set up'],
+        [money(stats.monthlyBilling), 'Monthly billing'],
+        [money(stats.outstanding), `Outstanding · ${stats.unpaidInvoices} unpaid`],
+      ])}
       <div class="card">
         <div class="card-head"><h2>Your batches</h2></div>
         ${batchesTable(orders)}
@@ -638,6 +687,17 @@ function adminOrders() {
       <div><h1>Orders</h1><p class="muted">Open an order and click ✓ Mark as completed once its mailboxes are delivered. That activates them for the client and creates the first invoice.</p></div>
       <div class="row">${[['open', 'To do'], ['active', 'Active'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, l]) => `<button class="btn btn-sm ${filter === k ? 'btn-primary' : ''}" data-filter="${k}">${l} (${counts(k)})</button>`).join('')}</div>
     </div>
+    <div class="stack">
+    ${(() => {
+      const active = orders.filter((o) => o.status === 'active');
+      const unpaid = state.admin.invoices.filter((i) => i.status === 'unpaid');
+      return welcome((state.me.name || 'Admin').split(' ')[0], [
+        [counts('open'), 'Orders to do'],
+        [active.reduce((n, o) => n + o.quantity, 0), 'Active mailboxes'],
+        [money(active.reduce((n, o) => n + o.quantity * o.price_per_mailbox, 0)), 'Monthly revenue'],
+        [money(unpaid.reduce((n, i) => n + i.amount, 0)), `Unpaid · ${unpaid.length} invoice${unpaid.length === 1 ? '' : 's'}`],
+      ]);
+    })()}
     <div class="card">
       ${shown.length ? shown.map((o) => `
       <details class="order">
@@ -689,6 +749,7 @@ function adminOrders() {
           </form>
         </div>
       </details>`).join('') : '<div class="empty">Nothing here.</div>'}
+    </div>
     </div>`);
 
   document.querySelectorAll('[data-filter]').forEach((b) => {
