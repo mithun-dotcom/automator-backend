@@ -180,7 +180,8 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const uid = req.user.id;
   const settings = await getSettings();
   const [orders, invoices, notifications, pricing] = await Promise.all([
-    query(`SELECT ${ORDER_COLUMNS} FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+    query(`SELECT ${ORDER_COLUMNS}, (SELECT row_count FROM order_files f WHERE f.order_id = o.id) AS csv_rows
+           FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
            WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [uid]),
     query(`SELECT id, order_id, description, amount, issue_date, due_date, status, paid_at, created_at
            FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY due_date DESC, id DESC`, [uid]),
@@ -213,6 +214,8 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
     today: billing.today(),
     csvRequiredMin: Number(settings.csv_required_min),
     cancelNote: settings.cancel_note,
+    supportEmail: settings.support_email,
+    appUrl: baseUrl(req),
   });
 }));
 
@@ -221,6 +224,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
 const SETTING_DEFAULTS = {
   order_notify_emails: process.env.ORDER_NOTIFY_EMAILS || ADMIN_EMAIL,
   csv_required_min: '10',
+  support_email: ADMIN_EMAIL,
   cancel_note: `To cancel a subscription, email us at ${ADMIN_EMAIL || 'our support address'} or send us a message ` +
     'wherever you are connected with us (WhatsApp, Telegram, Slack, Skype…). Subscriptions can\'t be cancelled from the portal.',
 };
@@ -644,6 +648,11 @@ admin.put('/settings', asyncRoute(async (req, res) => {
     const n = Number(b.csv_required_min);
     if (!Number.isInteger(n) || n < 0 || n > 10000) throw new HttpError(400, 'CSV threshold must be a whole number (0 = never required)');
     updates.csv_required_min = String(n);
+  }
+  if (b.support_email !== undefined) {
+    const e = str(b.support_email, 200).toLowerCase();
+    if (!isEmail(e)) throw new HttpError(400, 'Enter a valid email for cancellation requests');
+    updates.support_email = e;
   }
   if (b.cancel_note !== undefined) {
     const note = str(b.cancel_note, 2000);

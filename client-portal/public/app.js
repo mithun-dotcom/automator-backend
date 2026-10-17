@@ -265,7 +265,7 @@ async function renderClient(page, arg) {
 function batchesTable(orders) {
   if (!orders.length) return '<div class="empty">No orders yet. Place your first order to get mailboxes set up.</div>';
   return `<div class="table-wrap"><table>
-    <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Monthly</th><th>Next renewal</th><th>Ordered</th></tr></thead>
+    <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Monthly</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
     <tbody>${orders.map((o) => `<tr>
       <td>#${o.id}</td>
       <td>${esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
@@ -274,7 +274,62 @@ function batchesTable(orders) {
       <td class="num">${money(o.quantity * o.price_per_mailbox)}</td>
       <td>${o.status === 'active' ? fmtDate(o.next_billing_date) : '—'}</td>
       <td>${fmtDate(o.created_at)}</td>
+      <td>${o.status !== 'cancelled' ? `<button class="btn btn-sm btn-danger" data-cancel="${o.id}">Cancel</button>` : ''}</td>
     </tr>`).join('')}</tbody></table></div>`;
+}
+
+// Clients cancel by emailing us from their registered address. This builds
+// the pre-written request for one batch.
+function cancelEmail(o) {
+  const { user, appUrl } = state.dash;
+  const subject = `Cancellation request: Batch #${o.id}`;
+  const body = [
+    'Hi Mithmill team,',
+    '',
+    'I would like to cancel all the inboxes from this order.',
+    '',
+    `Order name: Batch #${o.id} - ${o.inbox_label} (${o.quantity} mailboxes)`,
+    `CSV sheet link: ${o.csv_rows ? `${appUrl}/api/admin/orders/${o.id}/onboarding.csv` : 'No CSV uploaded'}`,
+    `Order creation date: ${fmtDate(o.created_at)}`,
+    `Payment amount: ${money(o.quantity * o.price_per_mailbox)} per month`,
+    '',
+    'Thank you,',
+    user.name || '',
+    user.company || '',
+    user.email,
+  ].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n');
+  return { subject, body };
+}
+
+function openCancelDialog(order) {
+  const { user, supportEmail } = state.dash;
+  const { subject, body } = cancelEmail(order);
+  const mailto = `mailto:${encodeURIComponent(supportEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal';
+  dlg.innerHTML = `
+    <div class="modal-head"><h2>Cancel batch #${order.id}</h2><button class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
+    <div class="note"><span class="note-icon">⚠️</span><div><strong>Please copy this email and send it from your registered email, ${esc(user.email)}, to <a href="mailto:${esc(supportEmail)}">${esc(supportEmail)}</a>.</strong> Requests from other addresses can't be accepted. Your mailboxes stay active until we confirm the cancellation.</div></div>
+    <div class="field" style="margin:16px 0 8px"><label>Subject</label><input readonly value="${esc(subject)}" id="cx-subject"></div>
+    <div class="field"><label>Email</label><textarea readonly id="cx-body" rows="14" style="font-family:inherit">${esc(body)}</textarea></div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn" data-close>Close</button>
+      <a class="btn" href="${mailto}">Open in email app</a>
+      <button class="btn btn-primary" id="cx-copy">Copy email</button>
+    </div>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(); });
+  dlg.querySelector('#cx-copy').onclick = async () => {
+    const text = `To: ${supportEmail}\nSubject: ${subject}\n\n${body}`;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = dlg.querySelector('#cx-body'); ta.select(); document.execCommand('copy');
+    }
+    toast('Email copied. Paste it into a new email to ' + supportEmail);
+  };
+  dlg.showModal();
 }
 
 function renderDashboard() {
@@ -297,6 +352,9 @@ function renderDashboard() {
       </div>
       ${cancelNote()}
     </div>`);
+  document.querySelectorAll('[data-cancel]').forEach((b) => {
+    b.onclick = () => openCancelDialog(orders.find((o) => String(o.id) === b.dataset.cancel));
+  });
 }
 
 function paymentNote() {
@@ -1017,6 +1075,9 @@ function adminSettings() {
         <div class="field"><label for="s-min">Require the onboarding CSV for orders of at least</label>
           <input id="s-min" name="csv_required_min" type="number" min="0" max="10000" required value="${esc(settings.csv_required_min)}" style="max-width:160px">
           <div class="hint">Mailboxes. Set to 0 to make the CSV optional for every order.</div></div>
+        <div class="field"><label for="s-support">Cancellation requests go to</label>
+          <input id="s-support" name="support_email" type="email" required value="${esc(settings.support_email)}" style="max-width:360px">
+          <div class="hint">Clients' Cancel button prepares an email to this address.</div></div>
         <div class="field"><label for="s-cancel">Cancellation note shown to clients</label>
           <textarea id="s-cancel" name="cancel_note" style="font-family:inherit;min-height:72px" required>${esc(settings.cancel_note)}</textarea></div>
         <button class="btn btn-primary" type="submit">Save settings</button>

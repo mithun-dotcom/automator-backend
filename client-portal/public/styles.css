@@ -284,3 +284,10 @@ input.num { text-align: right; }
 .note-info { background: var(--accent-soft); }
 .note-info strong { color: var(--accent); }
 .csv-err:empty { display: none; }
+
+/* ---- cancel dialog */
+.btn-danger { color: var(--red); border-color: var(--red-soft); }
+.btn-danger:hover { background: var(--red-soft); }
+dialog.modal { width: min(640px, calc(100% - 32px)); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 20px; }
+dialog.modal::backdrop { background: rgba(10, 12, 20, .55); }
+.modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
