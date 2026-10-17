@@ -453,7 +453,7 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
       }
       await billing.notify(client, `Your ${order.quantity} ${order.label} mailboxes are active`,
         `Batch #${id} is now active. Your next renewal is on ${billing.prettyDate(next)} ` +
-        `(${billing.money(billing.cycleAmount(order))}, billed ${billing.cycleLabel(billing.cycleMonths(order))}).`);
+        `(${billing.money(billing.cycleAmount(order))}).`);
     } else {
       await query('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
       if (status === 'in_progress') {

@@ -314,14 +314,14 @@ async function renderClient(page, arg) {
 function batchesTable(orders) {
   if (!orders.length) return '<div class="empty">No orders yet. Place your first order to get mailboxes set up.</div>';
   return `<div class="table-wrap"><table>
-    <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Price</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
+    <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Amount</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
     <tbody>${orders.map((o) => `<tr>
       <td>${o.batch_name ? `<strong>${esc(o.batch_name)}</strong><div class="muted small">#${o.id}</div>` : `#${o.id}`}</td>
       <td>${esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
       <td class="num">${o.quantity}</td>
       <td>${badge(o.status)}</td>
-      <td class="num">${money(cycleAmount(o))}<div class="muted small">per ${perCycle(cycleOf(o))}</div></td>
-      <td>${o.status === 'active' ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : '—'}</td>
+      <td class="num">${money(cycleAmount(o))}</td>
+      <td>${o.status === 'active' ? fmtDate(o.next_billing_date) : '—'}</td>
       <td>${fmtDate(o.created_at)}</td>
       <td>${o.status !== 'cancelled' ? `<button class="btn btn-sm btn-danger" data-cancel="${o.id}">Cancel</button>` : ''}</td>
     </tr>`).join('')}</tbody></table></div>`;
@@ -379,7 +379,7 @@ function cancelEmail(o) {
     `Order name: ${batchTitle(o)} - ${o.inbox_label} (${o.quantity} mailboxes)`,
     `CSV sheet link: ${o.csv_rows ? `${appUrl}/api/admin/orders/${o.id}/onboarding.csv` : 'No CSV uploaded'}`,
     `Order creation date: ${fmtDate(o.created_at)}`,
-    `Payment amount: ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`,
+    `Payment amount: ${money(cycleAmount(o))}`,
     '',
     'Thank you,',
     user.name || '',
@@ -467,7 +467,7 @@ function renderBilling() {
         <div class="card-head"><h2>Upcoming renewals</h2><span class="muted small">Reminders are sent 7, 3 and 1 day before each renewal.</span></div>
         ${active.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Renews on</th><th class="num">Amount</th></tr></thead>
-          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div></td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
+          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
         </table></div>` : '<div class="empty">No active batches yet.</div>'}
       </div>
       <div class="card">
@@ -713,6 +713,34 @@ async function renderAdmin(page, arg, sub) {
 
 const reloadAdmin = () => route();
 
+// Admin-only: what renews in the next 30 days, with cycle, amount and whether
+// the renewal invoice is paid. (Renewal invoices are issued 7 days ahead.)
+function upcomingRenewalsCard(orders, invoices, today) {
+  const days = (d) => Math.round((Date.parse(`${d}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  const rows = orders
+    .filter((o) => o.status === 'active' && o.next_billing_date && days(o.next_billing_date) <= 30)
+    .sort((a, b) => a.next_billing_date.localeCompare(b.next_billing_date));
+  const invoiceFor = (o) => invoices.find((i) => i.order_id === o.id && i.period_start === o.next_billing_date && i.status !== 'void');
+  return `<div class="card">
+    <div class="card-head"><div><h2>Upcoming renewals</h2><div class="muted small">Next 30 days · clients are reminded 7, 3 and 1 day before</div></div>
+      <span class="muted small">${rows.length} batch${rows.length === 1 ? '' : 'es'} · ${money(rows.reduce((n, o) => n + cycleAmount(o), 0))}</span></div>
+    ${rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Renews</th><th>Client</th><th>Batch</th><th>Cycle</th><th class="num">Amount</th><th>Invoice</th></tr></thead>
+      <tbody>${rows.map((o) => {
+        const d = days(o.next_billing_date);
+        const inv = invoiceFor(o);
+        return `<tr>
+          <td><strong>${fmtDate(o.next_billing_date)}</strong><div class="muted small">${d <= 0 ? 'today' : d === 1 ? 'tomorrow' : `in ${d} days`}</div></td>
+          <td>${esc(o.company || o.name || o.email)}<div class="muted small">${esc(o.email)}</div></td>
+          <td>${esc(batchTitle(o))}<div class="muted small">${o.quantity} × ${esc(o.inbox_label)}</div></td>
+          <td>${cycleName(cycleOf(o))}</td>
+          <td class="num">${money(cycleAmount(o))}</td>
+          <td>${inv ? `<a href="#/admin/invoice/${inv.id}">${badge(inv.status)}</a>` : '<span class="muted small">Issued 7 days before</span>'}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>` : '<div class="empty">Nothing renews in the next 30 days.</div>'}
+  </div>`;
+}
+
 function adminOrders() {
   const { orders } = state.admin;
   const filter = sessionStorage.getItem('orderFilter') || 'open';
@@ -737,6 +765,7 @@ function adminOrders() {
         [money(unpaid.reduce((n, i) => n + i.amount, 0)), `Unpaid · ${unpaid.length} invoice${unpaid.length === 1 ? '' : 's'}`],
       ]);
     })()}
+    ${upcomingRenewalsCard(orders, state.admin.invoices, state.admin.today)}
     <div class="card">
       ${shown.length ? shown.map((o) => `
       <details class="order">
@@ -745,7 +774,7 @@ function adminOrders() {
           <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}</div></span>
           <span class="hide-sm">${esc(o.inbox_label)}</span>
           <span class="hide-sm num">${o.quantity} boxes</span>
-          <span class="hide-sm">${fmtDate(o.created_at)}</span>
+          <span class="hide-sm">${o.status === 'active' && o.next_billing_date ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : `<span class="muted small">Ordered</span> ${fmtDate(o.created_at)}`}</span>
           <span>${badge(o.status)}</span>
         </summary>
         <div class="order-body">
