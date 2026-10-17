@@ -1170,6 +1170,11 @@ function invoiceEditor(inv) {
             <div class="hint">Use Paid to record an invoice that's already been collected, e.g. past billing.</div></div>
           <div class="field" id="e-paid-wrap" ${ed.status === 'paid' ? '' : 'hidden'}><label for="e-paid">Paid on</label><input id="e-paid" type="date" value="${esc(ed.paid_date)}"></div>
         </div>
+        ${isNew ? `<div class="batch-opt" id="e-batch-box">
+          <label class="check"><input type="checkbox" id="e-batches" checked> <strong>Add the mailbox lines to the client's dashboard as active batches</strong></label>
+          <div class="hint" style="margin:4px 0 10px 24px">Use this when the invoice is for mailboxes the client doesn't have as a batch yet. They renew from the issue date. Untick for one-off charges, or link an existing batch above instead.</div>
+          <div style="margin-left:24px;max-width:420px">${cycleFields(1)}</div>
+        </div>` : ''}
         <label class="check"><input type="checkbox" id="e-notify" ${isNew ? 'checked' : ''}> ${isNew ? 'Notify the client (portal notification and email)' : 'Notify the client about this change'}</label>
       </div>
 
@@ -1244,6 +1249,13 @@ function invoiceEditor(inv) {
   $('e-discount').oninput = (e) => { ed.discount = e.target.value; recalc(); };
   $('e-notes').oninput = (e) => { ed.notes = e.target.value; };
   $('e-status').onchange = (e) => { $('e-paid-wrap').hidden = e.target.value !== 'paid'; };
+  if (isNew) {
+    wireCycleFields($('e-batch-box'));
+    const syncBatchBox = () => { $('e-batch-box').hidden = Boolean(ed.order_id); };
+    $('e-order').addEventListener('change', syncBatchBox);
+    $('e-user').addEventListener('change', syncBatchBox);
+    syncBatchBox();
+  }
 
   $('inv-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1253,11 +1265,16 @@ function invoiceEditor(inv) {
       user_id: ed.user_id, order_id: ed.order_id || null, issue_date: ed.issue_date, due_date: ed.due_date,
       discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: $('e-notify').checked,
       status: $('e-status').value, paid_date: $('e-paid').value,
+      ...(isNew && !ed.order_id && $('e-batches').checked ? {
+        create_batches: true,
+        billing_cycle: $('e-batch-box').querySelector('[name=billing_cycle]').value,
+        custom_months: $('e-batch-box').querySelector('[name=custom_months]').value,
+      } : {}),
     };
     try {
       const r = isNew ? await api('POST', '/api/admin/invoices', body) : await api('PUT', `/api/admin/invoices/${inv.id}`, body);
       const id = isNew ? r.id : inv.id;
-      toast(isNew ? `Invoice #${id} created` : `Invoice #${id} saved`);
+      toast(isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved`);
       go(`#/admin/invoice/${id}`);
     } catch (ex) {
       $('e-error').textContent = ex.message;
@@ -1310,11 +1327,33 @@ function renderInvoiceView(inv, isAdmin) {
         ${inv.discount ? `<div><span>Discount</span><span>−${money(inv.discount)}</span></div>` : ''}
         <div class="grand"><span>Total due</span><span>${money(inv.amount)}</span></div>
       </div>
+      ${isAdmin && !inv.order_id && inv.items.some((it) => it.inbox_type && it.inbox_type !== 'other') ? `<div class="note no-print" id="to-batch">
+        <span class="note-icon">⚠️</span>
+        <div style="flex:1"><strong>These mailboxes aren't on the client's dashboard.</strong> This invoice isn't linked to a batch, so the client's active mailboxes and billing don't include it.
+          <div class="row" style="margin-top:10px;align-items:flex-end">
+            <div style="min-width:260px">${cycleFields(1)}</div>
+            <button class="btn btn-primary" id="make-batch" style="margin-bottom:16px">Add as active batch</button>
+          </div></div></div>` : ''}
       ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${esc(inv.notes)}</div></section>` : ''}
       <div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>
     </article>`);
 
   document.getElementById('print').onclick = () => window.print();
+  const mk = document.getElementById('make-batch');
+  if (mk) {
+    wireCycleFields(document.getElementById('to-batch'));
+    mk.onclick = async () => {
+      const box = document.getElementById('to-batch');
+      mk.disabled = true;
+      try {
+        const r = await api('POST', `/api/admin/invoices/${inv.id}/batches`, {
+          billing_cycle: box.querySelector('[name=billing_cycle]').value, custom_months: box.querySelector('[name=custom_months]').value,
+        });
+        toast(`Added ${r.batchIds.length} active batch${r.batchIds.length === 1 ? '' : 'es'} to the client's dashboard`);
+        route();
+      } catch (ex) { toast(ex.message); mk.disabled = false; }
+    };
+  }
   document.querySelectorAll('[data-set]').forEach((b) => {
     b.onclick = async () => {
       try { if (await setInvoiceStatus(inv.id, b.dataset.set)) route(); } catch (ex) { toast(ex.message); }

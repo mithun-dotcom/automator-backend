@@ -696,8 +696,48 @@ admin.get('/invoices/:id', asyncRoute(async (req, res) => {
   res.json(await invoiceWithItems(Number(req.params.id)));
 }));
 
+// Turns an invoice's mailbox lines into active batches, so they count on the
+// client's dashboard and renew from the invoice's issue date. The invoice is
+// linked to the (first) batch as its first billing period.
+async function createBatchesFromInvoice(invoiceId, months) {
+  const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [invoiceId]);
+  if (!inv) throw new HttpError(404, 'Invoice not found');
+  if (inv.order_id) throw new HttpError(400, 'This invoice is already linked to a batch');
+  const { rows: types } = await query('SELECT inbox_type FROM pricing');
+  const valid = new Set(types.map((t) => t.inbox_type));
+  const { rows: items } = await query('SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id', [invoiceId]);
+  const lines = items.filter((it) => valid.has(it.inbox_type));
+  if (!lines.length) throw new HttpError(400, 'This invoice has no mailbox lines (Google Workspace, Azure or Microsoft 365)');
+  const bad = lines.find((it) => !Number.isInteger(it.quantity) || it.quantity < 1);
+  if (bad) throw new HttpError(400, 'Mailbox lines need a whole-number quantity to become a batch');
+
+  const start = inv.issue_date || billing.today();
+  const day = Number(start.slice(8));
+  let next = billing.nextBillingDate(start, day, months);
+  while (next <= billing.today()) next = billing.nextBillingDate(next, day, months);
+  const ids = [];
+  for (const it of lines) {
+    const { rows: [o] } = await query(
+      `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months)
+       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9) RETURNING id`,
+      [inv.user_id, it.inbox_type, it.quantity, Math.round((it.unit_price / months) * 100) / 100, it.batch_name,
+       `${start}T00:00:00Z`, day, next, months],
+    );
+    ids.push(o.id);
+  }
+  await query('UPDATE invoices SET order_id = $1, period_start = $2 WHERE id = $3', [ids[0], start, invoiceId]);
+  return ids;
+}
+
+admin.post('/invoices/:id/batches', asyncRoute(async (req, res) => {
+  const ids = await createBatchesFromInvoice(Number(req.params.id), parseCycle(req.body));
+  res.status(201).json({ batchIds: ids });
+}));
+
 admin.post('/invoices', asyncRoute(async (req, res) => {
   const v = await parseInvoice(req.body);
+  const cycle = req.body.create_batches === true && !v.orderId ? parseCycle(req.body) : null;
   const id = await inTransaction(async (client) => {
     const { rows: [inv] } = await client.query(
       `INSERT INTO invoices (user_id, order_id, description, amount, discount, due_date, issue_date, notes)
@@ -708,11 +748,19 @@ admin.post('/invoices', asyncRoute(async (req, res) => {
     if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, inv.id]);
     return inv.id;
   });
+  let batchIds = [];
+  if (cycle) {
+    try {
+      batchIds = await createBatchesFromInvoice(id, cycle);
+    } catch (err) {
+      if (!(err instanceof HttpError)) throw err; // no mailbox lines: nothing to add
+    }
+  }
   if (req.body.notify !== false) {
     await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
       `Invoice #${id} for ${billing.money(v.amount)} (${v.description}) is due on ${billing.prettyDate(v.dueDate)}.`);
   }
-  res.status(201).json({ id });
+  res.status(201).json({ id, batchIds });
 }));
 
 admin.put('/invoices/:id', asyncRoute(async (req, res) => {

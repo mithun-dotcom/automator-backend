@@ -361,3 +361,4 @@ dialog.modal::backdrop { background: rgb(0 0 0 / .4); }
 }
 dialog.modal.modal-wide { width: min(760px, calc(100% - 32px)); max-height: calc(100vh - 32px); }
 [hidden] { display: none !important; }
+.batch-opt { padding: 14px; border-radius: 12px; background: var(--brand-50); border: 1px solid var(--brand-100); margin-bottom: 14px; }
