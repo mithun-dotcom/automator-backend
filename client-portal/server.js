@@ -224,8 +224,8 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
 const SETTING_DEFAULTS = {
   order_notify_emails: process.env.ORDER_NOTIFY_EMAILS || ADMIN_EMAIL,
   csv_required_min: '10',
-  support_email: ADMIN_EMAIL,
-  cancel_note: `To cancel a subscription, email us at ${ADMIN_EMAIL || 'our support address'} or send us a message ` +
+  support_email: (process.env.SUPPORT_EMAIL || 'support@mithmill.com').toLowerCase(),
+  cancel_note: `To cancel a subscription, email us at ${(process.env.SUPPORT_EMAIL || 'support@mithmill.com').toLowerCase()} or send us a message ` +
     'wherever you are connected with us (WhatsApp, Telegram, Slack, Skype…). Subscriptions can\'t be cancelled from the portal.',
 };
 
@@ -976,6 +976,12 @@ async function scheduledBilling() {
   await migrate();
   await ensureAdmin();
   await linkStandaloneInvoices();
+  // One-time switch requested by Mithmill: cancellation requests go to support@.
+  await query(
+    `INSERT INTO settings (key, value) VALUES ('support_email_moved_v1', now()::text) ON CONFLICT (key) DO NOTHING`,
+  ).then(async (r) => {
+    if (r.rowCount) await query("UPDATE settings SET value = 'support@mithmill.com' WHERE key = 'support_email'");
+  });
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
