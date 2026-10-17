@@ -36,6 +36,9 @@
     --red-soft: #3a1717;
     --shadow: none;
   }
+  /* The logo is dark navy, so give it a light backing on dark backgrounds. */
+  .logo, .auth-logo img { background: #fff; border-radius: 8px; padding: 4px 8px; box-sizing: content-box; }
+  .auth-logo img { padding: 10px 14px; max-width: 272px; }
 }
 
 * { box-sizing: border-box; }
@@ -63,6 +66,11 @@ h3 { font-size: 15px; font-weight: 600; }
   border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 700; font-size: 17px; display: flex; align-items: center; gap: 8px; color: var(--text); text-decoration: none; }
+.logo { height: 30px; width: auto; display: block; }
+.auth-logo { margin-bottom: 4px; }
+.auth-logo img { width: 100%; max-width: 300px; height: auto; display: block; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.price-row td { background: var(--surface-2); }
 .brand-mark { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 14px; }
 .nav { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
 .nav a {
@@ -212,6 +220,8 @@ details.order[open] summary { background: var(--surface-2); }
   .topbar-right { margin-left: auto; }
   .main { padding: 20px 16px 48px; }
   .grid-2, .types { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr; }
+  .logo { height: 24px; }
   .review dl, .kv { grid-template-columns: 1fr; }
   .review dt { margin-top: 8px; }
   .stat .value { font-size: 22px; }

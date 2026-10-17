@@ -128,7 +128,7 @@ function shell(tabs, active, content) {
   const isClient = state.me.role !== 'admin';
   $app.innerHTML = `
     <header class="topbar">
-      <a class="brand" href="#/"><span class="brand-mark">M</span>Mithmill</a>
+      <a class="brand" href="#/"><img class="logo" src="logo.png" alt="MithMill"></a>
       <nav class="nav">${tabs.map(([href, label]) => `<a href="${href}" class="${href === active ? 'active' : ''}">${label}</a>`).join('')}</nav>
       <div class="topbar-right">
         ${isClient ? `<a class="btn btn-ghost btn-sm bell" href="#/notifications" aria-label="Notifications">🔔${unread ? `<span class="dot">${unread}</span>` : ''}</a>` : ''}
@@ -147,7 +147,7 @@ function shell(tabs, active, content) {
 // ------------------------------------------------------------------ auth pages
 
 function authCard(inner) {
-  $app.innerHTML = `<div class="auth"><div class="card"><span class="brand"><span class="brand-mark">M</span>Mithmill</span>${inner}</div></div>`;
+  $app.innerHTML = `<div class="auth"><div class="card"><div class="auth-logo"><img src="logo-full.png" alt="MithMill — From Cold to Gold: Email Strategies That Shine"></div>${inner}</div></div>`;
 }
 
 function renderLogin() {
@@ -516,6 +516,10 @@ function adminOrders() {
               <select name="status">${['pending', 'in_progress', 'active', 'cancelled'].map((s) => `<option value="${s}" ${o.status === s ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('')}</select>
               ${o.activated_at ? '' : '<div class="hint">Activating creates the first month\'s invoice and sets the renewal date one month from today.</div>'}
             </div>
+            <div class="grid-2">
+              <div class="field"><label>Mailboxes</label><input type="number" name="quantity" min="1" max="10000" required value="${o.quantity}"></div>
+              <div class="field"><label>Price per mailbox ($)</label><input type="number" name="price_per_mailbox" step="0.01" min="0" required value="${o.price_per_mailbox}"></div>
+            </div>
             ${o.status === 'active' ? `<div class="field"><label>Next renewal date</label><input type="date" name="next_billing_date" value="${esc(o.next_billing_date || '')}"><div class="hint">Reminders go out 7, 3 and 1 day before this date.</div></div>` : ''}
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
             <button class="btn btn-primary" type="submit">Save</button>
@@ -530,7 +534,7 @@ function adminOrders() {
   });
   document.querySelectorAll('.order-form').forEach((form) => {
     onSubmit(form, async (d) => {
-      const body = { status: d.status, admin_notes: d.admin_notes };
+      const body = { status: d.status, admin_notes: d.admin_notes, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
       if (d.next_billing_date) body.next_billing_date = d.next_billing_date;
       await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
       toast(`Order #${form.dataset.id} saved`);
@@ -540,7 +544,8 @@ function adminOrders() {
 }
 
 function adminClients() {
-  const { clients, invites, mailEnabled } = state.admin;
+  const { clients, invites, mailEnabled, pricing, clientPricing } = state.admin;
+  const labelOf = (t) => (pricing.find((p) => p.inbox_type === t) || {}).label || t;
   shell(ADMIN_TABS, '#/admin/clients', `
     <div class="page-head"><div><h1>Clients & invites</h1><p class="muted">The portal is invite-only. Clients can only join through a link you send.</p></div></div>
     <div class="stack">
@@ -560,12 +565,27 @@ function adminClients() {
       <div class="card">
         <div class="card-head"><h2>Clients</h2><span class="muted small">${clients.length} total</span></div>
         ${clients.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Client</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Joined</th><th></th></tr></thead>
-          <tbody>${clients.map((c) => `<tr>
+          <thead><tr><th>Client</th><th>Pricing</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Joined</th><th></th></tr></thead>
+          <tbody>${clients.map((c) => {
+            const custom = clientPricing.filter((cp) => cp.user_id === c.id);
+            return `<tr>
             <td>${esc(c.company || c.name)}<div class="muted small">${esc(c.name)} · ${esc(c.email)}</div></td>
+            <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
-            <td><button class="btn btn-sm" data-reset="${esc(c.email)}">Password reset link</button></td>
-          </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet. Invite your first one above.</div>'}
+            <td><div class="row" style="flex-wrap:nowrap"><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">Reset link</button></div></td>
+          </tr>
+          <tr class="price-row" id="prices-${c.id}" hidden><td colspan="6">
+            <form class="client-prices" data-id="${c.id}">
+              <p class="muted small" style="margin:0 0 12px">Price per mailbox / month for ${esc(c.company || c.name || c.email)}. Leave a field blank to use the standard price. New orders from this client use these prices.</p>
+              <div class="grid-4">${pricing.map((p) => {
+                const own = custom.find((cp) => cp.inbox_type === p.inbox_type);
+                return `<div class="field"><label>${esc(p.label)}</label><input type="number" step="0.01" min="0" name="${esc(p.inbox_type)}" placeholder="Standard: ${money(p.price_per_mailbox)}" value="${own ? own.price_per_mailbox : ''}"></div>`;
+              }).join('')}</div>
+              <div class="row"><button class="btn btn-primary btn-sm" type="submit">Save pricing</button><button class="btn btn-sm" type="button" data-close="${c.id}">Cancel</button></div>
+              <div class="error"></div>
+            </form>
+          </td></tr>`;
+          }).join('')}</tbody></table></div>` : '<div class="empty">No clients yet. Invite your first one above.</div>'}
       </div>
 
       <div class="card">
@@ -604,6 +624,21 @@ function adminClients() {
         window.scrollTo(0, 0);
       } catch (ex) { toast(ex.message); }
     };
+  });
+  document.querySelectorAll('[data-prices]').forEach((b) => {
+    b.onclick = () => { const r = document.getElementById(`prices-${b.dataset.prices}`); r.hidden = !r.hidden; };
+  });
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.onclick = () => { document.getElementById(`prices-${b.dataset.close}`).hidden = true; };
+  });
+  document.querySelectorAll('.client-prices').forEach((form) => {
+    onSubmit(form, async (d) => {
+      await api('PUT', `/api/admin/clients/${form.dataset.id}/pricing`, {
+        prices: Object.entries(d).map(([inbox_type, v]) => ({ inbox_type, price_per_mailbox: v === '' ? null : v })),
+      });
+      toast('Client pricing saved');
+      reloadAdmin();
+    });
   });
   document.querySelectorAll('[data-revoke]').forEach((b) => {
     b.onclick = async () => {
@@ -679,8 +714,8 @@ function adminSettings() {
     <div class="page-head"><div><h1>Pricing & reminders</h1></div></div>
     <div class="stack">
       <form class="card card-pad" id="prices">
-        <h2>Price per mailbox (USD / month)</h2>
-        <p class="muted small" style="margin:4px 0 16px">New orders use these prices. Existing batches keep the price they were ordered at.</p>
+        <h2>Standard price per mailbox (USD / month)</h2>
+        <p class="muted small" style="margin:4px 0 16px">Used for every client without custom pricing. Set a client's own prices under <a href="#/admin/clients">Clients &amp; invites</a> → Edit pricing. Existing batches keep the price they were ordered at; you can change it on the order.</p>
         <div class="grid-2">${pricing.map((p) => `
           <div class="field"><label for="p-${esc(p.inbox_type)}">${esc(p.label)}</label>
           <input id="p-${esc(p.inbox_type)}" name="${esc(p.inbox_type)}" type="number" step="0.01" min="0" required value="${p.price_per_mailbox}"></div>`).join('')}</div>

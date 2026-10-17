@@ -19,7 +19,8 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Orders: every setup detail. Setting an order to **Active** turns on the client's mailboxes, creates the first month's invoice and sets the renewal date one month out. You can change the renewal date and keep internal notes.
 - Clients & invites: invite clients by email (you also get a copy-able link), revoke pending invites, and generate password-reset links.
 - Invoices: create one-off invoices, and mark invoices paid, unpaid or void. Clients are notified in each case.
-- Pricing & reminders: set the price per mailbox for each inbox type, and run the reminder check by hand.
+- Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
+- Reminders: run the reminder check by hand under **Pricing & reminders**.
 
 ## Renewal reminders
 

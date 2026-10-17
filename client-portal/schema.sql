@@ -98,3 +98,12 @@ CREATE TABLE IF NOT EXISTS reminders_sent (
   sent_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (order_id, billing_date, days_before)
 );
+
+-- Per-client price overrides. A missing row means the client pays the
+-- standard price from `pricing`.
+CREATE TABLE IF NOT EXISTS client_pricing (
+  user_id           INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  inbox_type        TEXT NOT NULL REFERENCES pricing(inbox_type),
+  price_per_mailbox NUMERIC(10,2) NOT NULL CHECK (price_per_mailbox >= 0),
+  PRIMARY KEY (user_id, inbox_type)
+);

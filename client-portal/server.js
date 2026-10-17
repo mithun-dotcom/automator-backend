@@ -163,6 +163,12 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
 
 // ---------------------------------------------------------------- client
 
+// Standard prices with this client's overrides applied.
+const CLIENT_PRICING_SQL = `
+  SELECT p.inbox_type, p.label, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
+    FROM pricing p
+    LEFT JOIN client_pricing cp ON cp.inbox_type = p.inbox_type AND cp.user_id = $1`;
+
 const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o.price_per_mailbox,
   o.domains, o.usernames, o.domain_access_method, o.registrar, o.registrar_email, o.domain_access_notes,
   o.sequencer, o.sequencer_workspace, o.sequencer_email, o.sequencer_notes, o.notes, o.status,
@@ -177,7 +183,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
            FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY due_date DESC, id DESC`, [uid]),
     query(`SELECT id, title, body, read_at, created_at FROM notifications
            WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`, [uid]),
-    query('SELECT inbox_type, label, price_per_mailbox FROM pricing ORDER BY sort_order'),
+    query(`${CLIENT_PRICING_SQL} ORDER BY p.sort_order`, [uid]),
   ]);
 
   const active = orders.rows.filter((o) => o.status === 'active');
@@ -210,7 +216,8 @@ const SEQUENCERS = ['Instantly', 'Smartlead', 'Lemlist', 'Reply.io', 'Other', 'N
 
 app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   const b = req.body;
-  const { rows: [price] } = await query('SELECT * FROM pricing WHERE inbox_type = $1', [str(b.inbox_type, 50)]);
+  const { rows: [price] } = await query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type = $2`,
+    [req.user.id, str(b.inbox_type, 50)]);
   if (!price) throw new HttpError(400, 'Choose an inbox type');
 
   const quantity = Number.parseInt(b.quantity, 10);
@@ -268,7 +275,7 @@ const admin = express.Router();
 admin.use(auth, adminOnly);
 
 admin.get('/overview', asyncRoute(async (req, res) => {
-  const [orders, clients, invites, invoices, pricing] = await Promise.all([
+  const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
     query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.user_id, u.email, u.name, u.company
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
@@ -282,10 +289,11 @@ admin.get('/overview', asyncRoute(async (req, res) => {
     query(`SELECT i.*, u.email, u.company FROM invoices i JOIN users u ON u.id = i.user_id
            ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`),
     query('SELECT * FROM pricing ORDER BY sort_order'),
+    query('SELECT user_id, inbox_type, price_per_mailbox FROM client_pricing'),
   ]);
   res.json({
     orders: orders.rows, clients: clients.rows, invites: invites.rows,
-    invoices: invoices.rows, pricing: pricing.rows, mailEnabled: mailEnabled(), today: billing.today(),
+    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, mailEnabled: mailEnabled(), today: billing.today(),
   });
 }));
 
@@ -300,6 +308,20 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
 
   if (typeof req.body.admin_notes === 'string') {
     await query('UPDATE orders SET admin_notes = $1 WHERE id = $2', [str(req.body.admin_notes), id]);
+  }
+
+  const newPrice = req.body.price_per_mailbox !== undefined ? Number(req.body.price_per_mailbox) : order.price_per_mailbox;
+  const newQty = req.body.quantity !== undefined ? Number(req.body.quantity) : order.quantity;
+  if (!(newPrice >= 0)) throw new HttpError(400, 'Price must be 0 or more');
+  if (!Number.isInteger(newQty) || newQty < 1 || newQty > 10000) throw new HttpError(400, 'Mailboxes must be between 1 and 10000');
+  if (newPrice !== order.price_per_mailbox || newQty !== order.quantity) {
+    await query('UPDATE orders SET price_per_mailbox = $1, quantity = $2 WHERE id = $3', [newPrice, newQty, id]);
+    // Keep an already-issued, unpaid invoice for the upcoming renewal in step.
+    await query(
+      `UPDATE invoices SET amount = $1 WHERE order_id = $2 AND period_start = $3 AND status = 'unpaid'`,
+      [newPrice * newQty, id, order.next_billing_date],
+    );
+    Object.assign(order, { price_per_mailbox: newPrice, quantity: newQty });
   }
 
   if (req.body.next_billing_date !== undefined) {
@@ -441,6 +463,30 @@ admin.put('/pricing', asyncRoute(async (req, res) => {
     const price = Number(p.price_per_mailbox);
     if (!(price >= 0)) throw new HttpError(400, 'Prices must be 0 or more');
     await query('UPDATE pricing SET price_per_mailbox = $1 WHERE inbox_type = $2', [price, str(p.inbox_type, 50)]);
+  }
+  res.json({ ok: true });
+}));
+
+admin.put('/clients/:id/pricing', asyncRoute(async (req, res) => {
+  const userId = Number(req.params.id);
+  const { rows: [client] } = await query("SELECT id FROM users WHERE id = $1 AND role = 'client'", [userId]);
+  if (!client) throw new HttpError(404, 'Client not found');
+  const prices = Array.isArray(req.body.prices) ? req.body.prices : [];
+  for (const p of prices) {
+    const type = str(p.inbox_type, 50);
+    // Blank means "use the standard price".
+    if (p.price_per_mailbox === null || p.price_per_mailbox === '' || p.price_per_mailbox === undefined) {
+      await query('DELETE FROM client_pricing WHERE user_id = $1 AND inbox_type = $2', [userId, type]);
+      continue;
+    }
+    const price = Number(p.price_per_mailbox);
+    if (!(price >= 0)) throw new HttpError(400, 'Prices must be 0 or more');
+    await query(
+      `INSERT INTO client_pricing (user_id, inbox_type, price_per_mailbox)
+       SELECT $1, inbox_type, $3 FROM pricing WHERE inbox_type = $2
+       ON CONFLICT (user_id, inbox_type) DO UPDATE SET price_per_mailbox = EXCLUDED.price_per_mailbox`,
+      [userId, type, price],
+    );
   }
   res.json({ ok: true });
 }));
