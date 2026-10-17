@@ -728,6 +728,7 @@ async function renderAdmin(page, arg, sub) {
     return sub === 'edit' ? invoiceEditor(inv) : renderInvoiceView(inv, true);
   }
   const pages = { orders: adminOrders, clients: adminClients, invoices: adminInvoices, settings: adminSettings };
+  if (page === 'orders' && arg) return adminOrders(Number(arg));
   (pages[page] || adminOrders)();
 }
 
@@ -761,9 +762,11 @@ function upcomingRenewalsCard(orders, invoices, today) {
   </div>`;
 }
 
-function adminOrders() {
+// focusId: open that batch (from a link like #/admin/orders/12), with its
+// domains box ready to edit.
+function adminOrders(focusId) {
   const { orders } = state.admin;
-  const filter = sessionStorage.getItem('orderFilter') || 'open';
+  const filter = focusId ? 'all' : sessionStorage.getItem('orderFilter') || 'open';
   const shown = orders.filter((o) => (filter === 'all' ? true
     : filter === 'open' ? ['pending', 'in_progress'].includes(o.status) : o.status === filter));
   const counts = (s) => orders.filter((o) => (s === 'open' ? ['pending', 'in_progress'].includes(o.status) : s === 'all' || o.status === s)).length;
@@ -788,7 +791,7 @@ function adminOrders() {
     ${upcomingRenewalsCard(orders, state.admin.invoices, state.admin.today)}
     <div class="card">
       ${shown.length ? shown.map((o) => `
-      <details class="order">
+      <details class="order" id="order-${o.id}" ${o.id === focusId ? 'open' : ''}>
         <summary>
           <strong>#${o.id}</strong>
           <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}</div></span>
@@ -799,8 +802,8 @@ function adminOrders() {
         </summary>
         <div class="order-body">
           <div class="stack" style="gap:14px">
-            <div><h3>Domains</h3><pre>${esc(o.domains)}</pre></div>
-            <div><h3>Usernames</h3><pre>${esc(o.usernames)}</pre></div>
+            ${o.domains ? `<div><h3>Domains</h3><pre>${esc(o.domains)}</pre></div>` : ''}
+            ${o.usernames ? `<div><h3>Usernames</h3><pre>${esc(o.usernames)}</pre></div>` : ''}
             <dl class="kv">
               ${kv('Type', o.inbox_label)}
               ${kv('Mailboxes', String(o.quantity))}
@@ -848,6 +851,14 @@ function adminOrders() {
     </div>`);
 
   document.getElementById('add-batch').onclick = () => openBatchDialog();
+  if (focusId) {
+    const el = document.getElementById(`order-${focusId}`);
+    if (el) {
+      el.scrollIntoView({ block: 'start' });
+      const domains = el.querySelector('textarea[name=domains]');
+      if (domains) domains.focus({ preventScroll: true });
+    }
+  }
   document.querySelectorAll('[data-filter]').forEach((b) => {
     b.onclick = () => { sessionStorage.setItem('orderFilter', b.dataset.filter); adminOrders(); };
   });
@@ -1165,7 +1176,7 @@ function invoiceEditor(inv) {
             <select id="e-user" required><option value="">Choose…</option>
               ${clients.map((c) => `<option value="${c.id}" ${String(c.id) === ed.user_id ? 'selected' : ''}>${esc(c.company || c.name)} (${esc(c.email)})</option>`).join('')}</select></div>
           <div class="field"><label for="e-order">Linked batch (optional)</label><select id="e-order"></select>
-            <div class="hint">Choosing a batch adds a line for it.</div></div>
+            <div class="hint">Choosing a batch adds a line for it. <a id="e-batch-link" href="#" hidden>Edit batch details (domains, usernames) →</a></div></div>
         </div>
         <div class="grid-2">
           <div class="field"><label for="e-issue">Issue date</label><input id="e-issue" type="date" required value="${esc(ed.issue_date)}"></div>
@@ -1255,8 +1266,16 @@ function invoiceEditor(inv) {
     ed.items.forEach((it) => { if (it.inbox_type && it.inbox_type !== 'other') it.unit_price = String(priceFor(it.inbox_type)); });
     fillBatches(); renderLines();
   };
+  const syncBatchLink = () => {
+    const a = $('e-batch-link');
+    a.hidden = !ed.order_id;
+    a.href = `#/admin/orders/${ed.order_id}`;
+  };
+  syncBatchLink();
+  $('e-order').addEventListener('change', syncBatchLink);
   $('e-order').onchange = (e) => {
     ed.order_id = e.target.value;
+    syncBatchLink();
     const o = orders.find((x) => String(x.id) === ed.order_id);
     if (!o) return;
     const line = { inbox_type: o.inbox_type, batch_name: `Batch #${o.id}`, description: `${o.inbox_label} mailboxes`, quantity: String(o.quantity), unit_price: String(o.price_per_mailbox) };
@@ -1321,7 +1340,7 @@ function renderInvoiceView(inv, isAdmin) {
     <div class="page-head no-print">
       <a class="btn" href="${back}">← Back</a>
       <div class="row">
-        ${isAdmin ? `<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
+        ${isAdmin ? `${inv.order_id ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
           ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
           ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
