@@ -314,17 +314,54 @@ async function renderClient(page, arg) {
 function batchesTable(orders) {
   if (!orders.length) return '<div class="empty">No orders yet. Place your first order to get mailboxes set up.</div>';
   return `<div class="table-wrap"><table>
-    <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Monthly</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
+    <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Price</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
     <tbody>${orders.map((o) => `<tr>
       <td>${o.batch_name ? `<strong>${esc(o.batch_name)}</strong><div class="muted small">#${o.id}</div>` : `#${o.id}`}</td>
       <td>${esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
       <td class="num">${o.quantity}</td>
       <td>${badge(o.status)}</td>
-      <td class="num">${money(o.quantity * o.price_per_mailbox)}</td>
-      <td>${o.status === 'active' ? fmtDate(o.next_billing_date) : '—'}</td>
+      <td class="num">${money(cycleAmount(o))}<div class="muted small">per ${perCycle(cycleOf(o))}</div></td>
+      <td>${o.status === 'active' ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : '—'}</td>
       <td>${fmtDate(o.created_at)}</td>
       <td>${o.status !== 'cancelled' ? `<button class="btn btn-sm btn-danger" data-cancel="${o.id}">Cancel</button>` : ''}</td>
     </tr>`).join('')}</tbody></table></div>`;
+}
+
+// Billing cycles: prices are per mailbox per month; a cycle is 1 (monthly),
+// 12 (yearly) or any custom number of months.
+const cycleOf = (o) => Math.max(1, Number(o.billing_months) || 1);
+const cycleName = (n) => (n === 1 ? 'Monthly' : n === 12 ? 'Yearly' : `Every ${n} months`);
+const perCycle = (n) => (n === 1 ? 'month' : n === 12 ? 'year' : `${n} months`);
+const cycleAmount = (o) => o.quantity * o.price_per_mailbox * cycleOf(o);
+
+function cycleFields(months = 1) {
+  const kind = months === 1 ? 'monthly' : months === 12 ? 'yearly' : 'custom';
+  return `<div class="field"><label>Billing cycle</label>
+    <div class="row" style="flex-wrap:nowrap">
+      <select name="billing_cycle" data-cycle>
+        <option value="monthly" ${kind === 'monthly' ? 'selected' : ''}>Monthly</option>
+        <option value="yearly" ${kind === 'yearly' ? 'selected' : ''}>Yearly</option>
+        <option value="custom" ${kind === 'custom' ? 'selected' : ''}>Custom</option>
+      </select>
+      <span class="row" style="flex-wrap:nowrap;gap:6px" data-custom ${kind === 'custom' ? '' : 'hidden'}>every <input name="custom_months" type="number" min="1" max="36" value="${kind === 'custom' ? months : 3}" style="width:80px"> months</span>
+    </div>
+    <div class="hint">Renews on the same day every cycle. Invoices cover the whole cycle at the monthly price.</div></div>`;
+}
+function wireCycleFields(root) {
+  root.querySelectorAll('[data-cycle]').forEach((sel) => {
+    const custom = sel.parentElement.querySelector('[data-custom]');
+    sel.addEventListener('change', () => { custom.hidden = sel.value !== 'custom'; });
+  });
+}
+const cycleFromForm = (d) => (d.billing_cycle === 'yearly' ? 12 : d.billing_cycle === 'custom' ? Number(d.custom_months) || 1 : 1);
+
+// Client-side twin of billing.nextBillingDate: same day of month, clamped.
+function addMonths(d, day, months) {
+  const [y, m] = d.split('-').map(Number);
+  const total = y * 12 + (m - 1) + months;
+  const ny = Math.floor(total / 12); const nm = (total % 12) + 1;
+  const dim = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  return `${ny}-${String(nm).padStart(2, '0')}-${String(Math.min(day, dim)).padStart(2, '0')}`;
 }
 
 const batchTitle = (o) => (o.batch_name ? `${o.batch_name} (#${o.id})` : `Batch #${o.id}`);
@@ -342,7 +379,7 @@ function cancelEmail(o) {
     `Order name: ${batchTitle(o)} - ${o.inbox_label} (${o.quantity} mailboxes)`,
     `CSV sheet link: ${o.csv_rows ? `${appUrl}/api/admin/orders/${o.id}/onboarding.csv` : 'No CSV uploaded'}`,
     `Order creation date: ${fmtDate(o.created_at)}`,
-    `Payment amount: ${money(o.quantity * o.price_per_mailbox)} per month`,
+    `Payment amount: ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`,
     '',
     'Thank you,',
     user.name || '',
@@ -430,7 +467,7 @@ function renderBilling() {
         <div class="card-head"><h2>Upcoming renewals</h2><span class="muted small">Reminders are sent 7, 3 and 1 day before each renewal.</span></div>
         ${active.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Renews on</th><th class="num">Amount</th></tr></thead>
-          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(o.quantity * o.price_per_mailbox)}</td></tr>`).join('')}</tbody>
+          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div></td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
         </table></div>` : '<div class="empty">No active batches yet.</div>'}
       </div>
       <div class="card">
@@ -718,7 +755,8 @@ function adminOrders() {
             <dl class="kv">
               ${kv('Type', o.inbox_label)}
               ${kv('Mailboxes', String(o.quantity))}
-              ${kv('Price', `${money(o.price_per_mailbox)} / mailbox → ${money(o.quantity * o.price_per_mailbox)}/mo`)}
+              ${kv('Price', `${money(o.price_per_mailbox)} / mailbox / month → ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`)}
+              ${kv('Billing', `${cycleName(cycleOf(o))}${o.status === 'active' && o.next_billing_date ? `, next renewal ${fmtDate(o.next_billing_date)}` : ''}`)}
               ${kv('Domain access', ACCESS_LABEL[o.domain_access_method] || o.domain_access_method)}
               ${kv('Registrar', o.registrar)}
               ${kv('Registrar email', o.registrar_email)}
@@ -734,7 +772,7 @@ function adminOrders() {
           <form class="order-form" data-id="${o.id}">
             ${['pending', 'in_progress'].includes(o.status) ? `<div class="complete-box">
               <button type="button" class="btn btn-success" data-complete="${o.id}">✓ Mark as completed</button>
-              <div class="hint">Use this once the mailboxes are delivered. It activates them for the client, creates the first month's invoice (${money(o.quantity * o.price_per_mailbox)}), sets the renewal date one month from today and notifies the client.</div>
+              <div class="hint">Use this once the mailboxes are delivered. It activates them for the client, creates the first invoice (${money(cycleAmount(o))} for ${perCycle(cycleOf(o)) === 'month' ? 'the first month' : `the first ${perCycle(cycleOf(o))}`}), starts the ${cycleName(cycleOf(o)).toLowerCase()} renewals from today and notifies the client.</div>
             </div>` : ''}
             <div class="field"><label>Status</label>
               <select name="status">${['pending', 'in_progress', 'active', 'cancelled'].map((s) => `<option value="${s}" ${o.status === s ? 'selected' : ''}>${s === 'active' ? 'Active (completed)' : STATUS_LABEL[s]}</option>`).join('')}</select>
@@ -744,7 +782,7 @@ function adminOrders() {
               <div class="field"><label>Mailboxes</label><input type="number" name="quantity" min="1" max="10000" required value="${o.quantity}"></div>
               <div class="field"><label>Price per mailbox ($)</label><input type="number" name="price_per_mailbox" step="0.01" min="0" required value="${o.price_per_mailbox}"></div>
             </div>
-            ${o.status === 'active' ? `<div class="field"><label>Next renewal date</label><input type="date" name="next_billing_date" value="${esc(o.next_billing_date || '')}"><div class="hint">Reminders go out 7, 3 and 1 day before this date.</div></div>` : ''}
+            ${o.status !== 'cancelled' ? cycleFields(cycleOf(o)) : ''}
             <div class="field"><label>Batch name</label><input name="batch_name" value="${esc(o.batch_name || '')}" placeholder="e.g. Q4 outreach"></div>
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
             <button class="btn btn-primary" type="submit">Save</button>
@@ -759,10 +797,11 @@ function adminOrders() {
   document.querySelectorAll('[data-filter]').forEach((b) => {
     b.onclick = () => { sessionStorage.setItem('orderFilter', b.dataset.filter); adminOrders(); };
   });
+  wireCycleFields(document);
   document.querySelectorAll('.order-form').forEach((form) => {
     onSubmit(form, async (d) => {
       const body = { status: d.status, admin_notes: d.admin_notes, batch_name: d.batch_name, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
-      if (d.next_billing_date) body.next_billing_date = d.next_billing_date;
+      if (d.billing_cycle) Object.assign(body, { billing_cycle: d.billing_cycle, custom_months: d.custom_months });
       const r = await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
       reloadAdmin();
@@ -773,12 +812,13 @@ function adminOrders() {
       const form = b.closest('form');
       const d = formData(form);
       const id = b.dataset.complete;
-      const total = money(Number(d.quantity) * Number(d.price_per_mailbox));
+      const total = money(Number(d.quantity) * Number(d.price_per_mailbox) * cycleFromForm(d));
       if (!confirm(`Mark order #${id} as completed?\n\nThis activates the mailboxes for the client, creates the first month's invoice (${total}) and sends them a notification.`)) return;
       b.disabled = true;
       try {
         const r = await api('PATCH', `/api/admin/orders/${id}`, {
           status: 'active', admin_notes: d.admin_notes, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox,
+          billing_cycle: d.billing_cycle, custom_months: d.custom_months,
         });
         toast(r.invoiceId ? `Order #${id} completed. Invoice #${r.invoiceId} created — see Invoices.` : `Order #${id} completed`);
         reloadAdmin();
@@ -814,7 +854,7 @@ function openBatchDialog(userId) {
         <div class="field"><label>Mailbox type</label><select name="inbox_type" required><option value="">Choose…</option>
           ${pricing.map((p) => `<option value="${esc(p.inbox_type)}">${esc(p.label)}</option>`).join('')}</select></div>
         <div class="field"><label>Status</label><select name="status">
-          <option value="active" selected>Active (live, billed monthly)</option><option value="in_progress">Setting up</option>
+          <option value="active" selected>Active (live, renews every cycle)</option><option value="in_progress">Setting up</option>
           <option value="pending">Pending</option><option value="cancelled">Cancelled (history only)</option></select></div>
       </div>
       <div class="grid-2">
@@ -823,11 +863,12 @@ function openBatchDialog(userId) {
       </div>
       <div class="grid-2">
         <div class="field"><label>Start date</label><input name="start_date" type="date" value="${esc(today)}"><div class="hint">When the mailboxes went live / were purchased.</div></div>
-        <div class="field billing-only"><label>Next renewal date</label><input name="next_billing_date" type="date"><div class="hint">Leave empty to continue the monthly cycle from the start date.</div></div>
+        <div class="billing-only">${cycleFields(1)}</div>
       </div>
+      <div class="note note-info billing-only" style="margin:-4px 0 16px"><span class="note-icon">📅</span><div id="renew-preview"></div></div>
       <div class="field billing-only"><label>Current billing period</label><select name="current_period">
         <option value="paid">Record it as paid (already collected)</option><option value="unpaid">Record it as unpaid (still owed)</option><option value="none">Don't create an invoice</option></select>
-        <div class="hint">Creates the invoice for the period running up to the next renewal. Add older invoices under Invoices if you want the full history.</div></div>
+        <div class="hint">Creates the invoice for the current period, the one running up to the next renewal. Add older invoices under Invoices if you want the full history.</div></div>
       <div class="grid-2">
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
@@ -844,6 +885,18 @@ function openBatchDialog(userId) {
   f.user_id.onchange = fillPrice;
   f.inbox_type.onchange = fillPrice;
   f.status.onchange = () => dlg.querySelectorAll('.billing-only').forEach((el) => { el.hidden = f.status.value !== 'active'; });
+  wireCycleFields(dlg);
+  const preview = () => {
+    const start = f.start_date.value || today;
+    const months = cycleFromForm(formData(f));
+    const day = Number(start.slice(8));
+    let next = addMonths(start, day, months);
+    while (next <= today) next = addMonths(next, day, months);
+    const qty = Number(f.quantity.value) || 0; const price = Number(f.price_per_mailbox.value) || 0;
+    dlg.querySelector('#renew-preview').innerHTML = `Renews on day <strong>${day}</strong> ${cycleName(months).toLowerCase()}. Next renewal: <strong>${fmtDate(next)}</strong>${qty && price ? ` · ${money(qty * price * months)} per ${perCycle(months)}` : ''}`;
+  };
+  ['input', 'change'].forEach((ev) => f.addEventListener(ev, preview));
+  preview();
   onSubmit(f, async (d) => {
     const r = await api('POST', '/api/admin/orders', d);
     dlg.close();

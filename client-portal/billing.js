@@ -24,15 +24,22 @@ function fmt(y, m, day) {
   return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-// Next month's date on `billingDay`, clamped to that month's length, so a
-// batch activated on the 31st renews on Feb 28 and then on Mar 31 again.
-function nextBillingDate(d, billingDay) {
+// The date `months` later on `billingDay`, clamped to that month's length, so
+// a batch activated on the 31st renews on Feb 28 and then on Mar 31 again.
+function nextBillingDate(d, billingDay, months = 1) {
   const { y, m } = parse(d);
-  const ny = m === 12 ? y + 1 : y;
-  const nm = m === 12 ? 1 : m + 1;
+  const total = y * 12 + (m - 1) + months;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
   const daysInMonth = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
   return fmt(ny, nm, Math.min(billingDay, daysInMonth));
 }
+
+const cycleMonths = (order) => Math.max(1, Number(order.billing_months) || 1);
+const cycleLabel = (months) => (months === 1 ? 'monthly' : months === 12 ? 'yearly' : `every ${months} months`);
+const periodLabel = (months) => (months === 1 ? '1 month' : months === 12 ? '12 months' : `${months} months`);
+// Prices are per mailbox per month; an invoice covers the whole cycle.
+const cycleAmount = (order) => order.quantity * order.price_per_mailbox * cycleMonths(order);
 
 function daysBetween(from, to) {
   const a = parse(from);
@@ -70,7 +77,8 @@ async function notify(user, title, body) {
 // Issues the invoice for one billing period of a batch, with a matching line
 // item. Does nothing if that period is already invoiced.
 async function createOrderInvoice(order, periodStart, description, itemDescription) {
-  const amount = order.quantity * order.price_per_mailbox;
+  const months = cycleMonths(order);
+  const amount = cycleAmount(order);
   const { rows: [inv] } = await query(
     `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date, issue_date)
      VALUES ($1, $2, $3, $4, $5, $3, $6)
@@ -82,7 +90,9 @@ async function createOrderInvoice(order, periodStart, description, itemDescripti
     await query(
       `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [inv.id, order.inbox_type, `Batch #${order.id}`, itemDescription, order.quantity, order.price_per_mailbox],
+      [inv.id, order.inbox_type, order.batch_name || `Batch #${order.id}`,
+       months === 1 ? itemDescription : `${itemDescription} (${periodLabel(months)} × ${money(order.price_per_mailbox)}/month)`,
+       order.quantity, order.price_per_mailbox * months],
     );
   }
   return inv;
@@ -91,7 +101,7 @@ async function createOrderInvoice(order, periodStart, description, itemDescripti
 function ensureRenewalInvoice(order, periodStart) {
   return createOrderInvoice(order, periodStart,
     `Batch #${order.id} renewal: ${order.quantity} × ${order.label} mailboxes (from ${prettyDate(periodStart)})`,
-    `Monthly renewal from ${prettyDate(periodStart)}`);
+    `Renewal from ${prettyDate(periodStart)}`);
 }
 
 // ---- The billing run: roll renewals forward, issue renewal invoices and send
@@ -115,7 +125,7 @@ async function runBilling() {
     // Renewal dates that have arrived: make sure each has an invoice, then move on.
     while (billingDate <= now) {
       await ensureRenewalInvoice(order, billingDate);
-      billingDate = nextBillingDate(billingDate, billingDay);
+      billingDate = nextBillingDate(billingDate, billingDay, cycleMonths(order));
     }
     if (billingDate !== order.next_billing_date) {
       await query('UPDATE orders SET next_billing_date = $1 WHERE id = $2', [billingDate, order.id]);
@@ -144,7 +154,7 @@ async function runBilling() {
     const dayWord = daysLeft === 1 ? '1 day' : `${daysLeft} days`;
     let body =
       `Your batch #${order.id} (${order.label}, ${order.quantity} mailboxes) will renew in ${dayWord}, ` +
-      `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : order.quantity * order.price_per_mailbox)}.`;
+      `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
     if (invoice && invoice.status === 'paid') {
       body += ' We have already received your payment for this period. Thank you!';
     } else if (threshold === 1) {
@@ -158,4 +168,5 @@ async function runBilling() {
 
 module.exports = {
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
+  cycleMonths, cycleLabel, cycleAmount,
 };

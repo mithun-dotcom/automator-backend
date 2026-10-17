@@ -174,7 +174,7 @@ const CLIENT_PRICING_SQL = `
 const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o.price_per_mailbox,
   o.domains, o.usernames, o.domain_access_method, o.registrar, o.registrar_email, o.domain_access_notes,
   o.sequencer, o.sequencer_workspace, o.sequencer_email, o.sequencer_notes, o.notes, o.status,
-  o.activated_at, o.next_billing_date, o.created_at, o.batch_name`;
+  o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months`;
 
 app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const uid = req.user.id;
@@ -373,6 +373,28 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
     await query('UPDATE orders SET admin_notes = $1 WHERE id = $2', [str(req.body.admin_notes), id]);
   }
 
+  if (req.body.billing_cycle !== undefined) {
+    const months = parseCycle(req.body);
+    if (months !== billing.cycleMonths(order)) {
+      await query('UPDATE orders SET billing_months = $1 WHERE id = $2', [months, id]);
+      // Keep the renewal on the same day, one new cycle after the current period started.
+      if (order.status === 'active' && order.next_billing_date) {
+        const day = order.billing_day || Number(order.next_billing_date.slice(8));
+        let periodStart = order.next_billing_date;
+        // step back one old cycle to find the current period's start
+        const [y, m] = periodStart.split('-').map(Number);
+        const back = y * 12 + (m - 1) - billing.cycleMonths(order);
+        periodStart = `${Math.floor(back / 12)}-${String((back % 12) + 1).padStart(2, '0')}-01`;
+        let next = billing.nextBillingDate(periodStart, day, months);
+        while (next <= billing.today()) next = billing.nextBillingDate(next, day, months);
+        await query("UPDATE invoices SET status = 'void' WHERE order_id = $1 AND status = 'unpaid' AND period_start = $2", [id, order.next_billing_date]);
+        await query('UPDATE orders SET next_billing_date = $1 WHERE id = $2', [next, id]);
+        order.next_billing_date = next;
+      }
+      order.billing_months = months;
+    }
+  }
+
   const newPrice = req.body.price_per_mailbox !== undefined ? Number(req.body.price_per_mailbox) : order.price_per_mailbox;
   const newQty = req.body.quantity !== undefined ? Number(req.body.quantity) : order.quantity;
   if (!(newPrice >= 0)) throw new HttpError(400, 'Price must be 0 or more');
@@ -382,12 +404,12 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
     // Keep an already-issued, unpaid invoice for the upcoming renewal in step.
     await query(
       `UPDATE invoices SET amount = $1 WHERE order_id = $2 AND period_start = $3 AND status = 'unpaid'`,
-      [newPrice * newQty, id, order.next_billing_date],
+      [newPrice * newQty * billing.cycleMonths(order), id, order.next_billing_date],
     );
     await query(
       `UPDATE invoice_items SET quantity = $1, unit_price = $2
         WHERE invoice_id IN (SELECT id FROM invoices WHERE order_id = $3 AND period_start = $4 AND status = 'unpaid')`,
-      [newQty, newPrice, id, order.next_billing_date],
+      [newQty, newPrice * billing.cycleMonths(order), id, order.next_billing_date],
     );
     Object.assign(order, { price_per_mailbox: newPrice, quantity: newQty });
   }
@@ -418,7 +440,7 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
       const day = Number(start.slice(8));
       const next = order.next_billing_date && order.next_billing_date > start
         ? order.next_billing_date
-        : billing.nextBillingDate(start, day);
+        : billing.nextBillingDate(start, day, billing.cycleMonths(order));
       await query(
         `UPDATE orders SET status = 'active', activated_at = COALESCE(activated_at, now()),
            next_billing_date = $1, billing_day = COALESCE(billing_day, $2) WHERE id = $3`,
@@ -426,12 +448,12 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
       );
       if (req.body.create_invoice !== false && !order.activated_at) {
         const inv = await billing.createOrderInvoice(order, start,
-          `Batch #${id}: ${order.quantity} × ${order.label} mailboxes, first month`, 'First month');
+          `Batch #${id}: ${order.quantity} × ${order.label} mailboxes, first ${billing.cycleMonths(order) === 1 ? 'month' : 'period'}`, 'First period');
         if (inv) invoiceId = inv.id;
       }
       await billing.notify(client, `Your ${order.quantity} ${order.label} mailboxes are active`,
         `Batch #${id} is now active. Your next renewal is on ${billing.prettyDate(next)} ` +
-        `(${billing.money(order.quantity * order.price_per_mailbox)}/month).`);
+        `(${billing.money(billing.cycleAmount(order))}, billed ${billing.cycleLabel(billing.cycleMonths(order))}).`);
     } else {
       await query('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
       if (status === 'in_progress') {
@@ -476,6 +498,17 @@ admin.post('/invites', asyncRoute(async (req, res) => {
   res.status(201).json({ link, emailed, reset: Boolean(existing) });
 }));
 
+// Billing cycle from the admin forms: monthly, yearly, or custom (every N months).
+function parseCycle(b) {
+  if (b.billing_cycle === 'yearly') return 12;
+  if (b.billing_cycle === 'custom') {
+    const n = Number(b.custom_months);
+    if (!Number.isInteger(n) || n < 1 || n > 36) throw new HttpError(400, 'Custom cycle must be 1 to 36 months');
+    return n;
+  }
+  return 1;
+}
+
 // Adds a client without inviting them, so existing batches and billing can be
 // loaded first. They get their password when they accept an invite later.
 admin.post('/clients', asyncRoute(async (req, res) => {
@@ -508,37 +541,34 @@ admin.post('/orders', asyncRoute(async (req, res) => {
   const today = billing.today();
   const start = str(b.start_date, 10) || today;
   if (!DATE_RE.test(start)) throw new HttpError(400, 'Start date must be a date');
-  let next = str(b.next_billing_date, 10);
-  if (next && !DATE_RE.test(next)) throw new HttpError(400, 'Next renewal must be a date');
-  const day = Number((next || start).slice(8));
+  const months = parseCycle(b);
+  // Renews on the start date's day every cycle: roll forward to the next renewal after today.
+  const day = Number(start.slice(8));
+  let next = null;
   if (status === 'active') {
-    if (!next) {
-      // Roll the monthly cycle forward from the start date to the next renewal after today.
-      next = billing.nextBillingDate(start, day);
-      while (next <= today) next = billing.nextBillingDate(next, day);
-    }
-    if (next <= today) throw new HttpError(400, 'The next renewal date must be after today');
+    next = billing.nextBillingDate(start, day, months);
+    while (next <= today) next = billing.nextBillingDate(next, day, months);
   }
 
   const { rows: [order] } = await query(
     `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames,
        domain_access_method, sequencer, sequencer_workspace, admin_notes, batch_name, status,
-       activated_at, billing_day, next_billing_date, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
+       activated_at, billing_day, next_billing_date, created_at, billing_months)
+     VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
     [client.id, type.inbox_type, quantity, price, str(b.domains, 20000), str(b.usernames, 20000),
      str(b.sequencer, 50), str(b.sequencer_workspace, 200), str(b.admin_notes), str(b.batch_name, 200), status,
      status === 'pending' ? null : `${start}T00:00:00Z`, status === 'active' ? day : null,
-     status === 'active' ? next : null, `${start}T00:00:00Z`],
+     next, `${start}T00:00:00Z`, months],
   );
 
   // Optionally record the current billing period (the one ending at the next renewal).
   let invoiceId = null;
   if (status === 'active' && ['paid', 'unpaid'].includes(b.current_period)) {
     let periodStart = start;
-    while (billing.nextBillingDate(periodStart, day) < next) periodStart = billing.nextBillingDate(periodStart, day);
+    while (billing.nextBillingDate(periodStart, day, months) < next) periodStart = billing.nextBillingDate(periodStart, day, months);
     const inv = await billing.createOrderInvoice({ ...order, label: type.label }, periodStart,
       `Batch #${order.id}: ${quantity} × ${type.label} mailboxes (from ${billing.prettyDate(periodStart)})`,
-      `Monthly mailboxes from ${billing.prettyDate(periodStart)}`);
+      `Mailboxes from ${billing.prettyDate(periodStart)}`);
     if (inv) {
       invoiceId = inv.id;
       await query('UPDATE invoices SET issue_date = $1 WHERE id = $2', [periodStart, inv.id]);

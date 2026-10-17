@@ -145,3 +145,7 @@ CREATE TABLE IF NOT EXISTS order_files (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set BOOLEAN NOT NULL DEFAULT true;
 -- Optional human name for a batch, e.g. "Q4 outreach".
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_name TEXT NOT NULL DEFAULT '';
+
+-- Billing cycle in months: 1 = monthly, 12 = yearly, anything else = custom.
+-- Prices stay per mailbox per month; each invoice covers the whole cycle.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS billing_months INT NOT NULL DEFAULT 1;
