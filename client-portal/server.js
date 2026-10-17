@@ -918,6 +918,30 @@ async function ensureAdmin() {
   console.log(`Created admin account ${ADMIN_EMAIL}`);
 }
 
+// One-time fix: invoices created with mailbox lines but no batch (before the
+// invoice editor could add batches) never counted on the client's dashboard.
+// Turn them into active monthly batches, once.
+async function linkStandaloneInvoices() {
+  const flag = 'standalone_invoices_linked_v1';
+  const { rows: [done] } = await query('SELECT 1 FROM settings WHERE key = $1', [flag]);
+  if (done) return;
+  const { rows } = await query(
+    `SELECT i.id FROM invoices i
+      WHERE i.order_id IS NULL AND i.status <> 'void'
+        AND EXISTS (SELECT 1 FROM invoice_items it JOIN pricing p ON p.inbox_type = it.inbox_type WHERE it.invoice_id = i.id)
+      ORDER BY i.id`,
+  );
+  for (const { id } of rows) {
+    try {
+      const ids = await createBatchesFromInvoice(id, 1);
+      console.log(`Invoice #${id}: added batch(es) ${ids.join(', ')}`);
+    } catch (err) {
+      console.warn(`Invoice #${id}: not converted (${err.message})`);
+    }
+  }
+  await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [flag, new Date().toISOString()]);
+}
+
 async function scheduledBilling() {
   try {
     const result = await billing.runBilling();
@@ -930,6 +954,7 @@ async function scheduledBilling() {
 (async () => {
   await migrate();
   await ensureAdmin();
+  await linkStandaloneInvoices();
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
