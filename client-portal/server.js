@@ -366,6 +366,12 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
   if (!order) throw new HttpError(404, 'Order not found');
   const client = { id: order.user_id, email: order.email, name: order.name };
 
+  if (typeof req.body.domains === 'string') {
+    await query('UPDATE orders SET domains = $1 WHERE id = $2', [str(req.body.domains, 20000), id]);
+  }
+  if (typeof req.body.usernames === 'string') {
+    await query('UPDATE orders SET usernames = $1 WHERE id = $2', [str(req.body.usernames, 20000), id]);
+  }
   if (typeof req.body.batch_name === 'string') {
     await query('UPDATE orders SET batch_name = $1 WHERE id = $2', [str(req.body.batch_name, 200), id]);
   }

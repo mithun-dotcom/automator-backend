@@ -368,18 +368,38 @@ const batchTitle = (o) => (o.batch_name ? `${o.batch_name} (#${o.id})` : `Batch 
 
 // Clients cancel by emailing us from their registered address. This builds
 // the pre-written request for one batch.
+// Domains in a batch with how many mailboxes each has, counted from the
+// usernames ("Name - user@domain"). Domains without a matching username
+// still appear, just without a count.
+function domainBreakdown(o) {
+  const counts = new Map();
+  lines(o.domains).forEach((d) => counts.set(d.toLowerCase(), 0));
+  lines(o.usernames).forEach((u) => {
+    const m = u.match(/@([a-z0-9.-]+\.[a-z]{2,})/i);
+    if (m) { const d = m[1].toLowerCase(); counts.set(d, (counts.get(d) || 0) + 1); }
+  });
+  return [...counts.entries()];
+}
+
 function cancelEmail(o) {
   const { user, appUrl } = state.dash;
-  const subject = `Cancellation request: Batch #${o.id}`;
+  const subject = `Cancellation request: ${batchTitle(o)}`;
+  const domains = domainBreakdown(o);
+  const domainLines = domains.length
+    ? domains.map(([d, n]) => `- ${d}: ${o.inbox_label}${n ? `, ${n} mailbox${n === 1 ? '' : 'es'}` : ''}`)
+    : ['- No domains on file for this batch'];
   const body = [
     'Hi Mithmill team,',
     '',
     'I would like to cancel all the inboxes from this order.',
     '',
     `Order name: ${batchTitle(o)} - ${o.inbox_label} (${o.quantity} mailboxes)`,
-    `CSV sheet link: ${o.csv_rows ? `${appUrl}/api/admin/orders/${o.id}/onboarding.csv` : 'No CSV uploaded'}`,
+    ...(o.csv_rows ? [`CSV sheet link: ${appUrl}/api/admin/orders/${o.id}/onboarding.csv`] : []),
     `Order creation date: ${fmtDate(o.created_at)}`,
     `Payment amount: ${money(cycleAmount(o))}`,
+    '',
+    `Domains (${domains.length}):`,
+    ...domainLines,
     '',
     'Thank you,',
     user.name || '',
@@ -812,6 +832,11 @@ function adminOrders() {
               <div class="field"><label>Price per mailbox ($)</label><input type="number" name="price_per_mailbox" step="0.01" min="0" required value="${o.price_per_mailbox}"></div>
             </div>
             ${o.status !== 'cancelled' ? cycleFields(cycleOf(o)) : ''}
+            <div class="grid-2">
+              <div class="field"><label>Domains</label><textarea name="domains" style="min-height:80px" placeholder="One per line">${esc(o.domains)}</textarea></div>
+              <div class="field"><label>Usernames</label><textarea name="usernames" style="min-height:80px" placeholder="Name - user@domain.com">${esc(o.usernames)}</textarea></div>
+            </div>
+            <div class="hint" style="margin:-8px 0 14px">Shown to the client and listed per domain in their cancellation email. Use "Name - user@domain.com" so mailboxes are counted per domain.</div>
             <div class="field"><label>Batch name</label><input name="batch_name" value="${esc(o.batch_name || '')}" placeholder="e.g. Q4 outreach"></div>
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
             <button class="btn btn-primary" type="submit">Save</button>
@@ -829,7 +854,7 @@ function adminOrders() {
   wireCycleFields(document);
   document.querySelectorAll('.order-form').forEach((form) => {
     onSubmit(form, async (d) => {
-      const body = { status: d.status, admin_notes: d.admin_notes, batch_name: d.batch_name, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
+      const body = { status: d.status, admin_notes: d.admin_notes, batch_name: d.batch_name, domains: d.domains, usernames: d.usernames, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
       if (d.billing_cycle) Object.assign(body, { billing_cycle: d.billing_cycle, custom_months: d.custom_months });
       const r = await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
