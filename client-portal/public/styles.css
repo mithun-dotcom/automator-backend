@@ -291,3 +291,9 @@ input.num { text-align: right; }
 dialog.modal { width: min(640px, calc(100% - 32px)); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 20px; }
 dialog.modal::backdrop { background: rgba(10, 12, 20, .55); }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+
+/* ---- mark completed */
+.complete-box { padding: 14px; border-radius: 10px; background: var(--green-soft); margin-bottom: 16px; display: grid; gap: 8px; }
+.btn-success { background: var(--green); border-color: var(--green); color: #fff; justify-self: start; }
+.btn-success:hover { background: var(--green); filter: brightness(1.08); }
+@media (prefers-color-scheme: dark) { .btn-success { color: #0f1117; } }

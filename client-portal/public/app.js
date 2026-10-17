@@ -635,7 +635,7 @@ function adminOrders() {
 
   shell(ADMIN_TABS, '#/admin/orders', `
     <div class="page-head">
-      <div><h1>Orders</h1><p class="muted">Set an order to Active to switch on the client's mailboxes and start monthly billing.</p></div>
+      <div><h1>Orders</h1><p class="muted">Open an order and click ✓ Mark as completed once its mailboxes are delivered. That activates them for the client and creates the first invoice.</p></div>
       <div class="row">${[['open', 'To do'], ['active', 'Active'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, l]) => `<button class="btn btn-sm ${filter === k ? 'btn-primary' : ''}" data-filter="${k}">${l} (${counts(k)})</button>`).join('')}</div>
     </div>
     <div class="card">
@@ -670,8 +670,12 @@ function adminOrders() {
             ${o.csv_rows ? `<div><a class="btn btn-primary btn-sm" href="/api/admin/orders/${o.id}/onboarding.csv">⬇ Download onboarding CSV (${o.csv_rows} rows)</a></div>` : '<div class="muted small">No onboarding CSV uploaded.</div>'}
           </div>
           <form class="order-form" data-id="${o.id}">
+            ${['pending', 'in_progress'].includes(o.status) ? `<div class="complete-box">
+              <button type="button" class="btn btn-success" data-complete="${o.id}">✓ Mark as completed</button>
+              <div class="hint">Use this once the mailboxes are delivered. It activates them for the client, creates the first month's invoice (${money(o.quantity * o.price_per_mailbox)}), sets the renewal date one month from today and notifies the client.</div>
+            </div>` : ''}
             <div class="field"><label>Status</label>
-              <select name="status">${['pending', 'in_progress', 'active', 'cancelled'].map((s) => `<option value="${s}" ${o.status === s ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('')}</select>
+              <select name="status">${['pending', 'in_progress', 'active', 'cancelled'].map((s) => `<option value="${s}" ${o.status === s ? 'selected' : ''}>${s === 'active' ? 'Active (completed)' : STATUS_LABEL[s]}</option>`).join('')}</select>
               ${o.activated_at ? '' : '<div class="hint">Activating creates the first month\'s invoice and sets the renewal date one month from today.</div>'}
             </div>
             <div class="grid-2">
@@ -694,10 +698,30 @@ function adminOrders() {
     onSubmit(form, async (d) => {
       const body = { status: d.status, admin_notes: d.admin_notes, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
       if (d.next_billing_date) body.next_billing_date = d.next_billing_date;
-      await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
-      toast(`Order #${form.dataset.id} saved`);
+      const r = await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
+      toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
       reloadAdmin();
     });
+  });
+  document.querySelectorAll('[data-complete]').forEach((b) => {
+    b.onclick = async () => {
+      const form = b.closest('form');
+      const d = formData(form);
+      const id = b.dataset.complete;
+      const total = money(Number(d.quantity) * Number(d.price_per_mailbox));
+      if (!confirm(`Mark order #${id} as completed?\n\nThis activates the mailboxes for the client, creates the first month's invoice (${total}) and sends them a notification.`)) return;
+      b.disabled = true;
+      try {
+        const r = await api('PATCH', `/api/admin/orders/${id}`, {
+          status: 'active', admin_notes: d.admin_notes, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox,
+        });
+        toast(r.invoiceId ? `Order #${id} completed. Invoice #${r.invoiceId} created — see Invoices.` : `Order #${id} completed`);
+        reloadAdmin();
+      } catch (ex) {
+        toast(ex.message);
+        b.disabled = false;
+      }
+    };
   });
 }
 

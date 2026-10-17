@@ -404,6 +404,7 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
     }
   }
 
+  let invoiceId = null;
   const status = req.body.status;
   if (status && status !== order.status) {
     if (!['pending', 'in_progress', 'active', 'cancelled'].includes(status)) throw new HttpError(400, 'Bad status');
@@ -420,8 +421,9 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
         [next, day, id],
       );
       if (req.body.create_invoice !== false && !order.activated_at) {
-        await billing.createOrderInvoice(order, start,
+        const inv = await billing.createOrderInvoice(order, start,
           `Batch #${id}: ${order.quantity} × ${order.label} mailboxes, first month`, 'First month');
+        if (inv) invoiceId = inv.id;
       }
       await billing.notify(client, `Your ${order.quantity} ${order.label} mailboxes are active`,
         `Batch #${id} is now active. Your next renewal is on ${billing.prettyDate(next)} ` +
@@ -437,7 +439,7 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
       }
     }
   }
-  res.json({ ok: true });
+  res.json({ ok: true, invoiceId });
 }));
 
 admin.post('/invites', asyncRoute(async (req, res) => {
