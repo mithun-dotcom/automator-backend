@@ -53,6 +53,10 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 
 async function notify(user, title, body) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
+  // Clients added by an admin and not yet joined see this in the portal once
+  // they accept their invite, but get no emails before then.
+  const { rows: [u] } = await query('SELECT password_set FROM users WHERE id = $1', [user.id]);
+  if (u && !u.password_set) return;
   const link = APP_URL ? `\n\nOpen your portal: ${APP_URL}` : '';
   await sendMail({
     to: user.email,

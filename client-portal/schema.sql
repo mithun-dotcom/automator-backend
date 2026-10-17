@@ -139,3 +139,9 @@ CREATE TABLE IF NOT EXISTS order_files (
   data       BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Clients the admin adds before inviting them (to load existing batches and
+-- billing) have no usable password until they accept their invite.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set BOOLEAN NOT NULL DEFAULT true;
+-- Optional human name for a batch, e.g. "Q4 outreach".
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_name TEXT NOT NULL DEFAULT '';

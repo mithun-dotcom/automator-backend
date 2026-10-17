@@ -359,3 +359,5 @@ dialog.modal::backdrop { background: rgb(0 0 0 / .4); }
   .invoice-sheet { border: 0; padding: 0; box-shadow: none; }
   .badge { border: 1px solid currentColor; }
 }
+dialog.modal.modal-wide { width: min(760px, calc(100% - 32px)); max-height: calc(100vh - 32px); }
+[hidden] { display: none !important; }

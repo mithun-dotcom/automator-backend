@@ -101,7 +101,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   checkLoginRate(`${email}|${req.ip}`);
   const { rows: [user] } = await query('SELECT * FROM users WHERE email = $1', [email]);
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+  if (!user || !user.password_set || !(await bcrypt.compare(password, user.password_hash))) {
     throw new HttpError(401, 'Wrong email or password');
   }
   loginAttempts.delete(`${email}|${req.ip}`);
@@ -140,8 +140,8 @@ async function findInvite(token) {
 
 app.get('/api/invites/:token', asyncRoute(async (req, res) => {
   const invite = await findInvite(req.params.token);
-  const { rows: [existing] } = await query('SELECT id FROM users WHERE email = $1', [invite.email]);
-  res.json({ email: invite.email, name: invite.name, company: invite.company, reset: Boolean(existing) });
+  const { rows: [existing] } = await query('SELECT password_set FROM users WHERE email = $1', [invite.email]);
+  res.json({ email: invite.email, name: invite.name, company: invite.company, reset: Boolean(existing && existing.password_set) });
 }));
 
 app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
@@ -153,7 +153,7 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
 
   const { rows: [user] } = await query(
     `INSERT INTO users (email, name, company, password_hash) VALUES ($1, $2, $3, $4)
-     ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash,
+     ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set = true,
        name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END
      RETURNING *`,
     [invite.email, name, invite.company, hash],
@@ -174,7 +174,7 @@ const CLIENT_PRICING_SQL = `
 const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o.price_per_mailbox,
   o.domains, o.usernames, o.domain_access_method, o.registrar, o.registrar_email, o.domain_access_notes,
   o.sequencer, o.sequencer_workspace, o.sequencer_email, o.sequencer_notes, o.notes, o.status,
-  o.activated_at, o.next_billing_date, o.created_at`;
+  o.activated_at, o.next_billing_date, o.created_at, o.batch_name`;
 
 app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const uid = req.user.id;
@@ -338,7 +338,8 @@ admin.get('/overview', asyncRoute(async (req, res) => {
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
            LEFT JOIN order_files f ON f.order_id = o.id
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
-    query(`SELECT u.id, u.email, u.name, u.company, u.created_at,
+    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set,
+             EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
@@ -365,6 +366,9 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
   if (!order) throw new HttpError(404, 'Order not found');
   const client = { id: order.user_id, email: order.email, name: order.name };
 
+  if (typeof req.body.batch_name === 'string') {
+    await query('UPDATE orders SET batch_name = $1 WHERE id = $2', [str(req.body.batch_name, 200), id]);
+  }
   if (typeof req.body.admin_notes === 'string') {
     await query('UPDATE orders SET admin_notes = $1 WHERE id = $2', [str(req.body.admin_notes), id]);
   }
@@ -445,10 +449,12 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
 admin.post('/invites', asyncRoute(async (req, res) => {
   const email = str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
-  const { rows: [existing] } = await query('SELECT role, name, company FROM users WHERE email = $1', [email]);
-  if (existing && existing.role === 'admin') throw new HttpError(400, 'That email belongs to an admin');
-  const name = str(req.body.name, 200) || (existing && existing.name) || '';
-  const company = str(req.body.company, 200) || (existing && existing.company) || '';
+  const { rows: [found] } = await query('SELECT role, name, company, password_set FROM users WHERE email = $1', [email]);
+  if (found && found.role === 'admin') throw new HttpError(400, 'That email belongs to an admin');
+  // A client you added yourself but who never joined gets a normal invite, not a reset.
+  const existing = found && found.password_set ? found : null;
+  const name = str(req.body.name, 200) || (found && found.name) || '';
+  const company = str(req.body.company, 200) || (found && found.company) || '';
 
   const token = crypto.randomBytes(24).toString('base64url');
   await query(
@@ -468,6 +474,84 @@ admin.post('/invites', asyncRoute(async (req, res) => {
         `${link}\n\n${billing.PAYMENT_NOTE}\n\nMithmill`,
   });
   res.status(201).json({ link, emailed, reset: Boolean(existing) });
+}));
+
+// Adds a client without inviting them, so existing batches and billing can be
+// loaded first. They get their password when they accept an invite later.
+admin.post('/clients', asyncRoute(async (req, res) => {
+  const email = str(req.body.email, 200).toLowerCase();
+  if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
+  const { rows: [found] } = await query('SELECT id FROM users WHERE email = $1', [email]);
+  if (found) throw new HttpError(400, 'A client with that email already exists');
+  const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+  const { rows: [user] } = await query(
+    `INSERT INTO users (email, name, company, password_hash, password_set) VALUES ($1, $2, $3, $4, false) RETURNING id`,
+    [email, str(req.body.name, 200), str(req.body.company, 200), unusable],
+  );
+  res.status(201).json({ id: user.id });
+}));
+
+// Adds a batch on a client's behalf: an existing purchase (with its billing
+// dates) or a new order taken outside the portal.
+admin.post('/orders', asyncRoute(async (req, res) => {
+  const b = req.body;
+  const { rows: [client] } = await query("SELECT id, email, name, password_set FROM users WHERE id = $1 AND role = 'client'", [Number(b.user_id)]);
+  if (!client) throw new HttpError(400, 'Choose a client');
+  const { rows: [type] } = await query('SELECT inbox_type, label FROM pricing WHERE inbox_type = $1', [str(b.inbox_type, 50)]);
+  if (!type) throw new HttpError(400, 'Choose a mailbox type');
+  const quantity = Number(b.quantity);
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 10000) throw new HttpError(400, 'Mailboxes must be between 1 and 10000');
+  const price = Number(b.price_per_mailbox);
+  if (!(price >= 0)) throw new HttpError(400, 'Price must be 0 or more');
+  const status = ['pending', 'in_progress', 'active', 'cancelled'].includes(b.status) ? b.status : 'active';
+
+  const today = billing.today();
+  const start = str(b.start_date, 10) || today;
+  if (!DATE_RE.test(start)) throw new HttpError(400, 'Start date must be a date');
+  let next = str(b.next_billing_date, 10);
+  if (next && !DATE_RE.test(next)) throw new HttpError(400, 'Next renewal must be a date');
+  const day = Number((next || start).slice(8));
+  if (status === 'active') {
+    if (!next) {
+      // Roll the monthly cycle forward from the start date to the next renewal after today.
+      next = billing.nextBillingDate(start, day);
+      while (next <= today) next = billing.nextBillingDate(next, day);
+    }
+    if (next <= today) throw new HttpError(400, 'The next renewal date must be after today');
+  }
+
+  const { rows: [order] } = await query(
+    `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames,
+       domain_access_method, sequencer, sequencer_workspace, admin_notes, batch_name, status,
+       activated_at, billing_day, next_billing_date, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
+    [client.id, type.inbox_type, quantity, price, str(b.domains, 20000), str(b.usernames, 20000),
+     str(b.sequencer, 50), str(b.sequencer_workspace, 200), str(b.admin_notes), str(b.batch_name, 200), status,
+     status === 'pending' ? null : `${start}T00:00:00Z`, status === 'active' ? day : null,
+     status === 'active' ? next : null, `${start}T00:00:00Z`],
+  );
+
+  // Optionally record the current billing period (the one ending at the next renewal).
+  let invoiceId = null;
+  if (status === 'active' && ['paid', 'unpaid'].includes(b.current_period)) {
+    let periodStart = start;
+    while (billing.nextBillingDate(periodStart, day) < next) periodStart = billing.nextBillingDate(periodStart, day);
+    const inv = await billing.createOrderInvoice({ ...order, label: type.label }, periodStart,
+      `Batch #${order.id}: ${quantity} × ${type.label} mailboxes (from ${billing.prettyDate(periodStart)})`,
+      `Monthly mailboxes from ${billing.prettyDate(periodStart)}`);
+    if (inv) {
+      invoiceId = inv.id;
+      await query('UPDATE invoices SET issue_date = $1 WHERE id = $2', [periodStart, inv.id]);
+      if (b.current_period === 'paid') {
+        await query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [`${periodStart}T12:00:00Z`, inv.id]);
+      }
+    }
+  }
+  if (b.notify === true && client.password_set) {
+    await billing.notify(client, `New batch added: ${quantity} ${type.label} mailboxes`,
+      `Batch #${order.id} has been added to your account.`);
+  }
+  res.status(201).json({ id: order.id, invoiceId });
 }));
 
 admin.delete('/invites/:id', asyncRoute(async (req, res) => {
@@ -522,8 +606,12 @@ async function parseInvoice(body) {
   const description = str(body.description, 500) || (items.length === 1
     ? [items[0].batch_name, items[0].description].filter(Boolean).join(': ') || 'Invoice'
     : `${items.length} items`);
+  const status = ['unpaid', 'paid'].includes(body.status) ? body.status : null;
+  const paidDate = str(body.paid_date, 10);
+  if (status === 'paid' && paidDate && !DATE_RE.test(paidDate)) throw new HttpError(400, 'Paid date must be a date');
   return {
     user, orderId, issueDate, dueDate, items, discount, amount, description, notes: str(body.notes, 5000),
+    status, paidAt: status === 'paid' ? `${paidDate || billing.today()}T12:00:00Z` : null,
   };
 }
 
@@ -587,6 +675,7 @@ admin.post('/invoices', asyncRoute(async (req, res) => {
       [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes],
     );
     await writeItems(client, inv.id, v.items);
+    if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, inv.id]);
     return inv.id;
   });
   if (req.body.notify !== false) {
@@ -608,6 +697,8 @@ admin.put('/invoices/:id', asyncRoute(async (req, res) => {
       [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes, id],
     );
     await writeItems(client, id, v.items);
+    if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, id]);
+    if (v.status === 'unpaid') await client.query("UPDATE invoices SET status = 'unpaid', paid_at = NULL WHERE id = $1", [id]);
   });
   if (req.body.notify === true) {
     await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,

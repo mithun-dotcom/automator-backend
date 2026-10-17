@@ -316,7 +316,7 @@ function batchesTable(orders) {
   return `<div class="table-wrap"><table>
     <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Monthly</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
     <tbody>${orders.map((o) => `<tr>
-      <td>#${o.id}</td>
+      <td>${o.batch_name ? `<strong>${esc(o.batch_name)}</strong><div class="muted small">#${o.id}</div>` : `#${o.id}`}</td>
       <td>${esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
       <td class="num">${o.quantity}</td>
       <td>${badge(o.status)}</td>
@@ -326,6 +326,8 @@ function batchesTable(orders) {
       <td>${o.status !== 'cancelled' ? `<button class="btn btn-sm btn-danger" data-cancel="${o.id}">Cancel</button>` : ''}</td>
     </tr>`).join('')}</tbody></table></div>`;
 }
+
+const batchTitle = (o) => (o.batch_name ? `${o.batch_name} (#${o.id})` : `Batch #${o.id}`);
 
 // Clients cancel by emailing us from their registered address. This builds
 // the pre-written request for one batch.
@@ -337,7 +339,7 @@ function cancelEmail(o) {
     '',
     'I would like to cancel all the inboxes from this order.',
     '',
-    `Order name: Batch #${o.id} - ${o.inbox_label} (${o.quantity} mailboxes)`,
+    `Order name: ${batchTitle(o)} - ${o.inbox_label} (${o.quantity} mailboxes)`,
     `CSV sheet link: ${o.csv_rows ? `${appUrl}/api/admin/orders/${o.id}/onboarding.csv` : 'No CSV uploaded'}`,
     `Order creation date: ${fmtDate(o.created_at)}`,
     `Payment amount: ${money(o.quantity * o.price_per_mailbox)} per month`,
@@ -428,7 +430,7 @@ function renderBilling() {
         <div class="card-head"><h2>Upcoming renewals</h2><span class="muted small">Reminders are sent 7, 3 and 1 day before each renewal.</span></div>
         ${active.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Renews on</th><th class="num">Amount</th></tr></thead>
-          <tbody>${active.map((o) => `<tr><td>#${o.id}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(o.quantity * o.price_per_mailbox)}</td></tr>`).join('')}</tbody>
+          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(o.quantity * o.price_per_mailbox)}</td></tr>`).join('')}</tbody>
         </table></div>` : '<div class="empty">No active batches yet.</div>'}
       </div>
       <div class="card">
@@ -685,7 +687,7 @@ function adminOrders() {
   shell(ADMIN_TABS, '#/admin/orders', `
     <div class="page-head">
       <div><h1>Orders</h1><p class="muted">Open an order and click ✓ Mark as completed once its mailboxes are delivered. That activates them for the client and creates the first invoice.</p></div>
-      <div class="row">${[['open', 'To do'], ['active', 'Active'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, l]) => `<button class="btn btn-sm ${filter === k ? 'btn-primary' : ''}" data-filter="${k}">${l} (${counts(k)})</button>`).join('')}</div>
+      <div class="row"><button class="btn btn-sm btn-primary" id="add-batch">+ Add batch</button>${[['open', 'To do'], ['active', 'Active'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, l]) => `<button class="btn btn-sm ${filter === k ? 'btn-primary' : ''}" data-filter="${k}">${l} (${counts(k)})</button>`).join('')}</div>
     </div>
     <div class="stack">
     ${(() => {
@@ -703,7 +705,7 @@ function adminOrders() {
       <details class="order">
         <summary>
           <strong>#${o.id}</strong>
-          <span>${esc(o.company || o.name || o.email)}<div class="muted small">${esc(o.email)}</div></span>
+          <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}</div></span>
           <span class="hide-sm">${esc(o.inbox_label)}</span>
           <span class="hide-sm num">${o.quantity} boxes</span>
           <span class="hide-sm">${fmtDate(o.created_at)}</span>
@@ -743,6 +745,7 @@ function adminOrders() {
               <div class="field"><label>Price per mailbox ($)</label><input type="number" name="price_per_mailbox" step="0.01" min="0" required value="${o.price_per_mailbox}"></div>
             </div>
             ${o.status === 'active' ? `<div class="field"><label>Next renewal date</label><input type="date" name="next_billing_date" value="${esc(o.next_billing_date || '')}"><div class="hint">Reminders go out 7, 3 and 1 day before this date.</div></div>` : ''}
+            <div class="field"><label>Batch name</label><input name="batch_name" value="${esc(o.batch_name || '')}" placeholder="e.g. Q4 outreach"></div>
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
             <button class="btn btn-primary" type="submit">Save</button>
             <div class="error"></div>
@@ -752,12 +755,13 @@ function adminOrders() {
     </div>
     </div>`);
 
+  document.getElementById('add-batch').onclick = () => openBatchDialog();
   document.querySelectorAll('[data-filter]').forEach((b) => {
     b.onclick = () => { sessionStorage.setItem('orderFilter', b.dataset.filter); adminOrders(); };
   });
   document.querySelectorAll('.order-form').forEach((form) => {
     onSubmit(form, async (d) => {
-      const body = { status: d.status, admin_notes: d.admin_notes, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
+      const body = { status: d.status, admin_notes: d.admin_notes, batch_name: d.batch_name, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
       if (d.next_billing_date) body.next_billing_date = d.next_billing_date;
       const r = await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
@@ -786,6 +790,69 @@ function adminOrders() {
   });
 }
 
+// Add a batch on a client's behalf: an existing purchase with its billing
+// dates, or an order taken outside the portal.
+function openBatchDialog(userId) {
+  const { clients, pricing, clientPricing, today } = state.admin;
+  const priceFor = (uid, type) => {
+    const own = clientPricing.find((cp) => String(cp.user_id) === String(uid) && cp.inbox_type === type);
+    const std = pricing.find((p) => p.inbox_type === type);
+    return own ? own.price_per_mailbox : std ? std.price_per_mailbox : '';
+  };
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal modal-wide';
+  dlg.innerHTML = `
+    <form id="batch-form">
+      <div class="modal-head"><h2>Add batch</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
+      <p class="muted small" style="margin:-6px 0 16px">For mailboxes a client already has with you, or an order taken outside the portal. The client sees it as soon as they log in.</p>
+      <div class="grid-2">
+        <div class="field"><label>Client</label><select name="user_id" required><option value="">Choose…</option>
+          ${clients.map((c) => `<option value="${c.id}" ${c.id === userId ? 'selected' : ''}>${esc(c.company || c.name || c.email)} (${esc(c.email)})</option>`).join('')}</select></div>
+        <div class="field"><label>Batch name (optional)</label><input name="batch_name" placeholder="e.g. Q4 outreach"></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>Mailbox type</label><select name="inbox_type" required><option value="">Choose…</option>
+          ${pricing.map((p) => `<option value="${esc(p.inbox_type)}">${esc(p.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Status</label><select name="status">
+          <option value="active" selected>Active (live, billed monthly)</option><option value="in_progress">Setting up</option>
+          <option value="pending">Pending</option><option value="cancelled">Cancelled (history only)</option></select></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>Mailboxes</label><input name="quantity" type="number" min="1" max="10000" required></div>
+        <div class="field"><label>Price per mailbox / month ($)</label><input name="price_per_mailbox" type="number" step="0.01" min="0" required></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>Start date</label><input name="start_date" type="date" value="${esc(today)}"><div class="hint">When the mailboxes went live / were purchased.</div></div>
+        <div class="field billing-only"><label>Next renewal date</label><input name="next_billing_date" type="date"><div class="hint">Leave empty to continue the monthly cycle from the start date.</div></div>
+      </div>
+      <div class="field billing-only"><label>Current billing period</label><select name="current_period">
+        <option value="paid">Record it as paid (already collected)</option><option value="unpaid">Record it as unpaid (still owed)</option><option value="none">Don't create an invoice</option></select>
+        <div class="hint">Creates the invoice for the period running up to the next renewal. Add older invoices under Invoices if you want the full history.</div></div>
+      <div class="grid-2">
+        <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
+        <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
+      </div>
+      <div class="field"><label>Internal notes (optional)</label><input name="admin_notes"></div>
+      <div class="error"></div>
+      <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn btn-primary" type="submit">Add batch</button></div>
+    </form>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(); });
+  const f = dlg.querySelector('form');
+  const fillPrice = () => { if (f.user_id.value && f.inbox_type.value) f.price_per_mailbox.value = priceFor(f.user_id.value, f.inbox_type.value); };
+  f.user_id.onchange = fillPrice;
+  f.inbox_type.onchange = fillPrice;
+  f.status.onchange = () => dlg.querySelectorAll('.billing-only').forEach((el) => { el.hidden = f.status.value !== 'active'; });
+  onSubmit(f, async (d) => {
+    const r = await api('POST', '/api/admin/orders', d);
+    dlg.close();
+    toast(`Batch #${r.id} added${r.invoiceId ? ` with invoice #${r.invoiceId}` : ''}`);
+    reloadAdmin();
+  });
+  dlg.showModal();
+}
+
 function adminClients() {
   const { clients, invites, mailEnabled, pricing, clientPricing } = state.admin;
   const labelOf = (t) => (pricing.find((p) => p.inbox_type === t) || {}).label || t;
@@ -793,13 +860,14 @@ function adminClients() {
     <div class="page-head"><div><h1>Clients & invites</h1><p class="muted">The portal is invite-only. Clients can only join through a link you send.</p></div></div>
     <div class="stack">
       <form class="card card-pad" id="inv">
-        <h2 style="margin-bottom:14px">Invite a client</h2>
+        <h2 style="margin-bottom:4px">Invite or add a client</h2>
+        <p class="muted small" style="margin:0 0 14px">Existing client? Click <strong>Add without inviting</strong>, add their batches and billing, then send the invite when everything is in place.</p>
         <div class="grid-2">
           <div class="field"><label for="i-email">Email</label><input id="i-email" name="email" type="email" required></div>
           <div class="field"><label for="i-name">Name</label><input id="i-name" name="name"></div>
         </div>
         <div class="field"><label for="i-company">Company</label><input id="i-company" name="company"></div>
-        <div class="row"><button class="btn btn-primary" type="submit">Send invite</button>
+        <div class="row"><button class="btn btn-primary" type="submit">Send invite</button><button class="btn" type="button" id="add-client">Add without inviting</button>
           <span class="muted small">${mailEnabled ? 'The invite is emailed, and you also get the link to share.' : 'Email is not configured yet: copy the link and send it yourself.'}</span></div>
         <div class="error"></div>
         <div id="inv-link"></div>
@@ -808,16 +876,17 @@ function adminClients() {
       <div class="card">
         <div class="card-head"><h2>Clients</h2><span class="muted small">${clients.length} total</span></div>
         ${clients.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Client</th><th>Pricing</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Joined</th><th></th></tr></thead>
+          <thead><tr><th>Client</th><th>Account</th><th>Pricing</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
           <tbody>${clients.map((c) => {
             const custom = clientPricing.filter((cp) => cp.user_id === c.id);
             return `<tr>
             <td>${esc(c.company || c.name)}<div class="muted small">${esc(c.name)} · ${esc(c.email)}</div></td>
+            <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
-            <td><div class="row" style="flex-wrap:nowrap"><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">Reset link</button></div></td>
+            <td><div class="row" style="flex-wrap:nowrap"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button></div></td>
           </tr>
-          <tr class="price-row" id="prices-${c.id}" hidden><td colspan="6">
+          <tr class="price-row" id="prices-${c.id}" hidden><td colspan="7">
             <form class="client-prices" data-id="${c.id}">
               <p class="muted small" style="margin:0 0 12px">Price per mailbox / month for ${esc(c.company || c.name || c.email)}. Leave a field blank to use the standard price. New orders from this client use these prices.</p>
               <div class="grid-4">${pricing.map((p) => {
@@ -851,6 +920,20 @@ function adminClients() {
     };
   };
 
+  document.getElementById('add-client').onclick = async () => {
+    const form = document.getElementById('inv');
+    const d = formData(form);
+    const err = form.querySelector('.error');
+    err.textContent = '';
+    try {
+      const r = await api('POST', '/api/admin/clients', d);
+      toast(`${d.email} added. Now add their batches.`);
+      state.admin = await api('GET', '/api/admin/overview');
+      adminClients();
+      openBatchDialog(r.id);
+    } catch (ex) { err.textContent = ex.message; }
+  };
+  document.querySelectorAll('[data-batch]').forEach((b) => { b.onclick = () => openBatchDialog(Number(b.dataset.batch)); });
   onSubmit(document.getElementById('inv'), async (d) => {
     const r = await api('POST', '/api/admin/invites', d);
     state.admin = await api('GET', '/api/admin/overview');
@@ -947,6 +1030,8 @@ function invoiceEditor(inv) {
     due_date: inv ? inv.due_date : plus(today, 7),
     discount: inv && inv.discount ? String(inv.discount) : '',
     notes: inv ? inv.notes || '' : '',
+    status: inv && inv.status === 'paid' ? 'paid' : 'unpaid',
+    paid_date: inv && inv.paid_at ? String(inv.paid_at).slice(0, 10) : today,
     items: inv ? inv.items.map((it) => ({ ...it, quantity: String(it.quantity), unit_price: String(it.unit_price) }))
       : [{ inbox_type: '', batch_name: '', description: '', quantity: '1', unit_price: '' }],
   };
@@ -997,6 +1082,12 @@ function invoiceEditor(inv) {
 
       <div class="card card-pad">
         <div class="field"><label for="e-notes">Notes (shown on the invoice)</label><textarea id="e-notes" style="font-family:inherit;min-height:80px" placeholder="e.g. Payment terms, bank details, thank-you note">${esc(ed.notes)}</textarea></div>
+        <div class="grid-2">
+          <div class="field"><label for="e-status">Payment status</label><select id="e-status">
+            <option value="unpaid" ${ed.status === 'unpaid' ? 'selected' : ''}>Unpaid</option><option value="paid" ${ed.status === 'paid' ? 'selected' : ''}>Paid</option></select>
+            <div class="hint">Use Paid to record an invoice that's already been collected, e.g. past billing.</div></div>
+          <div class="field" id="e-paid-wrap" ${ed.status === 'paid' ? '' : 'hidden'}><label for="e-paid">Paid on</label><input id="e-paid" type="date" value="${esc(ed.paid_date)}"></div>
+        </div>
         <label class="check"><input type="checkbox" id="e-notify" ${isNew ? 'checked' : ''}> ${isNew ? 'Notify the client (portal notification and email)' : 'Notify the client about this change'}</label>
       </div>
 
@@ -1070,6 +1161,7 @@ function invoiceEditor(inv) {
   $('e-due').oninput = (e) => { ed.due_date = e.target.value; };
   $('e-discount').oninput = (e) => { ed.discount = e.target.value; recalc(); };
   $('e-notes').oninput = (e) => { ed.notes = e.target.value; };
+  $('e-status').onchange = (e) => { $('e-paid-wrap').hidden = e.target.value !== 'paid'; };
 
   $('inv-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1078,6 +1170,7 @@ function invoiceEditor(inv) {
     const body = {
       user_id: ed.user_id, order_id: ed.order_id || null, issue_date: ed.issue_date, due_date: ed.due_date,
       discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: $('e-notify').checked,
+      status: $('e-status').value, paid_date: $('e-paid').value,
     };
     try {
       const r = isNew ? await api('POST', '/api/admin/invoices', body) : await api('PUT', `/api/admin/invoices/${inv.id}`, body);
