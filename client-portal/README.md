@@ -35,7 +35,9 @@ Each active batch renews monthly. Before each renewal date the client gets an in
 |---|---|
 | 7 days before | Your batch will renew in 7 days |
 | 3 days before | Your batch will renew in 3 days |
-| 1 day before | Your batch will renew in 1 day. Please make the payment if not made. |
+| 1 day before | Your batch will renew in 1 day. Please make the payment if not made. Today is the last day to renew: if payment is not made by today, your accounts will be cancelled tomorrow. |
+
+Renewal reminders are emailed even to clients who haven't accepted their invite yet (without the portal link). Other notifications wait until they join.
 
 The renewal invoice is created 7 days before the renewal date. The check runs at startup and then every hour. Each reminder is recorded in the database, so it is never sent twice. If the service was asleep and missed a reminder, the next run sends one catch-up message with the real number of days left. Dates use `BILLING_TZ`, which defaults to `Asia/Dhaka`.
 

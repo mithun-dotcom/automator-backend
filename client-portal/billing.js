@@ -58,19 +58,21 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 
 // ---- Notifications
 
-async function notify(user, title, body) {
+// Clients added by an admin and not yet joined see notifications in the
+// portal once they accept their invite, but get no emails before then, except
+// with { always: true } (renewal reminders), which they get without the portal link.
+async function notify(user, title, body, { always = false } = {}) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
-  // Clients added by an admin and not yet joined see this in the portal once
-  // they accept their invite, but get no emails before then.
   const { rows: [u] } = await query('SELECT password_set FROM users WHERE id = $1', [user.id]);
-  if (u && !u.password_set) return;
-  const link = APP_URL ? `\n\nOpen your portal: ${APP_URL}` : '';
+  const joined = !u || u.password_set;
+  if (!joined && !always) return;
+  const portal = joined && APP_URL;
   await sendMail({
     to: user.email,
     subject: title,
-    text: `Hi ${user.name || 'there'},\n\n${body}${link}\n\n${PAYMENT_NOTE}\n\nMithmill`,
+    text: `Hi ${user.name || 'there'},\n\n${body}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
     heading: title,
-    cta: APP_URL ? { label: 'Open your portal', url: APP_URL } : null,
+    cta: portal ? { label: 'Open your portal', url: APP_URL } : null,
     note: PAYMENT_NOTE,
   });
 }
@@ -161,9 +163,10 @@ async function runBilling() {
     if (invoice && invoice.status === 'paid') {
       body += ' We have already received your payment for this period. Thank you!';
     } else if (threshold === 1) {
-      body += ' Please make the payment if not made.';
+      body += ' Please make the payment if not made. Today is the last day to renew: if payment is not made by today, ' +
+        'your accounts will be cancelled tomorrow.';
     }
-    await notify({ id: order.user_id, email: order.email, name: order.name }, `Your batch will renew in ${dayWord}`, body);
+    await notify({ id: order.user_id, email: order.email, name: order.name }, `Your batch will renew in ${dayWord}`, body, { always: true });
     sent += 1;
   }
   return { checked: orders.length, remindersSent: sent, today: now };
