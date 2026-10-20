@@ -157,3 +157,23 @@ INSERT INTO pricing (inbox_type, label, price_per_mailbox, sort_order)
 VALUES ('other', 'Other', 0, 99) ON CONFLICT (inbox_type) DO NOTHING;
 -- An "Other" invoice line marked recurring becomes a batch; unmarked lines are one-off charges.
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS recurring BOOLEAN NOT NULL DEFAULT false;
+
+-- Team members ("staff") use the admin panel; the owner ("admin") also manages
+-- the team and settings.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('client', 'admin', 'staff'));
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'client';
+
+-- Every admin-panel change: who, what, and the before/after of each field.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          SERIAL PRIMARY KEY,
+  actor_id    INT,
+  actor_name  TEXT NOT NULL DEFAULT '',
+  actor_email TEXT NOT NULL DEFAULT '',
+  actor_role  TEXT NOT NULL DEFAULT '',
+  action      TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  changes     JSONB NOT NULL DEFAULT '[]',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS audit_log_created ON audit_log (created_at DESC);

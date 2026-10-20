@@ -131,6 +131,11 @@ function cancelNote() {
   return `<div class="note note-info"><span class="note-icon">✉️</span><div><strong>Need to cancel?</strong> ${esc(state.dash.cancelNote)}</div></div>`;
 }
 
+// Team members ("staff") get the admin panel too; the owner ("admin") also
+// sees Team and Settings.
+const isAdminRole = (r) => r === 'admin' || r === 'staff';
+const isOwner = () => state.me && state.me.role === 'admin';
+
 // ------------------------------------------------------------------ state + router
 
 const state = { me: undefined, dash: null, admin: null, order: null };
@@ -145,11 +150,12 @@ async function route() {
     try { state.me = await api('GET', '/api/me'); } catch { state.me = null; }
   }
   if (!state.me) return renderLogin();
-  if (parts[0] === 'login' || parts[0] === '') return go(state.me.role === 'admin' ? '#/admin' : '#/dashboard');
+  setAdminTabs();
+  if (parts[0] === 'login' || parts[0] === '') return go(isAdminRole(state.me.role) ? '#/admin' : '#/dashboard');
 
   try {
     if (parts[0] === 'password') return renderPassword();
-    if (state.me.role === 'admin') {
+    if (isAdminRole(state.me.role)) {
       if (parts[0] !== 'admin') return go('#/admin');
       return await renderAdmin(parts[1] || 'orders', parts[2], parts[3]);
     }
@@ -169,6 +175,7 @@ const ICONS = {
   orders: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   clients: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   invoices: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
+  team: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/><path d="m17 3 1.5 1.5L21 2"/>',
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
@@ -178,14 +185,14 @@ const ICONS = {
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
   '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
-  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/settings': 'settings',
+  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings',
 };
 
 // Layout borrowed from the MithMill commission portal: navy sidebar with the
 // nav and account, a sticky page header, and the page content. A page's
 // `.page-head` (title, subtitle, actions) is lifted into the sticky header.
 function shell(tabs, active, content) {
-  const isClient = state.me.role !== 'admin';
+  const isClient = !isAdminRole(state.me.role);
   const unread = isClient && state.dash ? state.dash.notifications.filter((n) => !n.read_at).length : 0;
   const items = isClient ? [...tabs, ['#/notifications', 'Notifications']] : tabs;
   const current = active || (location.hash.startsWith('#/notifications') ? '#/notifications' : '');
@@ -200,7 +207,7 @@ function shell(tabs, active, content) {
       <nav class="sb-nav">${nav}</nav>
       <div class="sb-user">
         <div class="avatar">${esc((state.me.name || state.me.email || '?').charAt(0).toUpperCase())}</div>
-        <div class="sb-user-info"><div class="email" title="${esc(state.me.email)}">${esc(state.me.email)}</div><div class="role">${isClient ? esc(state.me.company || 'Client') : 'Admin'}</div></div>
+        <div class="sb-user-info"><div class="email" title="${esc(state.me.email)}">${esc(state.me.email)}</div><div class="role">${isClient ? esc(state.me.company || 'Client') : isOwner() ? 'Owner' : 'Team member'}</div></div>
         <a class="sb-icon-btn" href="#/password" title="Change password" aria-label="Change password">${icon('key')}</a>
         <button class="sb-icon-btn" id="logout" title="Log out" aria-label="Log out">${icon('logout')}</button>
       </div>
@@ -252,7 +259,7 @@ function renderLogin() {
   onSubmit(document.getElementById('f'), async (d) => {
     const r = await api('POST', '/api/auth/login', d);
     state.me = await api('GET', '/api/me');
-    go(r.role === 'admin' ? '#/admin' : '#/dashboard');
+    go(isAdminRole(r.role) ? '#/admin' : '#/dashboard');
   });
 }
 
@@ -277,12 +284,12 @@ async function renderInvite(token) {
   onSubmit(document.getElementById('f'), async (d) => {
     await api('POST', `/api/invites/${encodeURIComponent(token)}/accept`, d);
     state.me = await api('GET', '/api/me');
-    go('#/dashboard');
+    go(isAdminRole(state.me.role) ? '#/admin' : '#/dashboard');
   });
 }
 
 function renderPassword() {
-  const tabs = state.me.role === 'admin' ? ADMIN_TABS : CLIENT_TABS;
+  const tabs = isAdminRole(state.me.role) ? ADMIN_TABS : CLIENT_TABS;
   shell(tabs, '', `
     <div class="page-head"><div><h1>Change password</h1><p class="muted">${esc(state.me.email)}</p></div></div>
     <form class="card card-pad" id="pw" style="max-width:440px">
@@ -294,7 +301,7 @@ function renderPassword() {
   onSubmit(document.getElementById('pw'), async (d) => {
     await api('POST', '/api/auth/password', d);
     toast('Password changed');
-    go(state.me.role === 'admin' ? '#/admin' : '#/dashboard');
+    go(isAdminRole(state.me.role) ? '#/admin' : '#/dashboard');
   });
 }
 
@@ -718,7 +725,12 @@ function renderOrder() {
 
 // ------------------------------------------------------------------ admin
 
-const ADMIN_TABS = [['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices'], ['#/admin/settings', 'Settings']];
+const ADMIN_TABS = [];
+function setAdminTabs() {
+  ADMIN_TABS.length = 0;
+  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices']);
+  if (isOwner()) ADMIN_TABS.push(['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
+}
 
 async function renderAdmin(page, arg, sub) {
   state.admin = await api('GET', '/api/admin/overview');
@@ -727,6 +739,8 @@ async function renderAdmin(page, arg, sub) {
     const inv = await api('GET', `/api/admin/invoices/${encodeURIComponent(arg)}`);
     return sub === 'edit' ? invoiceEditor(inv) : renderInvoiceView(inv, true);
   }
+  if (page === 'team' && isOwner()) return renderTeam(await api('GET', '/api/admin/team'));
+  if (page === 'settings' && !isOwner()) return go('#/admin/orders');
   const pages = { orders: adminOrders, clients: adminClients, invoices: adminInvoices, settings: adminSettings };
   if (page === 'orders' && arg) return adminOrders(Number(arg));
   (pages[page] || adminOrders)();
@@ -1443,6 +1457,79 @@ function renderInvoiceView(inv, isAdmin) {
   });
 }
 
+function renderTeam(team) {
+  const { members, invites, log } = team;
+  const ago = (ts) => new Date(ts).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const verb = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite:', revoked: 'revoked' };
+  const changeList = (changes, action) => (changes.length ? `<ul class="changes">${changes.map((c) => {
+    const pre = (v) => (/\n/.test(v) || v.length > 80 ? `<pre>${esc(v)}</pre>` : `<span>${esc(v)}</span>`);
+    if (action === 'added' || action === 'invited') return `<li><strong>${esc(c.field)}:</strong> ${pre(c.to)}</li>`;
+    if (action === 'deleted' || action === 'revoked') return `<li><strong>${esc(c.field)}:</strong> <del>${pre(c.from)}</del></li>`;
+    return `<li><strong>${esc(c.field)}:</strong> ${c.from ? `<del>${pre(c.from)}</del>` : '<span class="muted">(empty)</span>'} → ${c.to ? `<ins>${pre(c.to)}</ins>` : '<span class="muted">(empty)</span>'}</li>`;
+  }).join('')}</ul>` : '<span class="muted small">No field changes</span>');
+
+  shell(ADMIN_TABS, '#/admin/team', `
+    <div class="page-head"><div><h1>Team</h1><p class="muted">Team members can add clients, send invites and manage orders, batches and invoices. Only you can manage the team and Settings.</p></div></div>
+    <div class="stack">
+      <form class="card card-pad" id="team-form">
+        <h2 style="margin-bottom:14px">Add a team member</h2>
+        <div class="grid-2">
+          <div class="field"><label for="t-email">Email</label><input id="t-email" name="email" type="email" required></div>
+          <div class="field"><label for="t-name">Name</label><input id="t-name" name="name" placeholder="Shown in the activity log and emails"></div>
+        </div>
+        <div class="row"><button class="btn btn-primary" type="submit">Send team invite</button><span class="muted small">They set their own password from the invite link.</span></div>
+        <div class="error"></div>
+        <div id="team-link"></div>
+      </form>
+
+      <div class="card">
+        <div class="card-head"><h2>Members</h2></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Account</th><th>Added</th><th></th></tr></thead>
+          <tbody>${members.map((m) => `<tr>
+            <td>${esc(m.name || '—')}</td><td>${esc(m.email)}</td>
+            <td>${m.role === 'admin' ? '<span class="badge b-in_progress">Owner</span>' : 'Team member'}</td>
+            <td>${m.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-pending">Not joined</span>'}</td>
+            <td>${fmtDate(m.created_at)}</td>
+            <td>${m.role === 'staff' ? `<button class="btn btn-sm btn-danger" data-remove-member="${m.id}" data-email="${esc(m.email)}">Remove</button>` : ''}</td>
+          </tr>`).join('')}
+          ${invites.map((i) => `<tr><td>${esc(i.name || '—')}</td><td>${esc(i.email)}</td><td>Team member</td><td><span class="badge b-in_progress">Invited</span></td><td>${fmtDate(i.created_at)}</td>
+            <td><button class="btn btn-sm btn-ghost" data-revoke-team="${i.id}">Revoke invite</button></td></tr>`).join('')}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div><h2>Activity log</h2><div class="muted small">Every change in the admin panel. Team members' changes are also emailed to you (see Settings).</div></div></div>
+        ${log.length ? `<div class="table-wrap"><table class="activity">
+          <thead><tr><th style="width:140px">When</th><th style="width:200px">Who</th><th>What changed</th></tr></thead>
+          <tbody>${log.map((e) => `<tr>
+            <td>${ago(e.created_at)}</td>
+            <td>${esc(e.actor_name || e.actor_email)}<div class="muted small">${e.actor_role === 'admin' ? 'Owner' : 'Team member'}</div></td>
+            <td><div><strong>${esc(verb[e.action] || e.action)}</strong> ${esc(e.title)}</div>${changeList(e.changes || [], e.action)}</td>
+          </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No activity yet.</div>'}
+      </div>
+    </div>`);
+
+  onSubmit(document.getElementById('team-form'), async (d) => {
+    const r = await api('POST', '/api/admin/team', d);
+    renderTeam(await api('GET', '/api/admin/team'));
+    document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="flex:1;min-width:0">
+      <strong>Team invite for ${esc(d.email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
+      <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}"></div></div></div>`;
+  });
+  document.querySelectorAll('[data-remove-member]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Remove ${b.dataset.email} from the team? They lose access to the admin panel immediately.`)) return;
+      try { await api('DELETE', `/api/admin/team/${b.dataset.removeMember}`); toast('Team member removed'); route(); } catch (ex) { toast(ex.message); }
+    };
+  });
+  document.querySelectorAll('[data-revoke-team]').forEach((b) => {
+    b.onclick = async () => {
+      try { await api('DELETE', `/api/admin/invites/${b.dataset.revokeTeam}`); toast('Invite revoked'); route(); } catch (ex) { toast(ex.message); }
+    };
+  });
+}
+
 function adminSettings() {
   const { pricing, mailEnabled, today, settings } = state.admin;
   shell(ADMIN_TABS, '#/admin/settings', `
@@ -1453,6 +1540,9 @@ function adminSettings() {
         <div class="field"><label for="s-emails">Send new-order notifications to</label>
           <input id="s-emails" name="order_notify_emails" required value="${esc(settings.order_notify_emails)}">
           <div class="hint">One or more emails, separated by commas.</div></div>
+        <div class="field"><label for="s-activity">Send team activity (who changed what) to</label>
+          <input id="s-activity" name="activity_emails" value="${esc(settings.activity_emails || settings.order_notify_emails)}">
+          <div class="hint">You get an email whenever a team member adds, edits or deletes something, with the before and after.</div></div>
         <div class="field"><label for="s-min">Require the onboarding CSV for orders of at least</label>
           <input id="s-min" name="csv_required_min" type="number" min="0" max="10000" required value="${esc(settings.csv_required_min)}" style="max-width:160px">
           <div class="hint">Mailboxes. Set to 0 to make the CSV optional for every order.</div></div>

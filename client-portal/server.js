@@ -9,6 +9,7 @@ const { pool, query, migrate } = require('./db');
 const { sendMail, enabled: mailEnabled } = require('./mailer');
 const billing = require('./billing');
 const onboarding = require('./onboarding');
+const audit = require('./audit');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -66,8 +67,14 @@ const auth = asyncRoute(async (req, res, next) => {
   next();
 });
 
+// Team members ("staff") use the admin panel; the owner ("admin") also
+// manages the team and settings.
 const adminOnly = (req, res, next) => {
-  if (req.user.role !== 'admin') return next(new HttpError(403, 'Admins only'));
+  if (req.user.role !== 'admin' && req.user.role !== 'staff') return next(new HttpError(403, 'Admins only'));
+  next();
+};
+const ownerOnly = (req, res, next) => {
+  if (req.user.role !== 'admin') return next(new HttpError(403, 'Only the account owner can do this'));
   next();
 };
 
@@ -152,11 +159,11 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
   const hash = await bcrypt.hash(password, 10);
 
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash) VALUES ($1, $2, $3, $4)
+    `INSERT INTO users (email, name, company, password_hash, role) VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set = true,
        name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END
      RETURNING *`,
-    [invite.email, name, invite.company, hash],
+    [invite.email, name, invite.company, hash, invite.role === 'staff' ? 'staff' : 'client'],
   );
   await query('UPDATE invites SET accepted_at = now() WHERE id = $1', [invite.id]);
   setSession(res, user);
@@ -223,6 +230,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
 
 const SETTING_DEFAULTS = {
   order_notify_emails: process.env.ORDER_NOTIFY_EMAILS || ADMIN_EMAIL,
+  activity_emails: '',
   csv_required_min: '10',
   support_email: (process.env.SUPPORT_EMAIL || 'support@mithmill.com').toLowerCase(),
   cancel_note: `To cancel a subscription, email us at ${(process.env.SUPPORT_EMAIL || 'support@mithmill.com').toLowerCase()} or send us a message ` +
@@ -331,6 +339,43 @@ app.post('/api/notifications/read', auth, asyncRoute(async (req, res) => {
 const admin = express.Router();
 admin.use(auth, adminOnly);
 
+async function activityRecipients() {
+  const st = await getSettings();
+  return emailList(st.activity_emails || st.order_notify_emails);
+}
+
+// Wraps an admin route so its change lands in the activity log (and, for team
+// members, in the owner's inbox) with a before/after of every field.
+// snap: audit snapshot name; getId(req, responseBody) -> id of the thing.
+function audited(action, snap, getId, handler) {
+  return asyncRoute(async (req, res, next) => {
+    const id0 = getId(req, null);
+    const before = id0 != null && !['added', 'invited'].includes(action) ? await audit.snapshots[snap](id0) : null;
+    let payload;
+    const send = res.json.bind(res);
+    res.json = (body) => { payload = body; return res; };
+    try {
+      await handler(req, res, next);
+    } finally {
+      res.json = send;
+    }
+    if (payload === undefined) return;
+    try {
+      const id1 = getId(req, payload);
+      const after = ['deleted', 'revoked'].includes(action) || id1 == null ? null : await audit.snapshots[snap](id1);
+      const changes = audit.diff(before, after);
+      if (!(action === 'edited' && !changes.length)) {
+        await audit.record(req.user, action, (after || before || { title: snap }).title, changes,
+          { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+      }
+    } catch (err) {
+      console.error('Activity log failed:', err);
+    }
+    send(payload);
+  });
+}
+const byParam = (req) => req.params.id;
+
 admin.get('/overview', asyncRoute(async (req, res) => {
   const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
     query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.user_id, u.email, u.name, u.company,
@@ -345,7 +390,7 @@ admin.get('/overview', asyncRoute(async (req, res) => {
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
            WHERE u.role = 'client' GROUP BY u.id ORDER BY u.created_at DESC`),
     query(`SELECT id, email, name, company, expires_at, created_at FROM invites
-           WHERE accepted_at IS NULL AND expires_at > now() ORDER BY created_at DESC`),
+           WHERE accepted_at IS NULL AND expires_at > now() AND role = 'client' ORDER BY created_at DESC`),
     query(`SELECT i.*, u.email, u.company FROM invoices i JOIN users u ON u.id = i.user_id
            ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`),
     query("SELECT * FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order"),
@@ -357,7 +402,7 @@ admin.get('/overview', asyncRoute(async (req, res) => {
   });
 }));
 
-admin.patch('/orders/:id', asyncRoute(async (req, res) => {
+admin.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) => {
   const id = Number(req.params.id);
   const { rows: [order] } = await query(
     `SELECT o.*, p.label, u.email, u.name FROM orders o
@@ -483,7 +528,7 @@ admin.patch('/orders/:id', asyncRoute(async (req, res) => {
 
 // Removes a batch entirely (e.g. added by mistake). Its unpaid invoices are
 // voided; paid invoices stay as history.
-admin.delete('/orders/:id', asyncRoute(async (req, res) => {
+admin.delete('/orders/:id', audited('deleted', 'order', byParam, async (req, res) => {
   const id = Number(req.params.id);
   const { rows: [o] } = await query('SELECT id FROM orders WHERE id = $1', [id]);
   if (!o) throw new HttpError(404, 'Batch not found');
@@ -492,20 +537,20 @@ admin.delete('/orders/:id', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-admin.post('/invites', asyncRoute(async (req, res) => {
+admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.id : null), async (req, res) => {
   const email = str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
   const { rows: [found] } = await query('SELECT role, name, company, password_set FROM users WHERE email = $1', [email]);
-  if (found && found.role === 'admin') throw new HttpError(400, 'That email belongs to an admin');
+  if (found && found.role !== 'client') throw new HttpError(400, 'That email belongs to a team member');
   // A client you added yourself but who never joined gets a normal invite, not a reset.
   const existing = found && found.password_set ? found : null;
   const name = str(req.body.name, 200) || (found && found.name) || '';
   const company = str(req.body.company, 200) || (found && found.company) || '';
 
   const token = crypto.randomBytes(24).toString('base64url');
-  await query(
+  const { rows: [created] } = await query(
     `INSERT INTO invites (email, name, company, token, expires_at)
-     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days')`,
+     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days') RETURNING id`,
     [email, name, company, token],
   );
   const link = `${baseUrl(req)}/#/invite/${token}`;
@@ -519,7 +564,7 @@ admin.post('/invites', asyncRoute(async (req, res) => {
         `mailboxes and billing and place new orders.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n` +
         `${link}\n\n${billing.PAYMENT_NOTE}\n\nMithmill`,
   });
-  res.status(201).json({ link, emailed, reset: Boolean(existing) });
+  res.status(201).json({ id: created.id, link, emailed, reset: Boolean(existing) });
 }));
 
 // Billing cycle from the admin forms: monthly, yearly, or custom (every N months).
@@ -535,11 +580,11 @@ function parseCycle(b) {
 
 // Adds a client without inviting them, so existing batches and billing can be
 // loaded first. They get their password when they accept an invite later.
-admin.post('/clients', asyncRoute(async (req, res) => {
+admin.post('/clients', audited('added', 'user', (req, body) => (body ? body.id : null), async (req, res) => {
   const email = str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
-  const { rows: [found] } = await query('SELECT id FROM users WHERE email = $1', [email]);
-  if (found) throw new HttpError(400, 'A client with that email already exists');
+  const { rows: [found] } = await query('SELECT id, role FROM users WHERE email = $1', [email]);
+  if (found) throw new HttpError(400, found.role === 'client' ? 'A client with that email already exists' : 'That email belongs to a team member');
   const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   const { rows: [user] } = await query(
     `INSERT INTO users (email, name, company, password_hash, password_set) VALUES ($1, $2, $3, $4, false) RETURNING id`,
@@ -550,7 +595,7 @@ admin.post('/clients', asyncRoute(async (req, res) => {
 
 // Adds a batch on a client's behalf: an existing purchase (with its billing
 // dates) or a new order taken outside the portal.
-admin.post('/orders', asyncRoute(async (req, res) => {
+admin.post('/orders', audited('added', 'order', (req, body) => (body ? body.id : null), async (req, res) => {
   const b = req.body;
   const { rows: [client] } = await query("SELECT id, email, name, password_set FROM users WHERE id = $1 AND role = 'client'", [Number(b.user_id)]);
   if (!client) throw new HttpError(400, 'Choose a client');
@@ -608,7 +653,7 @@ admin.post('/orders', asyncRoute(async (req, res) => {
   res.status(201).json({ id: order.id, invoiceId });
 }));
 
-admin.delete('/invites/:id', asyncRoute(async (req, res) => {
+admin.delete('/invites/:id', audited('revoked', 'invite', byParam, async (req, res) => {
   await query('DELETE FROM invites WHERE id = $1 AND accepted_at IS NULL', [Number(req.params.id)]);
   res.json({ ok: true });
 }));
@@ -757,12 +802,12 @@ async function createBatchesFromInvoice(invoiceId, months) {
   return ids;
 }
 
-admin.post('/invoices/:id/batches', asyncRoute(async (req, res) => {
+admin.post('/invoices/:id/batches', audited('edited', 'invoice', byParam, async (req, res) => {
   const ids = await createBatchesFromInvoice(Number(req.params.id), parseCycle(req.body));
   res.status(201).json({ batchIds: ids });
 }));
 
-admin.post('/invoices', asyncRoute(async (req, res) => {
+admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.id : null), async (req, res) => {
   const v = await parseInvoice(req.body);
   const cycle = req.body.create_batches === true && !v.orderId ? parseCycle(req.body) : null;
   const id = await inTransaction(async (client) => {
@@ -790,7 +835,7 @@ admin.post('/invoices', asyncRoute(async (req, res) => {
   res.status(201).json({ id, batchIds });
 }));
 
-admin.put('/invoices/:id', asyncRoute(async (req, res) => {
+admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
   const id = Number(req.params.id);
   const { rows: [existing] } = await query('SELECT id FROM invoices WHERE id = $1', [id]);
   if (!existing) throw new HttpError(404, 'Invoice not found');
@@ -812,7 +857,7 @@ admin.put('/invoices/:id', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-admin.patch('/invoices/:id', asyncRoute(async (req, res) => {
+admin.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
   const status = req.body.status;
   if (!['unpaid', 'paid', 'void'].includes(status)) throw new HttpError(400, 'Bad status');
   const { rows: [inv] } = await query(
@@ -834,13 +879,18 @@ admin.get('/orders/:id/onboarding.csv', asyncRoute(async (req, res) => {
   res.attachment(`order-${f.order_id}-onboarding.csv`).type('text/csv').send(onboarding.decrypt(f.data));
 }));
 
-admin.put('/settings', asyncRoute(async (req, res) => {
+admin.put('/settings', ownerOnly, audited('edited', 'settings', () => 'all', async (req, res) => {
   const b = req.body;
   const updates = {};
   if (b.order_notify_emails !== undefined) {
     const list = emailList(b.order_notify_emails);
     if (!list.length) throw new HttpError(400, 'Add at least one valid email for order notifications');
     updates.order_notify_emails = list.join(', ');
+  }
+  if (b.activity_emails !== undefined) {
+    const list = emailList(b.activity_emails);
+    if (!list.length) throw new HttpError(400, 'Add at least one valid email for team activity');
+    updates.activity_emails = list.join(', ');
   }
   if (b.csv_required_min !== undefined) {
     const n = Number(b.csv_required_min);
@@ -863,7 +913,7 @@ admin.put('/settings', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-admin.put('/pricing', asyncRoute(async (req, res) => {
+admin.put('/pricing', ownerOnly, audited('edited', 'standardPricing', () => 'all', async (req, res) => {
   const prices = Array.isArray(req.body.prices) ? req.body.prices : [];
   for (const p of prices) {
     const price = Number(p.price_per_mailbox);
@@ -873,7 +923,7 @@ admin.put('/pricing', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-admin.put('/clients/:id/pricing', asyncRoute(async (req, res) => {
+admin.put('/clients/:id/pricing', audited('edited', 'clientPricing', byParam, async (req, res) => {
   const userId = Number(req.params.id);
   const { rows: [client] } = await query("SELECT id FROM users WHERE id = $1 AND role = 'client'", [userId]);
   if (!client) throw new HttpError(404, 'Client not found');
@@ -894,6 +944,48 @@ admin.put('/clients/:id/pricing', asyncRoute(async (req, res) => {
       [userId, type, price],
     );
   }
+  res.json({ ok: true });
+}));
+
+// ---- team (owner only)
+
+admin.get('/team', ownerOnly, asyncRoute(async (req, res) => {
+  const [members, invites, log] = await Promise.all([
+    query("SELECT id, email, name, role, password_set, created_at FROM users WHERE role IN ('admin', 'staff') ORDER BY role, created_at"),
+    query(`SELECT id, email, name, expires_at, created_at FROM invites
+           WHERE role = 'staff' AND accepted_at IS NULL AND expires_at > now() ORDER BY created_at DESC`),
+    query('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 300'),
+  ]);
+  res.json({ members: members.rows, invites: invites.rows, log: log.rows });
+}));
+
+admin.post('/team', ownerOnly, audited('invited', 'invite', (req, body) => (body ? body.id : null), async (req, res) => {
+  const email = str(req.body.email, 200).toLowerCase();
+  if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
+  const { rows: [found] } = await query('SELECT role FROM users WHERE email = $1', [email]);
+  if (found && found.role === 'client') throw new HttpError(400, 'That email belongs to a client. Use a different email for the team member.');
+  if (found) throw new HttpError(400, 'That person is already on the team');
+  const name = str(req.body.name, 200);
+  const token = crypto.randomBytes(24).toString('base64url');
+  const { rows: [created] } = await query(
+    `INSERT INTO invites (email, name, company, token, expires_at, role)
+     VALUES ($1, $2, 'Mithmill', $3, now() + interval '${INVITE_DAYS} days', 'staff') RETURNING id`,
+    [email, name, token],
+  );
+  const link = `${baseUrl(req)}/#/invite/${token}`;
+  const emailed = await sendMail({
+    to: email,
+    subject: 'You have been added to the Mithmill admin team',
+    text: `Hi ${name || 'there'},\n\n${req.user.name || req.user.email} added you to the Mithmill client portal admin team. ` +
+      `You can add clients, send invites and manage orders and invoices.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n${link}\n\nMithmill`,
+  });
+  res.status(201).json({ id: created.id, link, emailed });
+}));
+
+admin.delete('/team/:id', ownerOnly, audited('deleted', 'user', byParam, async (req, res) => {
+  const { rows: [u] } = await query('SELECT role FROM users WHERE id = $1', [Number(req.params.id)]);
+  if (!u || u.role !== 'staff') throw new HttpError(400, 'Only team members can be removed');
+  await query('DELETE FROM users WHERE id = $1', [Number(req.params.id)]);
   res.json({ ok: true });
 }));
 
