@@ -175,7 +175,7 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
 
 // Standard prices with this client's overrides applied.
 const CLIENT_PRICING_SQL = `
-  SELECT p.inbox_type, p.label, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
+  SELECT p.inbox_type, p.label, p.description, p.active, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
     FROM pricing p
     LEFT JOIN client_pricing cp ON cp.inbox_type = p.inbox_type AND cp.user_id = $1`;
 
@@ -195,7 +195,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
            FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY due_date DESC, id DESC`, [uid]),
     query(`SELECT id, title, body, read_at, created_at FROM notifications
            WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`, [uid]),
-    query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type <> 'other' ORDER BY p.sort_order`, [uid]),
+    query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type <> 'other' AND p.active ORDER BY p.sort_order`, [uid]),
   ]);
 
   const active = orders.rows.filter((o) => o.status === 'active');
@@ -267,7 +267,7 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   const b = req.body;
   const { rows: [price] } = await query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type = $2`,
     [req.user.id, str(b.inbox_type, 50)]);
-  if (!price || price.inbox_type === 'other') throw new HttpError(400, 'Choose an inbox type');
+  if (!price || price.inbox_type === 'other' || !price.active) throw new HttpError(400, 'Choose an inbox type');
 
   // Onboarding sheet: optional, required for big orders, and the source of
   // domains/usernames when those fields are left empty.
@@ -940,13 +940,54 @@ admin.put('/settings', ownerOnly, audited('edited', 'settings', () => 'all', asy
   res.json({ ok: true });
 }));
 
+// Mailbox types and their standard prices: edit name, description, price and
+// whether clients can order it.
 admin.put('/pricing', ownerOnly, audited('edited', 'standardPricing', () => 'all', async (req, res) => {
   const prices = Array.isArray(req.body.prices) ? req.body.prices : [];
   for (const p of prices) {
+    const type = str(p.inbox_type, 50);
+    if (type === 'other') continue;
     const price = Number(p.price_per_mailbox);
     if (!(price >= 0)) throw new HttpError(400, 'Prices must be 0 or more');
-    await query('UPDATE pricing SET price_per_mailbox = $1 WHERE inbox_type = $2', [price, str(p.inbox_type, 50)]);
+    const label = p.label === undefined ? null : str(p.label, 80);
+    if (label === '') throw new HttpError(400, 'Every mailbox type needs a name');
+    await query(
+      `UPDATE pricing SET price_per_mailbox = $1, label = COALESCE($2, label),
+         description = COALESCE($3, description), active = COALESCE($4, active) WHERE inbox_type = $5`,
+      [price, label, p.description === undefined ? null : str(p.description, 300),
+       p.active === undefined ? null : Boolean(p.active), type],
+    );
   }
+  res.json({ ok: true });
+}));
+
+admin.post('/pricing/types', ownerOnly, audited('edited', 'standardPricing', () => 'all', async (req, res) => {
+  const label = str(req.body.label, 80);
+  if (!label) throw new HttpError(400, 'Give the mailbox type a name');
+  const price = Number(req.body.price_per_mailbox);
+  if (!(price >= 0)) throw new HttpError(400, 'Price must be 0 or more');
+  const { rows: [dup] } = await query('SELECT 1 FROM pricing WHERE lower(label) = lower($1)', [label]);
+  if (dup) throw new HttpError(400, 'A mailbox type with that name already exists');
+  const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40) || 'type';
+  let slug = base;
+  for (let n = 2; (await query('SELECT 1 FROM pricing WHERE inbox_type = $1', [slug])).rows.length; n++) slug = `${base}_${n}`;
+  const { rows: [{ max }] } = await query("SELECT COALESCE(MAX(sort_order), 0) AS max FROM pricing WHERE inbox_type <> 'other'");
+  await query(
+    'INSERT INTO pricing (inbox_type, label, price_per_mailbox, sort_order, description, active) VALUES ($1, $2, $3, $4, $5, true)',
+    [slug, label, price, Number(max) + 1, str(req.body.description, 300)],
+  );
+  res.status(201).json({ inbox_type: slug });
+}));
+
+admin.delete('/pricing/types/:type', ownerOnly, audited('edited', 'standardPricing', () => 'all', async (req, res) => {
+  const type = str(req.params.type, 50);
+  if (type === 'other') throw new HttpError(400, 'This type can\'t be removed');
+  const { rows: [used] } = await query(
+    `SELECT (SELECT count(*) FROM orders WHERE inbox_type = $1) + (SELECT count(*) FROM invoice_items WHERE inbox_type = $1) AS n`, [type],
+  );
+  if (Number(used.n)) throw new HttpError(400, 'This type is used by batches or invoices, so it can\'t be deleted. Untick "Offer to clients" to hide it instead.');
+  await query('DELETE FROM client_pricing WHERE inbox_type = $1', [type]);
+  await query('DELETE FROM pricing WHERE inbox_type = $1', [type]);
   res.json({ ok: true });
 }));
 

@@ -177,3 +177,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS audit_log_created ON audit_log (created_at DESC);
+
+-- Admin-managed mailbox types: hidden types stay valid for existing batches
+-- but aren't offered to clients; description is shown on the order page.
+ALTER TABLE pricing ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE pricing ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+UPDATE pricing SET description = CASE inbox_type
+    WHEN 'google_workspace' THEN 'Google Workspace mailboxes set up on your domains.'
+    WHEN 'azure' THEN 'Microsoft mailboxes provisioned through an Azure tenant.'
+    WHEN 'm365_admin' THEN 'Microsoft 365 mailboxes, with admin access to the tenant.'
+    WHEN 'm365_non_admin' THEN 'Microsoft 365 mailboxes, without tenant admin access.'
+    ELSE description END
+  WHERE description = '';

@@ -96,8 +96,12 @@ async function clientPricing(userId) {
 }
 
 async function standardPricing() {
-  const { rows } = await query("SELECT label, price_per_mailbox FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order");
-  return { title: 'standard prices', fields: Object.fromEntries(rows.map((r) => [r.label, money(r.price_per_mailbox)])) };
+  const { rows } = await query("SELECT inbox_type, label, price_per_mailbox, active, description FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order");
+  return {
+    title: 'mailbox types and standard prices',
+    fields: Object.fromEntries(rows.map((r) => [`Type "${r.inbox_type}"`,
+      `${r.label}: ${money(r.price_per_mailbox)}${r.active ? '' : ' (hidden from clients)'}${r.description ? ` · ${r.description}` : ''}`])),
+  };
 }
 
 async function settings() {

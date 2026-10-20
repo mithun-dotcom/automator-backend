@@ -545,7 +545,7 @@ function renderOrder() {
           <button type="button" class="type ${data.inbox_type === p.inbox_type ? 'sel' : ''}" data-type="${esc(p.inbox_type)}">
             <div class="t-name">${esc(p.label)}</div>
             <div class="t-price">${money(p.price_per_mailbox)} per mailbox / month</div>
-            <div class="t-desc">${esc(TYPE_INFO[p.inbox_type] || '')}</div>
+            <div class="t-desc">${esc(p.description || TYPE_INFO[p.inbox_type] || '')}</div>
           </button>`).join('')}</div>
         <div class="row" style="justify-content:flex-end;margin-top:20px"><button class="btn btn-primary" id="next1" ${data.inbox_type ? '' : 'disabled'}>Continue</button></div>
       </div>`;
@@ -1562,14 +1562,27 @@ function adminSettings() {
         <button class="btn btn-primary" type="submit">Save settings</button>
         <div class="error"></div>
       </form>
-      <form class="card card-pad" id="prices">
-        <h2>Standard price per mailbox (USD / month)</h2>
-        <p class="muted small" style="margin:4px 0 16px">Used for every client without custom pricing. Set a client's own prices under <a href="#/admin/clients">Clients &amp; invites</a> → Edit pricing. Existing batches keep the price they were ordered at; you can change it on the order.</p>
-        <div class="grid-2">${pricing.map((p) => `
-          <div class="field"><label for="p-${esc(p.inbox_type)}">${esc(p.label)}</label>
-          <input id="p-${esc(p.inbox_type)}" name="${esc(p.inbox_type)}" type="number" step="0.01" min="0" required value="${p.price_per_mailbox}"></div>`).join('')}</div>
-        <button class="btn btn-primary" type="submit">Save prices</button>
-        <div class="error"></div>
+      <form class="card" id="prices">
+        <div class="card-head"><div><h2>Mailbox types &amp; standard prices</h2>
+          <div class="muted small">Price per mailbox per month (USD), used for every client without custom pricing (Clients &amp; invites → Edit pricing). Existing batches keep the price they were ordered at.</div></div></div>
+        <div class="table-wrap"><table class="types-table">
+          <thead><tr><th style="min-width:200px">Name</th><th style="min-width:260px">Description (shown to clients when ordering)</th><th class="num" style="width:130px">Price ($)</th><th style="width:130px">Offer to clients</th><th style="width:70px"></th></tr></thead>
+          <tbody>${pricing.map((p) => `<tr data-type="${esc(p.inbox_type)}">
+            <td><input data-f="label" value="${esc(p.label)}" required></td>
+            <td><input data-f="description" value="${esc(p.description || '')}" placeholder="Optional"></td>
+            <td><input data-f="price_per_mailbox" type="number" step="0.01" min="0" required value="${p.price_per_mailbox}" class="num"></td>
+            <td><label class="check"><input type="checkbox" data-f="active" ${p.active !== false ? 'checked' : ''}> ${p.active !== false ? 'Yes' : 'Hidden'}</label></td>
+            <td><button type="button" class="btn btn-sm btn-ghost" data-del-type="${esc(p.inbox_type)}" title="Delete (only if never used)" aria-label="Delete">✕</button></td>
+          </tr>`).join('')}
+          <tr class="add-type-row">
+            <td><input id="nt-label" placeholder="New type, e.g. Zoho Mail"></td>
+            <td><input id="nt-desc" placeholder="Optional description"></td>
+            <td><input id="nt-price" type="number" step="0.01" min="0" placeholder="0.00" class="num"></td>
+            <td colspan="2"><button type="button" class="btn btn-sm" id="add-type">+ Add mailbox type</button></td>
+          </tr></tbody>
+        </table></div>
+        <div class="card-pad" style="padding-top:12px"><button class="btn btn-primary" type="submit">Save changes</button> <span class="muted small">Hidden types disappear from the client's New order page but existing batches keep working.</span>
+          <div class="error"></div></div>
       </form>
       <div class="card card-pad">
         <h2>Renewal reminders</h2>
@@ -1588,9 +1601,34 @@ function adminSettings() {
     await api('PUT', '/api/admin/settings', d);
     toast('Settings saved');
   });
-  onSubmit(document.getElementById('prices'), async (d) => {
-    await api('PUT', '/api/admin/pricing', { prices: Object.entries(d).map(([inbox_type, v]) => ({ inbox_type, price_per_mailbox: v })) });
-    toast('Prices saved');
+  onSubmit(document.getElementById('prices'), async () => {
+    const prices = [...document.querySelectorAll('#prices tr[data-type]')].map((tr) => ({
+      inbox_type: tr.dataset.type,
+      label: tr.querySelector('[data-f=label]').value,
+      description: tr.querySelector('[data-f=description]').value,
+      price_per_mailbox: tr.querySelector('[data-f=price_per_mailbox]').value,
+      active: tr.querySelector('[data-f=active]').checked,
+    }));
+    await api('PUT', '/api/admin/pricing', { prices });
+    toast('Mailbox types saved');
+    reloadAdmin();
+  });
+  document.getElementById('add-type').onclick = async () => {
+    const label = document.getElementById('nt-label').value.trim();
+    const price = document.getElementById('nt-price').value;
+    if (!label || price === '') { toast('Enter a name and a price for the new type'); return; }
+    try {
+      await api('POST', '/api/admin/pricing/types', { label, price_per_mailbox: price, description: document.getElementById('nt-desc').value });
+      toast(`${label} added`);
+      reloadAdmin();
+    } catch (ex) { toast(ex.message); }
+  };
+  document.querySelectorAll('[data-del-type]').forEach((b) => {
+    b.onclick = async () => {
+      const name = b.closest('tr').querySelector('[data-f=label]').value;
+      if (!confirm(`Delete the mailbox type "${name}"? This only works if no batch or invoice uses it.`)) return;
+      try { await api('DELETE', `/api/admin/pricing/types/${encodeURIComponent(b.dataset.delType)}`); toast(`${name} deleted`); reloadAdmin(); } catch (ex) { toast(ex.message); }
+    };
   });
   document.getElementById('run').onclick = async (e) => {
     e.target.disabled = true;
