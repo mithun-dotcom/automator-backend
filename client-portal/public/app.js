@@ -1543,6 +1543,14 @@ function adminSettings() {
         <div class="field"><label for="s-activity">Send team activity (who changed what) to</label>
           <input id="s-activity" name="activity_emails" value="${esc(settings.activity_emails || settings.order_notify_emails)}">
           <div class="hint">You get an email whenever a team member adds, edits or deletes something, with the before and after.</div></div>
+        <h3 class="section-title">Email footer</h3>
+        <div class="grid-2">
+          <div class="field"><label for="s-web">Website</label><input id="s-web" name="website_url" value="${esc(settings.website_url)}"></div>
+          <div class="field"><label for="s-priv">Privacy policy link</label><input id="s-priv" name="privacy_url" value="${esc(settings.privacy_url)}"></div>
+        </div>
+        <div class="field"><label for="s-terms">Terms link</label><input id="s-terms" name="terms_url" value="${esc(settings.terms_url)}"><div class="hint">Shown in the footer of every email, with your support email (Cancellation requests go to).</div></div>
+        <div class="row" style="margin:-6px 0 18px"><button type="button" class="btn btn-sm" id="test-email">Send test email to me</button><span class="muted small">Preview the email design in your inbox.</span></div>
+        <h3 class="section-title">Orders</h3>
         <div class="field"><label for="s-min">Require the onboarding CSV for orders of at least</label>
           <input id="s-min" name="csv_required_min" type="number" min="0" max="10000" required value="${esc(settings.csv_required_min)}" style="max-width:160px">
           <div class="hint">Mailboxes. Set to 0 to make the CSV optional for every order.</div></div>
@@ -1571,6 +1579,11 @@ function adminSettings() {
       </div>
     </div>`);
 
+  document.getElementById('test-email').onclick = async (e) => {
+    e.target.disabled = true;
+    try { const r = await api('POST', '/api/admin/test-email', {}); toast(`Test email sent to ${r.to}`); } catch (ex) { toast(ex.message); }
+    e.target.disabled = false;
+  };
   onSubmit(document.getElementById('settings'), async (d) => {
     await api('PUT', '/api/admin/settings', d);
     toast('Settings saved');

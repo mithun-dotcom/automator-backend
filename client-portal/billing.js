@@ -69,6 +69,9 @@ async function notify(user, title, body) {
     to: user.email,
     subject: title,
     text: `Hi ${user.name || 'there'},\n\n${body}${link}\n\n${PAYMENT_NOTE}\n\nMithmill`,
+    heading: title,
+    cta: APP_URL ? { label: 'Open your portal', url: APP_URL } : null,
+    note: PAYMENT_NOTE,
   });
 }
 

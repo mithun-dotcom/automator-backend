@@ -104,7 +104,7 @@ async function settings() {
   const { rows } = await query('SELECT key, value FROM settings');
   const labels = {
     order_notify_emails: 'New-order emails', csv_required_min: 'CSV required from (mailboxes)',
-    cancel_note: 'Cancellation note', support_email: 'Cancellation requests go to', activity_emails: 'Team activity emails',
+    cancel_note: 'Cancellation note', support_email: 'Cancellation requests go to', activity_emails: 'Team activity emails', website_url: 'Website', privacy_url: 'Privacy policy link', terms_url: 'Terms link',
   };
   return { title: 'settings', fields: Object.fromEntries(rows.filter((r) => labels[r.key]).map((r) => [labels[r.key], r.value])) };
 }
@@ -146,8 +146,11 @@ async function record(actor, action, title, changes, { recipients, appUrl } = {}
   await sendMail({
     to: recipients.join(', '),
     subject: `[Mithmill portal] ${actor.name || actor.email} ${verb} ${title}`,
-    text: `${who} ${verb} ${title}.\n\n${heading}:\n${detail}\n\nWhen: ${new Date().toLocaleString('en-GB', { timeZone: process.env.BILLING_TZ || 'Asia/Dhaka' })}` +
+    text: `${who} ${verb} ${title}.\n\n${heading}:\n\n${detail}\n\nWhen: ${new Date().toLocaleString('en-GB', { timeZone: process.env.BILLING_TZ || 'Asia/Dhaka' })}` +
       `${appUrl ? `\n\nActivity log: ${appUrl}/#/admin/team` : ''}`,
+    heading: `${actor.name || actor.email} ${verb} ${title}`,
+    cta: appUrl ? { label: 'View activity log', url: `${appUrl}/#/admin/team` } : null,
+    reason: 'You receive this because you are on the MithMill team activity list (Settings → Team activity).',
   });
 }
 

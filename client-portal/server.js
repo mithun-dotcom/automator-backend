@@ -10,6 +10,7 @@ const { sendMail, enabled: mailEnabled } = require('./mailer');
 const billing = require('./billing');
 const onboarding = require('./onboarding');
 const audit = require('./audit');
+const emailTemplate = require('./emailTemplate');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -231,11 +232,20 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
 const SETTING_DEFAULTS = {
   order_notify_emails: process.env.ORDER_NOTIFY_EMAILS || ADMIN_EMAIL,
   activity_emails: '',
+  website_url: 'https://mithmill.com',
+  privacy_url: 'https://mithmill.com/privacy-policy',
+  terms_url: 'https://mithmill.com/terms',
   csv_required_min: '10',
   support_email: (process.env.SUPPORT_EMAIL || 'support@mithmill.com').toLowerCase(),
   cancel_note: `To cancel a subscription, email us at ${(process.env.SUPPORT_EMAIL || 'support@mithmill.com').toLowerCase()} or send us a message ` +
     'wherever you are connected with us (WhatsApp, Telegram, Slack, Skype…). Subscriptions can\'t be cancelled from the portal.',
 };
+
+// Email footer links/contact follow Settings.
+async function syncEmailBrand() {
+  const st = await getSettings();
+  emailTemplate.setBrand({ website: st.website_url, privacyUrl: st.privacy_url, termsUrl: st.terms_url, supportEmail: st.support_email });
+}
 
 async function getSettings() {
   const { rows } = await query('SELECT key, value FROM settings');
@@ -323,7 +333,10 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
       text: `${req.user.name} <${req.user.email}> placed order #${order.id}.\n\n` +
         `Type: ${price.label}\nMailboxes: ${quantity}\nMonthly: ${total}\n` +
         `Onboarding CSV: ${sheet ? `uploaded (${sheet.users} rows) - download it from the order in the admin panel` : 'not uploaded'}\n\n` +
-        `Domains:\n${domains}\n\nOpen the admin panel: ${baseUrl(req)}/#/admin`,
+        `Domains:\n${domains}\n\nOpen the admin panel: ${baseUrl(req)}/#/admin/orders/${order.id}`,
+      heading: `New order #${order.id} from ${req.user.company || req.user.name || req.user.email}`,
+      cta: { label: 'Open the order', url: `${baseUrl(req)}/#/admin/orders/${order.id}` },
+      reason: 'You receive this because you are on the MithMill new-order notification list (Settings).',
     });
   }
   res.status(201).json({ id: order.id });
@@ -563,6 +576,12 @@ admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.
       : `Hi ${name || 'there'},\n\nYou've been invited to the Mithmill client portal, where you can see your ` +
         `mailboxes and billing and place new orders.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n` +
         `${link}\n\n${billing.PAYMENT_NOTE}\n\nMithmill`,
+    heading: existing ? 'Reset your password' : "You're invited to the MithMill client portal",
+    cta: { label: existing ? 'Set a new password' : 'Accept invitation', url: link },
+    note: existing ? null : billing.PAYMENT_NOTE,
+    reason: existing
+      ? 'You receive this because a password reset was requested for your MithMill client portal account. If that wasn\'t you, ignore this email.'
+      : 'You receive this because MithMill invited you to its client portal. If you weren\'t expecting it, you can ignore this email.',
   });
   res.status(201).json({ id: created.id, link, emailed, reset: Boolean(existing) });
 }));
@@ -887,6 +906,13 @@ admin.put('/settings', ownerOnly, audited('edited', 'settings', () => 'all', asy
     if (!list.length) throw new HttpError(400, 'Add at least one valid email for order notifications');
     updates.order_notify_emails = list.join(', ');
   }
+  for (const [key, label] of [['website_url', 'Website'], ['privacy_url', 'Privacy policy'], ['terms_url', 'Terms']]) {
+    if (b[key] !== undefined) {
+      const url = str(b[key], 300);
+      if (!/^https?:\/\/\S+$/i.test(url)) throw new HttpError(400, `${label} must be a full link starting with https://`);
+      updates[key] = url;
+    }
+  }
   if (b.activity_emails !== undefined) {
     const list = emailList(b.activity_emails);
     if (!list.length) throw new HttpError(400, 'Add at least one valid email for team activity');
@@ -910,6 +936,7 @@ admin.put('/settings', ownerOnly, audited('edited', 'settings', () => 'all', asy
   for (const [k, v] of Object.entries(updates)) {
     await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [k, v]);
   }
+  await syncEmailBrand();
   res.json({ ok: true });
 }));
 
@@ -978,6 +1005,9 @@ admin.post('/team', ownerOnly, audited('invited', 'invite', (req, body) => (body
     subject: 'You have been added to the Mithmill admin team',
     text: `Hi ${name || 'there'},\n\n${req.user.name || req.user.email} added you to the Mithmill client portal admin team. ` +
       `You can add clients, send invites and manage orders and invoices.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n${link}\n\nMithmill`,
+    heading: 'Join the MithMill admin team',
+    cta: { label: 'Join the team', url: link },
+    reason: 'You receive this because the MithMill account owner added you to the admin team.',
   });
   res.status(201).json({ id: created.id, link, emailed });
 }));
@@ -987,6 +1017,22 @@ admin.delete('/team/:id', ownerOnly, audited('deleted', 'user', byParam, async (
   if (!u || u.role !== 'staff') throw new HttpError(400, 'Only team members can be removed');
   await query('DELETE FROM users WHERE id = $1', [Number(req.params.id)]);
   res.json({ ok: true });
+}));
+
+// Sends a sample of the branded email to the owner, to preview the design.
+admin.post('/test-email', ownerOnly, asyncRoute(async (req, res) => {
+  const portal = baseUrl(req);
+  const emailed = await sendMail({
+    to: req.user.email,
+    subject: 'Test email from your MithMill client portal',
+    text: `Hi ${req.user.name || 'there'},\n\nThis is a test of the emails your clients and team receive from the MithMill client portal: ` +
+      `invites, renewal reminders, invoices and order updates all use this design.\n\nOpen your portal: ${portal}\n\n${billing.PAYMENT_NOTE}\n\nMithmill`,
+    heading: 'Your portal emails look like this',
+    cta: { label: 'Open the portal', url: portal },
+    note: billing.PAYMENT_NOTE,
+  });
+  if (!emailed) throw new HttpError(500, 'The email could not be sent. Check the SMTP settings on Render.');
+  res.json({ ok: true, to: req.user.email });
 }));
 
 admin.post('/billing/run', asyncRoute(async (req, res) => {
@@ -1089,6 +1135,7 @@ async function scheduledBilling() {
   await migrate();
   await ensureAdmin();
   await linkStandaloneInvoices();
+  await syncEmailBrand();
   // One-time switch requested by Mithmill: cancellation requests go to support@.
   await query(
     `INSERT INTO settings (key, value) VALUES ('support_email_moved_v1', now()::text) ON CONFLICT (key) DO NOTHING`,
