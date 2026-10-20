@@ -363,3 +363,4 @@ dialog.modal.modal-wide { width: min(760px, calc(100% - 32px)); max-height: calc
 [hidden] { display: none !important; }
 .batch-opt { padding: 14px; border-radius: 12px; background: var(--brand-50); border: 1px solid var(--brand-100); margin-bottom: 14px; }
 details.order { scroll-margin-top: 150px; }
+.recurring-tick { margin-top: 6px; font-size: 12px; color: var(--muted); }

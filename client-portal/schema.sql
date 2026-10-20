@@ -149,3 +149,11 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_name TEXT NOT NULL DEFAULT '';
 -- Billing cycle in months: 1 = monthly, 12 = yearly, anything else = custom.
 -- Prices stay per mailbox per month; each invoice covers the whole cycle.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS billing_months INT NOT NULL DEFAULT 1;
+
+-- "Other" products (anything that isn't a mailbox type). Hidden from client
+-- ordering and standard pricing; used for recurring Other invoice lines that
+-- become batches.
+INSERT INTO pricing (inbox_type, label, price_per_mailbox, sort_order)
+VALUES ('other', 'Other', 0, 99) ON CONFLICT (inbox_type) DO NOTHING;
+-- An "Other" invoice line marked recurring becomes a batch; unmarked lines are one-off charges.
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS recurring BOOLEAN NOT NULL DEFAULT false;

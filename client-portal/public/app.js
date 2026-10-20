@@ -1242,7 +1242,7 @@ function invoiceEditor(inv) {
           <div class="field" id="e-paid-wrap" ${ed.status === 'paid' ? '' : 'hidden'}><label for="e-paid">Paid on</label><input id="e-paid" type="date" value="${esc(ed.paid_date)}"></div>
         </div>
         ${isNew ? `<div class="batch-opt" id="e-batch-box">
-          <label class="check"><input type="checkbox" id="e-batches" checked> <strong>Add the mailbox lines to the client's dashboard as active batches</strong></label>
+          <label class="check"><input type="checkbox" id="e-batches" checked> <strong>Add the mailbox lines (and Other lines ticked Recurring) to the client's dashboard as active batches</strong></label>
           <div class="hint" style="margin:4px 0 10px 24px">Use this when the invoice is for mailboxes the client doesn't have as a batch yet. They renew from the issue date. Untick for one-off charges, or link an existing batch above instead.</div>
           <div style="margin-left:24px;max-width:420px">${cycleFields(1)}</div>
         </div>` : ''}
@@ -1267,7 +1267,8 @@ function invoiceEditor(inv) {
   };
   const renderLines = () => {
     $('lines').innerHTML = ed.items.map((it, i) => `<tr>
-      <td><select data-i="${i}" data-k="inbox_type">${typeOptions(it.inbox_type)}</select></td>
+      <td><select data-i="${i}" data-k="inbox_type">${typeOptions(it.inbox_type)}</select>
+        ${it.inbox_type === 'other' ? `<label class="check small recurring-tick" title="Recurring lines become a batch on the client's dashboard"><input type="checkbox" data-i="${i}" data-k="recurring" ${it.recurring ? 'checked' : ''}> Recurring</label>` : ''}</td>
       <td><input data-i="${i}" data-k="batch_name" list="batch-names" value="${esc(it.batch_name)}" placeholder="e.g. Batch #12"></td>
       <td><input data-i="${i}" data-k="description" value="${esc(it.description)}" placeholder="e.g. Monthly mailboxes"></td>
       <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" min="0.01" required value="${esc(it.quantity)}" class="num"></td>
@@ -1278,15 +1279,17 @@ function invoiceEditor(inv) {
     $('lines').querySelectorAll('[data-k]').forEach((el) => {
       const handler = () => {
         const it = ed.items[el.dataset.i];
-        it[el.dataset.k] = el.value;
+        it[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
         // Picking a mailbox type fills in this client's price if none is set yet.
         if (el.dataset.k === 'inbox_type' && it.unit_price === '' && el.value && el.value !== 'other') {
           it.unit_price = String(priceFor(el.value));
           el.closest('tr').querySelector('[data-k="unit_price"]').value = it.unit_price;
         }
+        // Switching to/from "Other" shows or hides its Recurring tick.
+        if (el.dataset.k === 'inbox_type') { if (el.value !== 'other') it.recurring = false; renderLines(); return; }
         recalc();
       };
-      el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', handler);
+      el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', handler);
     });
     $('lines').querySelectorAll('[data-remove]').forEach((b) => {
       b.onclick = () => { ed.items.splice(Number(b.dataset.remove), 1); renderLines(); };
@@ -1406,7 +1409,7 @@ function renderInvoiceView(inv, isAdmin) {
         ${inv.discount ? `<div><span>Discount</span><span>−${money(inv.discount)}</span></div>` : ''}
         <div class="grand"><span>Total due</span><span>${money(inv.amount)}</span></div>
       </div>
-      ${isAdmin && !inv.order_id && inv.items.some((it) => it.inbox_type && it.inbox_type !== 'other') ? `<div class="note no-print" id="to-batch">
+      ${isAdmin && !inv.order_id && inv.items.some((it) => (it.inbox_type && it.inbox_type !== 'other') || (it.inbox_type === 'other' && it.recurring)) ? `<div class="note no-print" id="to-batch">
         <span class="note-icon">⚠️</span>
         <div style="flex:1"><strong>These mailboxes aren't on the client's dashboard.</strong> This invoice isn't linked to a batch, so the client's active mailboxes and billing don't include it.
           <div class="row" style="margin-top:10px;align-items:flex-end">

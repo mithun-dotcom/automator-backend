@@ -187,7 +187,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
            FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY due_date DESC, id DESC`, [uid]),
     query(`SELECT id, title, body, read_at, created_at FROM notifications
            WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`, [uid]),
-    query(`${CLIENT_PRICING_SQL} ORDER BY p.sort_order`, [uid]),
+    query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type <> 'other' ORDER BY p.sort_order`, [uid]),
   ]);
 
   const active = orders.rows.filter((o) => o.status === 'active');
@@ -249,7 +249,7 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   const b = req.body;
   const { rows: [price] } = await query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type = $2`,
     [req.user.id, str(b.inbox_type, 50)]);
-  if (!price) throw new HttpError(400, 'Choose an inbox type');
+  if (!price || price.inbox_type === 'other') throw new HttpError(400, 'Choose an inbox type');
 
   // Onboarding sheet: optional, required for big orders, and the source of
   // domains/usernames when those fields are left empty.
@@ -348,7 +348,7 @@ admin.get('/overview', asyncRoute(async (req, res) => {
            WHERE accepted_at IS NULL AND expires_at > now() ORDER BY created_at DESC`),
     query(`SELECT i.*, u.email, u.company FROM invoices i JOIN users u ON u.id = i.user_id
            ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`),
-    query('SELECT * FROM pricing ORDER BY sort_order'),
+    query("SELECT * FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order"),
     query('SELECT user_id, inbox_type, price_per_mailbox FROM client_pricing'),
   ]);
   res.json({
@@ -641,6 +641,7 @@ async function parseInvoice(body) {
       description: str(it.description, 1000),
       quantity: Number(it.quantity),
       unit_price: Number(it.unit_price),
+      recurring: it.inbox_type === 'other' && it.recurring === true,
     };
     const n = i + 1;
     if (!validTypes.has(item.inbox_type)) throw new HttpError(400, `Line ${n}: unknown mailbox type`);
@@ -673,9 +674,9 @@ async function writeItems(client, invoiceId, items) {
   await client.query('DELETE FROM invoice_items WHERE invoice_id = $1', [invoiceId]);
   for (const [i, it] of items.entries()) {
     await client.query(
-      `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [invoiceId, it.inbox_type, it.batch_name, it.description, it.quantity, it.unit_price, i],
+      `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price, sort_order, recurring)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [invoiceId, it.inbox_type, it.batch_name, it.description, it.quantity, it.unit_price, i, it.recurring],
     );
   }
 }
@@ -703,7 +704,7 @@ async function invoiceWithItems(id, userId) {
   );
   if (!inv) throw new HttpError(404, 'Invoice not found');
   const { rows: items } = await query(
-    'SELECT inbox_type, batch_name, description, quantity, unit_price FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id',
+    'SELECT inbox_type, batch_name, description, quantity, unit_price, recurring FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id',
     [id],
   );
   const { rows: pricing } = await query('SELECT inbox_type, label FROM pricing ORDER BY sort_order');
@@ -728,10 +729,11 @@ async function createBatchesFromInvoice(invoiceId, months) {
   if (!inv) throw new HttpError(404, 'Invoice not found');
   if (inv.order_id) throw new HttpError(400, 'This invoice is already linked to a batch');
   const { rows: types } = await query('SELECT inbox_type FROM pricing');
-  const valid = new Set(types.map((t) => t.inbox_type));
+  const valid = new Set(types.map((t) => t.inbox_type).filter((t) => t !== 'other'));
   const { rows: items } = await query('SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id', [invoiceId]);
-  const lines = items.filter((it) => valid.has(it.inbox_type));
-  if (!lines.length) throw new HttpError(400, 'This invoice has no mailbox lines (Google Workspace, Azure or Microsoft 365)');
+  // Mailbox lines, plus "Other" lines marked recurring (e.g. an SMTP service).
+  const lines = items.filter((it) => valid.has(it.inbox_type) || (it.inbox_type === 'other' && it.recurring));
+  if (!lines.length) throw new HttpError(400, 'This invoice has no mailbox lines or recurring Other lines');
   const bad = lines.find((it) => !Number.isInteger(it.quantity) || it.quantity < 1);
   if (bad) throw new HttpError(400, 'Mailbox lines need a whole-number quantity to become a batch');
 
@@ -745,7 +747,8 @@ async function createBatchesFromInvoice(invoiceId, months) {
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
          sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months)
        VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9) RETURNING id`,
-      [inv.user_id, it.inbox_type, it.quantity, Math.round((it.unit_price / months) * 100) / 100, it.batch_name,
+      [inv.user_id, it.inbox_type, it.quantity, Math.round((it.unit_price / months) * 100) / 100,
+       it.batch_name || (it.inbox_type === 'other' ? it.description || 'Other service' : ''),
        `${start}T00:00:00Z`, day, next, months],
     );
     ids.push(o.id);
