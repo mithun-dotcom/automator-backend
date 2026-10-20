@@ -176,6 +176,7 @@ const ICONS = {
   clients: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   invoices: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
   team: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/><path d="m17 3 1.5 1.5L21 2"/>',
+  chart: '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 6-7"/>',
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
@@ -185,7 +186,7 @@ const ICONS = {
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
   '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
-  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings',
+  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart',
 };
 
 // Layout borrowed from the MithMill commission portal: navy sidebar with the
@@ -729,6 +730,7 @@ const ADMIN_TABS = [];
 function setAdminTabs() {
   ADMIN_TABS.length = 0;
   ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices']);
+  if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
   if (isOwner()) ADMIN_TABS.push(['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
 
@@ -740,6 +742,7 @@ async function renderAdmin(page, arg, sub) {
     return sub === 'edit' ? invoiceEditor(inv) : renderInvoiceView(inv, true);
   }
   if (page === 'team' && isOwner()) return renderTeam(await api('GET', '/api/admin/team'));
+  if (page === 'analytics') return isOwner() ? renderAnalytics(await api('GET', '/api/admin/analytics')) : go('#/admin/orders');
   if (page === 'settings' && !isOwner()) return go('#/admin/orders');
   const pages = { orders: adminOrders, clients: adminClients, invoices: adminInvoices, settings: adminSettings };
   if (page === 'orders' && arg) return adminOrders(Number(arg));
@@ -1640,3 +1643,205 @@ function adminSettings() {
 }
 
 route();
+
+// ------------------------------------------------------------------ analytics (owner)
+
+const monthName = (ym, opts = { month: 'short', year: 'numeric' }) =>
+  new Date(`${ym}-01T00:00:00Z`).toLocaleDateString('en-GB', { ...opts, timeZone: 'UTC' });
+const compact = (n, isMoney) => {
+  const v = Number(n || 0);
+  const s = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '')}K` : String(Math.round(v * 100) / 100);
+  return isMoney ? `$${s}` : s;
+};
+const count = (n) => Number(n || 0).toLocaleString('en-US');
+
+// "+12.5%" against the comparison value, coloured by whether up is good.
+function delta(now, before, { upIsGood = true } = {}) {
+  now = Number(now || 0); before = Number(before || 0);
+  if (now === before) return '<span class="delta flat">No change</span>';
+  if (!before) return `<span class="delta ${upIsGood ? 'up' : 'down'}">New</span>`;
+  const pct = ((now - before) / before) * 100;
+  const good = (pct > 0) === upIsGood;
+  return `<span class="delta ${good ? 'up' : 'down'}">${pct > 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(Math.abs(pct) < 10 ? 1 : 0)}%</span>`;
+}
+
+let chartTip;
+function showTip(evt, html) {
+  if (!chartTip) { chartTip = document.createElement('div'); chartTip.className = 'chart-tip'; document.body.appendChild(chartTip); }
+  chartTip.innerHTML = html;
+  chartTip.style.display = 'block';
+  const r = chartTip.getBoundingClientRect();
+  let x = evt.clientX + 14;
+  if (x + r.width > window.innerWidth - 8) x = evt.clientX - r.width - 14;
+  chartTip.style.left = `${Math.max(8, x)}px`;
+  chartTip.style.top = `${Math.max(8, evt.clientY - r.height - 12)}px`;
+}
+const hideTip = () => { if (chartTip) chartTip.style.display = 'none'; };
+
+// One-series column or line chart in plain SVG, sized to its container.
+// points: [{ label, value, tip }]; the last point is the month in progress.
+function drawChart(el, points, { kind = 'bar', money: isMoney = false } = {}) {
+  const W = Math.max(260, el.clientWidth), H = 200, L = 46, R = 12, T = 12, B = 26;
+  const max = Math.max(...points.map((p) => Number(p.value) || 0), 0);
+  const step = (() => {
+    if (!max) return 1;
+    const raw = max / 4, mag = 10 ** Math.floor(Math.log10(raw));
+    return [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+  })();
+  const top = Math.max(step * Math.ceil(max / step), step);
+  const y = (v) => T + (H - T - B) * (1 - v / top);
+  const band = (W - L - R) / points.length;
+  const cx = (i) => L + band * i + band / 2;
+  const ticks = [];
+  for (let v = 0; v <= top + 1e-9; v += step) ticks.push(v);
+  const every = Math.ceil(points.length / Math.floor((W - L - R) / 46));
+
+  let marks = '';
+  if (kind === 'bar') {
+    const bw = Math.min(24, band - 2);
+    points.forEach((p, i) => {
+      const v = Number(p.value) || 0;
+      if (!v) return;
+      const x = cx(i) - bw / 2, yt = y(v), h = y(0) - yt, r = Math.min(4, h, bw / 2);
+      marks += `<path class="mark${i === points.length - 1 ? ' current' : ''}" data-i="${i}" d="M${x},${y(0)}V${yt + r}Q${x},${yt} ${x + r},${yt}H${x + bw - r}Q${x + bw},${yt} ${x + bw},${yt + r}V${y(0)}Z"/>`;
+    });
+  } else {
+    const pts = points.map((p, i) => `${cx(i)},${y(Number(p.value) || 0)}`);
+    marks += `<path class="area" d="M${cx(0)},${y(0)}L${pts.join('L')}L${cx(points.length - 1)},${y(0)}Z"/>`;
+    marks += `<path class="line" d="M${pts.join('L')}"/>`;
+    const last = points.length - 1;
+    marks += `<circle class="dot" cx="${cx(last)}" cy="${y(Number(points[last].value) || 0)}" r="4"/>`;
+    marks += `<line class="cross" x1="0" x2="0" y1="${T}" y2="${y(0)}" style="display:none"/><circle class="hover-dot" r="4" style="display:none"/>`;
+  }
+
+  el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img">
+    ${ticks.map((v) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${compact(v, isMoney)}</text>`).join('')}
+    ${points.map((p, i) => ((points.length - 1 - i) % every === 0 ? `<text class="axis" x="${cx(i)}" y="${H - 8}" text-anchor="middle">${esc(p.label)}</text>` : '')).join('')}
+    ${marks}
+    ${points.map((p, i) => `<rect class="hit" data-i="${i}" x="${L + band * i}" y="${T}" width="${band}" height="${H - T - B}"/>`).join('')}
+  </svg>`;
+
+  const svg = el.querySelector('svg');
+  svg.querySelectorAll('.hit').forEach((hit) => {
+    const i = Number(hit.dataset.i);
+    hit.addEventListener('mousemove', (e) => {
+      showTip(e, points[i].tip);
+      if (kind === 'bar') {
+        svg.querySelectorAll('.mark').forEach((m) => m.classList.toggle('dim', m.dataset.i !== String(i)));
+      } else {
+        const cross = svg.querySelector('.cross'), dot = svg.querySelector('.hover-dot');
+        cross.setAttribute('x1', cx(i)); cross.setAttribute('x2', cx(i)); cross.style.display = '';
+        dot.setAttribute('cx', cx(i)); dot.setAttribute('cy', y(Number(points[i].value) || 0)); dot.style.display = '';
+      }
+    });
+    hit.addEventListener('mouseleave', () => {
+      hideTip();
+      svg.querySelectorAll('.mark').forEach((m) => m.classList.remove('dim'));
+      svg.querySelectorAll('.cross,.hover-dot').forEach((m) => { m.style.display = 'none'; });
+    });
+  });
+}
+
+let analyticsRange = 12;
+function renderAnalytics(data) {
+  const { months, lastMonthToDate: prev, outstanding, byType, topClients, recentPayments, today } = data;
+  const cur = months[months.length - 1];
+  const last = months[months.length - 2];
+  const day = Number(today.slice(8));
+  const thisName = monthName(cur.month, { month: 'long' });
+  const lastName = monthName(last.month, { month: 'long' });
+  const prevEndDay = new Date(Date.parse(`${prev.pe}T00:00:00Z`) - 86400000).getUTCDate(); // pe is exclusive
+  const sameDays = `vs ${monthName(last.month, { month: 'short' })} 1–${prevEndDay}`;
+  const endOfLast = `vs end of ${lastName}`;
+
+  // Flow figures compare with the same days of last month; standing figures
+  // (active clients, MRR, mailboxes) compare with where last month ended.
+  const tile = (label, value, d, sub) => `<div class="card kpi">
+    <div class="kpi-label">${label}</div>
+    <div class="kpi-value">${value}</div>
+    <div class="kpi-delta">${d}</div>
+    <div class="kpi-sub">${sub}</div>
+  </div>`;
+  const kpis = [
+    tile('Payments received', money(cur.payments), `${delta(cur.payments, prev.payments)} <span class="muted">${sameDays}</span>`,
+      `${count(cur.payment_count)} payment${cur.payment_count === 1 ? '' : 's'} · ${lastName} total ${money(last.payments)}`),
+    tile('New clients', count(cur.new_clients), `${delta(cur.new_clients, prev.new_clients)} <span class="muted">${sameDays}</span>`,
+      `${lastName} total ${count(last.new_clients)}`),
+    tile('Active clients', count(cur.active_clients), `${delta(cur.active_clients, last.active_clients)} <span class="muted">${endOfLast}</span>`,
+      `${lastName}: ${count(last.active_clients)}`),
+    tile('Monthly recurring revenue', money(cur.mrr), `${delta(cur.mrr, last.mrr)} <span class="muted">${endOfLast}</span>`,
+      `${lastName}: ${money(last.mrr)}`),
+    tile('Active mailboxes', count(cur.mailboxes), `${delta(cur.mailboxes, last.mailboxes)} <span class="muted">${endOfLast}</span>`,
+      `${lastName}: ${count(last.mailboxes)}`),
+    tile('Invoiced', money(cur.invoiced), `${delta(cur.invoiced, prev.invoiced)} <span class="muted">${sameDays}</span>`,
+      `${lastName} total ${money(last.invoiced)}`),
+    tile('New batches', count(cur.new_batches), `${delta(cur.new_batches, prev.new_batches)} <span class="muted">${sameDays}</span>`,
+      `${lastName} total ${count(last.new_batches)}`),
+    tile('Cancelled batches', count(cur.cancellations), `${delta(cur.cancellations, prev.cancellations, { upIsGood: false })} <span class="muted">${sameDays}</span>`,
+      `${lastName} total ${count(last.cancellations)}`),
+  ].join('');
+
+  const CHARTS = [
+    ['payments', 'Payments received', 'bar', true, (m) => money(m.payments), (m) => `${count(m.payment_count)} payment${m.payment_count === 1 ? '' : 's'}`],
+    ['mrr', 'Monthly recurring revenue', 'line', true, (m) => money(m.mrr), (m) => `${count(m.mailboxes)} mailboxes`],
+    ['active_clients', 'Active clients', 'line', false, (m) => count(m.active_clients), () => ''],
+    ['new_clients', 'New clients', 'bar', false, (m) => count(m.new_clients), () => ''],
+    ['mailboxes', 'Active mailboxes', 'line', false, (m) => count(m.mailboxes), () => ''],
+    ['new_batches', 'New batches', 'bar', false, (m) => count(m.new_batches), (m) => `${count(m.cancellations)} cancelled`],
+  ];
+  const maxType = Math.max(...byType.map((t) => Number(t.mrr)), 0) || 1;
+
+  shell(ADMIN_TABS, '#/admin/analytics', `
+    <div class="page-head"><div><h1>Analytics</h1><div class="muted small">${thisName} so far (1–${day}) compared with ${lastName}</div></div>
+      <div class="seg" role="group" aria-label="Chart range">${[6, 12].map((n) => `<button type="button" data-range="${n}" class="${n === analyticsRange ? 'on' : ''}">${n} months</button>`).join('')}</div></div>
+    <div class="stack">
+      <div class="kpis">${kpis}</div>
+      <div class="note note-info"><span><strong>Outstanding:</strong> ${money(outstanding.unpaid)} across ${count(outstanding.unpaid_count)} unpaid invoice${outstanding.unpaid_count === 1 ? '' : 's'}${outstanding.overdue_count ? `, of which <strong>${money(outstanding.overdue)}</strong> (${count(outstanding.overdue_count)}) is past due` : ''}. <a href="#/admin/invoices">View invoices</a></span></div>
+      <div class="charts">${CHARTS.map(([key, title]) => `<div class="card chart-card"><div class="chart-head"><h2>${title}</h2><div class="chart-now" id="now-${key}"></div></div><div class="chart" id="chart-${key}"></div></div>`).join('')}</div>
+      <div class="charts">
+        <div class="card"><div class="card-head"><div><h2>Recurring revenue by type</h2><div class="muted small">Active batches, per month</div></div></div>
+          <div class="card-pad">${byType.length ? byType.map((t) => `<div class="hbar"><div class="hbar-top"><span>${esc(t.label)}</span><span><strong>${money(t.mrr)}</strong> <span class="muted small">· ${count(t.quantity)}</span></span></div><div class="hbar-track"><div class="hbar-fill" style="width:${(Number(t.mrr) / maxType) * 100}%"></div></div></div>`).join('') : '<p class="muted">No active batches yet.</p>'}</div></div>
+        <div class="card"><div class="card-head"><div><h2>Top clients by payments</h2><div class="muted small">${thisName} vs ${lastName}</div></div></div>
+          ${topClients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th class="num">${monthName(cur.month, { month: 'short' })}</th><th class="num">${monthName(last.month, { month: 'short' })}</th></tr></thead><tbody>
+            ${topClients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td><td class="num">${money(c.this_month)}</td><td class="num">${money(c.last_month)}</td></tr>`).join('')}
+          </tbody></table></div>` : '<div class="card-pad muted">No payments in the last two months.</div>'}</div>
+      </div>
+      <div class="card"><div class="card-head"><h2>Recent payments</h2></div>
+        ${recentPayments.length ? `<div class="table-wrap"><table><thead><tr><th>Paid</th><th>Client</th><th>Invoice</th><th class="num">Amount</th></tr></thead><tbody>
+          ${recentPayments.map((p) => `<tr><td>${fmtDate(p.paid_at)}</td><td>${esc(p.company || p.email)}</td><td><a href="#/admin/invoice/${p.id}">#${p.id}</a> <span class="muted small">${esc(p.description)}</span></td><td class="num">${money(p.amount)}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="card-pad muted">No payments recorded yet.</div>'}</div>
+      <div class="card"><div class="card-head"><div><h2>Month by month</h2><div class="muted small">${monthName(cur.month, { month: 'long' })} is to date</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Month</th><th class="num">Payments</th><th class="num">Invoiced</th><th class="num">MRR</th><th class="num">Active clients</th><th class="num">New clients</th><th class="num">Mailboxes</th><th class="num">New batches</th><th class="num">Cancelled</th></tr></thead><tbody id="month-rows"></tbody></table></div></div>
+    </div>`);
+
+  const draw = () => {
+    const shown = months.slice(-analyticsRange);
+    CHARTS.forEach(([key, title, kind, isMoney, fmtV, extra]) => {
+      const el = document.getElementById(`chart-${key}`);
+      if (!el) return;
+      document.getElementById(`now-${key}`).innerHTML = `<span class="chart-value">${fmtV(cur)}</span> ${['payments', 'new_clients', 'new_batches'].includes(key) ? delta(cur[key], prev[key]) : delta(cur[key], last[key])}`;
+      drawChart(el, shown.map((m, i) => ({
+        label: monthName(m.month, { month: 'short' }),
+        value: m[key],
+        tip: `<div class="tip-title">${monthName(m.month, { month: 'long', year: 'numeric' })}${i === shown.length - 1 ? ' (to date)' : ''}</div><div class="tip-value">${fmtV(m)}</div>${extra(m) ? `<div class="tip-sub">${extra(m)}</div>` : ''}`,
+      })), { kind, money: isMoney });
+    });
+    document.getElementById('month-rows').innerHTML = [...shown].reverse().map((m) => `<tr>
+      <td>${monthName(m.month)}</td><td class="num">${money(m.payments)}</td><td class="num">${money(m.invoiced)}</td><td class="num">${money(m.mrr)}</td>
+      <td class="num">${count(m.active_clients)}</td><td class="num">${count(m.new_clients)}</td><td class="num">${count(m.mailboxes)}</td>
+      <td class="num">${count(m.new_batches)}</td><td class="num">${count(m.cancellations)}</td></tr>`).join('');
+  };
+  draw();
+  document.querySelectorAll('.seg button').forEach((b) => {
+    b.onclick = () => {
+      analyticsRange = Number(b.dataset.range);
+      document.querySelectorAll('.seg button').forEach((x) => x.classList.toggle('on', x === b));
+      draw();
+    };
+  });
+  let t;
+  window.onresize = () => {
+    clearTimeout(t);
+    t = setTimeout(() => { if (location.hash.startsWith('#/admin/analytics')) draw(); else window.onresize = null; }, 150);
+  };
+}

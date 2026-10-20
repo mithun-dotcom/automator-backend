@@ -189,3 +189,10 @@ UPDATE pricing SET description = CASE inbox_type
     WHEN 'm365_non_admin' THEN 'Microsoft 365 mailboxes, without tenant admin access.'
     ELSE description END
   WHERE description = '';
+
+-- When a batch was cancelled, so Analytics can tell what was active in past
+-- months. Batches cancelled before this column existed have no record of the
+-- date; they're treated as never having been active.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+UPDATE orders SET cancelled_at = COALESCE(activated_at, created_at)
+  WHERE status = 'cancelled' AND cancelled_at IS NULL;

@@ -16,6 +16,7 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 
 **Admin** (`ADMIN_EMAIL`):
 
+- Analytics (owner only): this month so far against last month, Stripe-style. Payments received, invoiced, new clients, new batches and cancellations are compared with the same days of last month. Active clients, monthly recurring revenue and active mailboxes are compared with where last month ended. It also shows 6- or 12-month charts, outstanding and overdue totals, recurring revenue by mailbox type, top clients, recent payments and a month-by-month table.
 - Orders: every setup detail. Setting an order to **Active** turns on the client's mailboxes, creates the first month's invoice and sets the renewal date one month out. You can change the renewal date and keep internal notes.
 - Clients & invites: invite clients by email (you also get a copy-able link), revoke pending invites, and generate password-reset links.
 - Invoices: create and edit fully custom invoices with any number of lines (mailbox type, batch name, description, quantity, unit price), plus issue/due dates, discount and notes. Mark invoices paid, unpaid or void. Clients see each invoice as a printable page (Print / Save PDF).

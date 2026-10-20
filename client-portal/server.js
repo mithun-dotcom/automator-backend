@@ -506,7 +506,7 @@ admin.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) 
         ? order.next_billing_date
         : billing.nextBillingDate(start, day, billing.cycleMonths(order));
       await query(
-        `UPDATE orders SET status = 'active', activated_at = COALESCE(activated_at, now()),
+        `UPDATE orders SET status = 'active', activated_at = COALESCE(activated_at, now()), cancelled_at = NULL,
            next_billing_date = $1, billing_day = COALESCE(billing_day, $2) WHERE id = $3`,
         [next, day, id],
       );
@@ -525,7 +525,7 @@ admin.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) 
           `We've started setting up your ${order.quantity} ${order.label} mailboxes.`);
       } else if (status === 'cancelled') {
         // Stop renewals: no next billing date, and unpaid upcoming invoices void.
-        await query('UPDATE orders SET next_billing_date = NULL WHERE id = $1', [id]);
+        await query('UPDATE orders SET next_billing_date = NULL, cancelled_at = now() WHERE id = $1', [id]);
         await query(
           `UPDATE invoices SET status = 'void'
             WHERE order_id = $1 AND status = 'unpaid' AND period_start IS NOT NULL AND period_start >= $2`,
@@ -1016,6 +1016,67 @@ admin.put('/clients/:id/pricing', audited('edited', 'clientPricing', byParam, as
 }));
 
 // ---- team (owner only)
+
+// Analytics (owner): month-by-month figures for the last 12 months in
+// BILLING_TZ, plus this month to date against the same days of last month.
+// "Active" means activated before the end of that month and not cancelled by then.
+admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
+  const tz = process.env.BILLING_TZ || 'Asia/Dhaka';
+  const today = billing.today();
+  const local = (col) => `(${col} AT TIME ZONE $2)::date`;
+  const activeAt = (cut) => `o.activated_at IS NOT NULL AND ${local('o.activated_at')} < ${cut}
+    AND (o.status = 'active' OR (o.status = 'cancelled' AND ${local('o.cancelled_at')} >= ${cut}))`;
+  const [months, compare, outstanding, byType, topClients, recent] = await Promise.all([
+    query(`WITH m AS (
+             SELECT ms::date AS ms, (ms + interval '1 month')::date AS me,
+                    LEAST((ms + interval '1 month')::date, $1::date + 1) AS cut
+               FROM generate_series(date_trunc('month', $1::date) - interval '11 months', date_trunc('month', $1::date), interval '1 month') ms)
+           SELECT to_char(m.ms, 'YYYY-MM') AS month,
+             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me) AS payments,
+             (SELECT count(*) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me)::int AS payment_count,
+             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= m.ms AND COALESCE(issue_date, ${local('created_at')}) < m.me) AS invoiced,
+             (SELECT count(*) FROM users WHERE role = 'client' AND ${local('created_at')} >= m.ms AND ${local('created_at')} < m.me)::int AS new_clients,
+             (SELECT count(DISTINCT o.user_id) FROM orders o WHERE ${activeAt('m.cut')})::int AS active_clients,
+             (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM orders o WHERE ${activeAt('m.cut')}) AS mrr,
+             (SELECT COALESCE(SUM(o.quantity), 0) FROM orders o WHERE o.inbox_type <> 'other' AND ${activeAt('m.cut')})::int AS mailboxes,
+             (SELECT count(*) FROM orders o WHERE ${local('o.created_at')} >= m.ms AND ${local('o.created_at')} < m.me)::int AS new_batches,
+             (SELECT count(*) FROM orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= m.ms AND ${local('o.cancelled_at')} < m.me)::int AS cancellations
+           FROM m ORDER BY m.ms`, [today, tz]),
+    // Last month up to the same day of the month as today (clamped to its length).
+    query(`WITH r AS (
+             SELECT (date_trunc('month', $1::date) - interval '1 month')::date AS ps, date_trunc('month', $1::date)::date AS ts)
+           SELECT
+             LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts) AS pe,
+             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS payments,
+             (SELECT count(*) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS payment_count,
+             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= r.ps AND COALESCE(issue_date, ${local('created_at')}) < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS invoiced,
+             (SELECT count(*) FROM users WHERE role = 'client' AND ${local('created_at')} >= r.ps AND ${local('created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_clients,
+             (SELECT count(*) FROM orders o WHERE ${local('o.created_at')} >= r.ps AND ${local('o.created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_batches,
+             (SELECT count(*) FROM orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= r.ps AND ${local('o.cancelled_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS cancellations
+           FROM r`, [today, tz]),
+    query(`SELECT COALESCE(SUM(amount), 0) AS unpaid, count(*)::int AS unpaid_count,
+             COALESCE(SUM(amount) FILTER (WHERE due_date < $1), 0) AS overdue,
+             (count(*) FILTER (WHERE due_date < $1))::int AS overdue_count
+           FROM invoices WHERE status = 'unpaid'`, [today]),
+    query(`SELECT p.label, SUM(o.quantity * o.price_per_mailbox) AS mrr, SUM(o.quantity)::int AS quantity
+           FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+           WHERE o.status = 'active' GROUP BY p.label, p.sort_order ORDER BY mrr DESC`),
+    query(`SELECT u.id, u.email, u.name, u.company,
+             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)), 0) AS this_month,
+             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
+                                             AND ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month
+           FROM invoices i JOIN users u ON u.id = i.user_id
+           WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
+           GROUP BY u.id ORDER BY this_month DESC, last_month DESC LIMIT 10`, [today, tz]),
+    query(`SELECT i.id, i.amount, i.paid_at, i.description, u.email, u.company
+           FROM invoices i JOIN users u ON u.id = i.user_id
+           WHERE i.status = 'paid' AND i.paid_at IS NOT NULL ORDER BY i.paid_at DESC, i.id DESC LIMIT 10`),
+  ]);
+  res.json({
+    today, months: months.rows, lastMonthToDate: compare.rows[0], outstanding: outstanding.rows[0],
+    byType: byType.rows, topClients: topClients.rows, recentPayments: recent.rows,
+  });
+}));
 
 admin.get('/team', ownerOnly, asyncRoute(async (req, res) => {
   const [members, invites, log] = await Promise.all([
