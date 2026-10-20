@@ -61,7 +61,8 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 // Clients added by an admin and not yet joined see notifications in the
 // portal once they accept their invite, but get no emails before then, except
 // with { always: true } (renewal reminders), which they get without the portal link.
-async function notify(user, title, body, { always = false } = {}) {
+// emailExtra is added to the email only, not the portal notification.
+async function notify(user, title, body, { always = false, emailExtra = '' } = {}) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
   const { rows: [u] } = await query('SELECT password_set FROM users WHERE id = $1', [user.id]);
   const joined = !u || u.password_set;
@@ -70,7 +71,7 @@ async function notify(user, title, body, { always = false } = {}) {
   await sendMail({
     to: user.email,
     subject: title,
-    text: `Hi ${user.name || 'there'},\n\n${body}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
+    text: `Hi ${user.name || 'there'},\n\n${body}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
     heading: title,
     cta: portal ? { label: 'Open your portal', url: APP_URL } : null,
     note: PAYMENT_NOTE,
@@ -166,7 +167,12 @@ async function runBilling() {
       body += ' Please make the payment if not made. Today is the last day to renew: if payment is not made by today, ' +
         'your accounts will be cancelled tomorrow.';
     }
-    await notify({ id: order.user_id, email: order.email, name: order.name }, `Your batch will renew in ${dayWord}`, body, { always: true });
+    const paid = invoice && invoice.status === 'paid';
+    await notify({ id: order.user_id, email: order.email, name: order.name }, `Your batch will renew in ${dayWord}`, body, {
+      always: true,
+      emailExtra: paid ? '' : 'To confirm your payment, please reply to this email with a screenshot of the payment, ' +
+        'or share it in your dedicated WhatsApp or Slack group with us (recommended).',
+    });
     sent += 1;
   }
   return { checked: orders.length, remindersSent: sent, today: now };
