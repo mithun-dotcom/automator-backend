@@ -419,3 +419,4 @@ table.activity td { vertical-align: top; }
 @media (max-width: 860px) { .charts { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 600px) { .kpis { gap: 10px; } .kpi { padding: 14px; } .kpi-value { font-size: 21px; } }
 @media (max-width: 340px) { .kpis { grid-template-columns: minmax(0, 1fr); } }
+.client-actions { gap: 6px; min-width: 250px; max-width: 330px; }

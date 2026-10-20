@@ -1016,6 +1016,34 @@ function openBatchDialog(userId) {
   dlg.showModal();
 }
 
+// Edit a client's name, company and (owner only) login email.
+function openClientDialog(c) {
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal';
+  dlg.innerHTML = `<div class="modal-head"><h2>Edit client</h2><button class="btn btn-sm btn-ghost" type="button" id="c-close" aria-label="Close">✕</button></div>
+    <form id="client-form">
+    <div class="field"><label for="c-email">Login email</label>
+      <input id="c-email" name="email" type="email" required value="${esc(c.email)}" ${isOwner() ? '' : 'readonly'}>
+      <div class="hint">${isOwner() ? (c.password_set ? 'They log in with this email. If you change it, both the old and new address get an email about it, and their password stays the same.' : 'Pending invites to the old email stop working. Send a new invite afterwards.') : 'Only the owner can change a client\'s email.'}</div></div>
+    <div class="field"><label for="c-name">Name</label><input id="c-name" name="name" value="${esc(c.name)}"></div>
+    <div class="field"><label for="c-company">Company</label><input id="c-company" name="company" value="${esc(c.company)}"></div>
+    <div class="row"><button class="btn btn-primary" type="submit">Save</button><button class="btn" type="button" id="c-cancel">Cancel</button></div>
+    <div class="error"></div>
+  </form>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.querySelector('#c-cancel').onclick = () => dlg.close();
+  dlg.querySelector('#c-close').onclick = () => dlg.close();
+  dlg.showModal();
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    if (!isOwner()) delete d.email;
+    const r = await api('PATCH', `/api/admin/clients/${c.id}`, d);
+    dlg.close();
+    toast(r.emailChanged ? `Email changed to ${d.email}` : 'Client saved');
+    reloadAdmin();
+  });
+}
+
 function adminClients() {
   const { clients, invites, mailEnabled, pricing, clientPricing } = state.admin;
   const labelOf = (t) => (pricing.find((p) => p.inbox_type === t) || {}).label || t;
@@ -1047,7 +1075,7 @@ function adminClients() {
             <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
-            <td><div class="row" style="flex-wrap:nowrap"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button></div></td>
+            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button>${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
           </tr>
           <tr class="price-row" id="prices-${c.id}" hidden><td colspan="7">
             <form class="client-prices" data-id="${c.id}">
@@ -1128,6 +1156,25 @@ function adminClients() {
       toast('Client pricing saved');
       reloadAdmin();
     });
+  });
+  document.querySelectorAll('[data-edit]').forEach((b) => {
+    b.onclick = () => openClientDialog(clients.find((c) => c.id === Number(b.dataset.edit)));
+  });
+  document.querySelectorAll('[data-delete-client]').forEach((b) => {
+    b.onclick = async () => {
+      const c = clients.find((x) => x.id === Number(b.dataset.deleteClient));
+      const typed = prompt(`Delete ${c.company || c.name || c.email} permanently?\n\n` +
+        `This deletes their account and everything in it: ${c.batch_count} batch${c.batch_count === 1 ? '' : 'es'}, ` +
+        `${c.invoice_count} invoice${c.invoice_count === 1 ? '' : 's'} (paid ones too, so they drop out of Analytics), ` +
+        `notifications, custom pricing and uploaded CSVs. It can't be undone.\n\nType the client's email to confirm:\n${c.email}`);
+      if (typed === null) return;
+      if (typed.trim().toLowerCase() !== c.email) return toast('The email didn\'t match. Nothing was deleted.');
+      try {
+        await api('DELETE', `/api/admin/clients/${c.id}`);
+        toast(`${c.email} deleted`);
+        reloadAdmin();
+      } catch (ex) { toast(ex.message); }
+    };
   });
   document.querySelectorAll('[data-revoke]').forEach((b) => {
     b.onclick = async () => {

@@ -399,7 +399,9 @@ admin.get('/overview', asyncRoute(async (req, res) => {
     query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set,
              EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active'), 0)::int AS active_mailboxes,
-             COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly
+             COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
+             count(o.id)::int AS batch_count,
+             (SELECT count(*) FROM invoices i WHERE i.user_id = u.id)::int AS invoice_count
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
            WHERE u.role = 'client' GROUP BY u.id ORDER BY u.created_at DESC`),
     query(`SELECT id, email, name, company, expires_at, created_at FROM invites
@@ -610,6 +612,58 @@ admin.post('/clients', audited('added', 'user', (req, body) => (body ? body.id :
     [email, str(req.body.name, 200), str(req.body.company, 200), unusable],
   );
   res.status(201).json({ id: user.id });
+}));
+
+// Edits a client's details. Changing the login email is owner-only; the old
+// address is told, and pending invites to it stop working.
+admin.patch('/clients/:id', audited('edited', 'user', byParam, async (req, res) => {
+  const id = Number(req.params.id);
+  const { rows: [client] } = await query("SELECT * FROM users WHERE id = $1 AND role = 'client'", [id]);
+  if (!client) throw new HttpError(404, 'Client not found');
+  const email = req.body.email === undefined ? client.email : str(req.body.email, 200).toLowerCase();
+  if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
+  const name = req.body.name === undefined ? client.name : str(req.body.name, 200);
+  const company = req.body.company === undefined ? client.company : str(req.body.company, 200);
+  const emailChanged = email !== client.email;
+  if (emailChanged) {
+    if (req.user.role !== 'admin') throw new HttpError(403, 'Only the account owner can change a client\'s email');
+    const { rows: [taken] } = await query('SELECT role FROM users WHERE email = $1 AND id <> $2', [email, id]);
+    if (taken) throw new HttpError(400, taken.role === 'client' ? 'Another client already uses that email' : 'That email belongs to a team member');
+  }
+  await query('UPDATE users SET email = $1, name = $2, company = $3 WHERE id = $4', [email, name, company, id]);
+  if (emailChanged) {
+    await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [client.email]);
+    if (client.password_set) {
+      const url = baseUrl(req);
+      await sendMail({
+        to: client.email,
+        subject: 'Your Mithmill portal login email was changed',
+        text: `Hi ${name || 'there'},\n\nThe login email for your Mithmill client portal account was changed from ${client.email} to ${email}. ` +
+          `From now on, log in with ${email}.\n\nIf you didn't ask for this, please contact us right away.\n\nMithmill`,
+        heading: 'Your login email was changed',
+      });
+      await sendMail({
+        to: email,
+        subject: 'Your Mithmill portal login email was updated',
+        text: `Hi ${name || 'there'},\n\nThis is now the login email for your Mithmill client portal account (it was ${client.email}). ` +
+          `Your password stays the same.\n\nLog in: ${url}\n\nMithmill`,
+        heading: 'Your login email was updated',
+        cta: { label: 'Log in to your portal', url },
+      });
+    }
+  }
+  res.json({ ok: true, emailChanged });
+}));
+
+// Deletes a client and everything of theirs: batches, invoices (paid ones
+// too), notifications, pricing and uploaded CSVs. Owner-only; can't be undone.
+admin.delete('/clients/:id', ownerOnly, audited('deleted', 'user', byParam, async (req, res) => {
+  const id = Number(req.params.id);
+  const { rows: [client] } = await query("SELECT email FROM users WHERE id = $1 AND role = 'client'", [id]);
+  if (!client) throw new HttpError(404, 'Client not found');
+  await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [client.email]);
+  await query('DELETE FROM users WHERE id = $1', [id]);
+  res.json({ ok: true });
 }));
 
 // Adds a batch on a client's behalf: an existing purchase (with its billing
