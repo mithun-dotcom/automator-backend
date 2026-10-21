@@ -1332,7 +1332,7 @@ function invoiceEditor(inv) {
   const renderLines = () => {
     $('lines').innerHTML = ed.items.map((it, i) => `<tr>
       <td><select data-i="${i}" data-k="inbox_type">${typeOptions(it.inbox_type)}</select>
-        ${it.inbox_type === 'other' ? `<label class="check small recurring-tick" title="Recurring lines become a batch on the client's dashboard"><input type="checkbox" data-i="${i}" data-k="recurring" ${it.recurring ? 'checked' : ''}> Recurring</label>` : ''}</td>
+        ${it.inbox_type === 'other' ? `<label class="check small recurring-tick" title="Recurring lines become their own batch on the client's dashboard and renew with it"><input type="checkbox" data-i="${i}" data-k="recurring" ${it.recurring ? 'checked' : ''}> Recurring</label>` : ''}</td>
       <td><input data-i="${i}" data-k="batch_name" list="batch-names" value="${esc(it.batch_name)}" placeholder="e.g. Batch #12"></td>
       <td><input data-i="${i}" data-k="description" value="${esc(it.description)}" placeholder="e.g. Monthly mailboxes"></td>
       <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" min="0.01" required value="${esc(it.quantity)}" class="num"></td>

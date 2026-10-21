@@ -206,7 +206,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   res.json({
     user: req.user,
     stats: {
-      activeMailboxes: active.reduce((n, o) => n + o.quantity, 0),
+      activeMailboxes: active.reduce((n, o) => n + (o.inbox_type === 'other' ? 0 : o.quantity), 0),
       pendingMailboxes: pending.reduce((n, o) => n + o.quantity, 0),
       activeBatches: active.length,
       monthlyBilling: active.reduce((n, o) => n + o.quantity * o.price_per_mailbox, 0),
@@ -398,7 +398,7 @@ admin.get('/overview', asyncRoute(async (req, res) => {
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
     query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set,
              EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
-             COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active'), 0)::int AS active_mailboxes,
+             COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
              count(o.id)::int AS batch_count,
              (SELECT count(*) FROM invoices i WHERE i.user_id = u.id)::int AS invoice_count
@@ -863,15 +863,58 @@ async function createBatchesFromInvoice(invoiceId, months) {
   for (const it of lines) {
     const { rows: [o] } = await query(
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
-         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months)
-       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9) RETURNING id`,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id)
+       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9, $10) RETURNING id`,
       [inv.user_id, it.inbox_type, it.quantity, Math.round((it.unit_price / months) * 100) / 100,
-       it.batch_name || (it.inbox_type === 'other' ? it.description || 'Other service' : ''),
-       `${start}T00:00:00Z`, day, next, months],
+       otherName(it), `${start}T00:00:00Z`, day, next, months, invoiceId],
     );
     ids.push(o.id);
   }
   await query('UPDATE invoices SET order_id = $1, period_start = $2 WHERE id = $3', [ids[0], start, invoiceId]);
+  return ids;
+}
+
+const otherName = (it) => it.batch_name || (it.inbox_type === 'other' ? it.description || 'Other service' : '');
+
+// An invoice that already belongs to a batch can still carry "Other" lines
+// ticked Recurring (e.g. a warmup service added to a mailbox batch). Each
+// becomes its own active batch that renews alongside the linked one; saving
+// the invoice again updates that batch rather than adding another.
+async function syncRecurringOtherLines(invoiceId) {
+  const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [invoiceId]);
+  if (!inv || !inv.order_id || inv.status === 'void') return [];
+  const { rows: [base] } = await query('SELECT * FROM orders WHERE id = $1', [inv.order_id]);
+  if (!base) return [];
+  const { rows: items } = await query(
+    "SELECT * FROM invoice_items WHERE invoice_id = $1 AND inbox_type = 'other' AND recurring ORDER BY sort_order, id", [invoiceId]);
+  const months = billing.cycleMonths(base);
+  const start = inv.period_start || inv.issue_date || billing.today();
+  const day = base.billing_day || Number(start.slice(8));
+  // This invoice already charges the line for the period starting at `start`,
+  // so the new batch's first renewal is the one after it.
+  let next = base.next_billing_date || billing.nextBillingDate(start, day, months);
+  while (next <= start || next <= billing.today()) next = billing.nextBillingDate(next, day, months);
+  const ids = [];
+  for (const it of items) {
+    if (!Number.isInteger(it.quantity) || it.quantity < 1) continue;
+    const name = otherName(it);
+    const price = Math.round((it.unit_price / months) * 100) / 100;
+    const { rows: [found] } = await query(
+      `SELECT id FROM orders WHERE from_invoice_id = $1 AND inbox_type = 'other' AND batch_name = $2`,
+      [invoiceId, name]);
+    if (found) {
+      await query('UPDATE orders SET quantity = $1, price_per_mailbox = $2 WHERE id = $3', [it.quantity, price, found.id]);
+      ids.push(found.id);
+      continue;
+    }
+    const { rows: [o] } = await query(
+      `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id)
+       VALUES ($1, 'other', $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10) RETURNING id`,
+      [inv.user_id, it.quantity, price, name, base.status === 'active' ? 'active' : base.status,
+       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId]);
+    ids.push(o.id);
+  }
   return ids;
 }
 
@@ -901,6 +944,7 @@ admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.
       if (!(err instanceof HttpError)) throw err; // no mailbox lines: nothing to add
     }
   }
+  if (v.orderId) batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify !== false) {
     await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
       `Invoice #${id} for ${billing.money(v.amount)} (${v.description}) is due on ${billing.prettyDate(v.dueDate)}.`);
@@ -923,11 +967,12 @@ admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res
     if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, id]);
     if (v.status === 'unpaid') await client.query("UPDATE invoices SET status = 'unpaid', paid_at = NULL WHERE id = $1", [id]);
   });
+  const batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify === true) {
     await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,
       `Invoice #${id} has been updated. Total ${billing.money(v.amount)}, due on ${billing.prettyDate(v.dueDate)}.`);
   }
-  res.json({ ok: true });
+  res.json({ ok: true, batchIds });
 }));
 
 admin.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
@@ -1278,6 +1323,21 @@ async function linkStandaloneInvoices() {
   await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [flag, new Date().toISOString()]);
 }
 
+// One-time: recurring Other lines saved on batch invoices before they became batches.
+async function syncExistingOtherLines() {
+  const flag = 'other_lines_synced_v1';
+  const { rows: [done] } = await query('SELECT 1 FROM settings WHERE key = $1', [flag]);
+  if (done) return;
+  const { rows } = await query(
+    `SELECT DISTINCT i.id FROM invoices i JOIN invoice_items it ON it.invoice_id = i.id
+      WHERE i.order_id IS NOT NULL AND i.status <> 'void' AND it.inbox_type = 'other' AND it.recurring ORDER BY i.id`);
+  for (const { id } of rows) {
+    const ids = await syncRecurringOtherLines(id);
+    if (ids.length) console.log(`Invoice #${id}: recurring Other line(s) now batch(es) ${ids.join(', ')}`);
+  }
+  await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [flag, new Date().toISOString()]);
+}
+
 async function scheduledBilling() {
   try {
     const result = await billing.runBilling();
@@ -1291,6 +1351,7 @@ async function scheduledBilling() {
   await migrate();
   await ensureAdmin();
   await linkStandaloneInvoices();
+  await syncExistingOtherLines();
   await syncEmailBrand();
   // One-time switch requested by Mithmill: cancellation requests go to support@.
   await query(

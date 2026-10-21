@@ -104,9 +104,14 @@ async function createOrderInvoice(order, periodStart, description, itemDescripti
   return inv;
 }
 
+// "3 × Google Workspace mailboxes", or the service's name for an "Other" batch.
+const whatLabel = (order) => (order.inbox_type === 'other'
+  ? `${order.quantity > 1 ? `${order.quantity} × ` : ''}${order.batch_name || 'Other service'}`
+  : `${order.quantity} × ${order.label} mailboxes`);
+
 function ensureRenewalInvoice(order, periodStart) {
   return createOrderInvoice(order, periodStart,
-    `Batch #${order.id} renewal: ${order.quantity} × ${order.label} mailboxes (from ${prettyDate(periodStart)})`,
+    `Batch #${order.id} renewal: ${whatLabel(order)} (from ${prettyDate(periodStart)})`,
     `Renewal from ${prettyDate(periodStart)}`);
 }
 
@@ -159,7 +164,7 @@ async function runBilling() {
     );
     const dayWord = daysLeft === 1 ? '1 day' : `${daysLeft} days`;
     let body =
-      `Your batch #${order.id} (${order.label}, ${order.quantity} mailboxes) will renew in ${dayWord}, ` +
+      `Your batch #${order.id} (${order.inbox_type === 'other' ? whatLabel(order) : `${order.label}, ${order.quantity} mailboxes`}) will renew in ${dayWord}, ` +
       `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
     if (invoice && invoice.status === 'paid') {
       body += ' We have already received your payment for this period. Thank you!';
