@@ -975,6 +975,83 @@ admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res
   res.json({ ok: true, batchIds });
 }));
 
+// Emails the invoice to the client: every line, the total and due date, the
+// notes (payment details) and a link to it in the portal once they've joined.
+admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
+  if (!mailEnabled()) throw new HttpError(503, 'Email is not set up, so the invoice can\'t be sent');
+  const inv = await invoiceWithItems(Number(req.params.id));
+  if (inv.status === 'void') throw new HttpError(400, 'This invoice is void');
+  const { rows: [client] } = await query('SELECT password_set FROM users WHERE id = $1', [inv.user_id]);
+  const { esc, C } = emailTemplate;
+  const label = (t) => (inv.pricing.find((p) => p.inbox_type === t) || {}).label || '';
+  const qty = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+  const money = billing.money;
+  const subtotal = inv.items.reduce((t, it) => t + it.quantity * it.unit_price, 0);
+  const due = billing.prettyDate(inv.due_date);
+  const issued = billing.prettyDate(inv.issue_date || billing.today());
+  const lineName = (it) => [it.inbox_type === 'other' ? '' : label(it.inbox_type), it.batch_name, it.description].filter(Boolean).join(' · ') || 'Item';
+  const paid = inv.status === 'paid';
+
+  const td = `padding:10px 8px;border-bottom:1px solid ${C.line};font-size:14px;color:${C.text};vertical-align:top`;
+  const num = `${td};text-align:right;white-space:nowrap`;
+  const th = `padding:8px;border-bottom:1px solid ${C.line};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};text-align:left`;
+  const row = (l, v, strong) => `<tr><td style="padding:6px 8px;text-align:right;font-size:${strong ? 16 : 14}px;color:${strong ? C.ink : C.muted};${strong ? 'font-weight:700' : ''}">${l}</td><td style="padding:6px 8px;text-align:right;white-space:nowrap;font-size:${strong ? 16 : 14}px;color:${C.ink};${strong ? 'font-weight:700' : ''}">${v}</td></tr>`;
+  const html = `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 6px;font-size:13px;color:${C.muted}">
+      <tr><td>Invoice <strong style="color:${C.ink}">#${inv.id}</strong></td><td align="right">Issued ${esc(issued)} · ${paid ? `<strong style="color:#047857">Paid</strong>` : `Due <strong style="color:${C.ink}">${esc(due)}</strong>`}</td></tr>
+    </table>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 8px">
+      <tr><th style="${th}">Item</th><th style="${th};text-align:right">Qty</th><th style="${th};text-align:right">Price</th><th style="${th};text-align:right">Amount</th></tr>
+      ${inv.items.map((it) => `<tr><td style="${td}">${esc(lineName(it))}</td><td style="${num}">${qty(it.quantity)}</td><td style="${num}">${money(it.unit_price)}</td><td style="${num}">${money(it.quantity * it.unit_price)}</td></tr>`).join('')}
+    </table>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right" style="margin:0 0 20px">
+      ${inv.discount ? row('Subtotal', money(subtotal)) + row('Discount', `−${money(inv.discount)}`) : ''}
+      ${row(paid ? 'Total paid' : 'Total due', money(inv.amount), true)}
+    </table>
+    <div style="clear:both"></div>
+    ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${esc(inv.notes).replace(/\n/g, '<br>')}</div>` : ''}`;
+
+  const name = inv.name || 'there';
+  const intro = paid
+    ? `Hi ${name},\n\nHere is your paid invoice #${inv.id} for ${money(inv.amount)}. Thank you!`
+    : `Hi ${name},\n\nHere is your invoice #${inv.id} for ${money(inv.amount)}, due on ${due}.`;
+  const confirm = paid ? '' : 'To confirm your payment, please reply to this email with a screenshot of the payment, ' +
+    'or share it in your dedicated WhatsApp or Slack group with us (recommended).';
+  const link = client && client.password_set ? `${baseUrl(req)}/#/invoice/${inv.id}` : null;
+  const text = [
+    intro,
+    inv.items.map((it) => `• ${lineName(it)}: ${qty(it.quantity)} × ${money(it.unit_price)} = ${money(it.quantity * it.unit_price)}`).join('\n'),
+    `${inv.discount ? `Discount: −${money(inv.discount)}\n` : ''}${paid ? 'Total paid' : 'Total due'}: ${money(inv.amount)}${paid ? '' : ` (due ${due})`}`,
+    inv.notes ? `Notes:\n${inv.notes}` : '',
+    confirm,
+    link ? `View your invoice: ${link}` : '',
+    billing.PAYMENT_NOTE,
+    'Mithmill',
+  ].filter(Boolean).join('\n\n');
+
+  const sent = await sendMail({
+    to: inv.email,
+    subject: paid ? `Invoice #${inv.id} from MithMill (paid)` : `Invoice #${inv.id} from MithMill: ${money(inv.amount)} due ${due}`,
+    text,
+    heading: paid ? `Invoice #${inv.id} (paid)` : `Invoice #${inv.id}: ${money(inv.amount)} due ${due}`,
+    htmlText: intro,
+    html,
+    after: confirm,
+    cta: link ? { label: 'View invoice', url: link } : null,
+    note: billing.PAYMENT_NOTE,
+    reason: 'You receive this because MithMill sent you an invoice for your account.',
+  });
+  if (!sent) throw new HttpError(502, 'The email could not be sent. Please try again in a moment.');
+  const { rows: [upd] } = await query('UPDATE invoices SET sent_at = now() WHERE id = $1 RETURNING sent_at', [inv.id]);
+  try {
+    await audit.record(req.user, 'sent', `invoice #${inv.id} (${inv.email})`, [{ field: 'Sent to', from: '', to: inv.email }],
+      { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  } catch (err) {
+    console.error('Activity log failed:', err);
+  }
+  res.json({ ok: true, to: inv.email, sentAt: upd.sent_at });
+}));
+
 admin.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
   const status = req.body.status;
   if (!['unpaid', 'paid', 'void'].includes(status)) throw new HttpError(400, 'Bad status');

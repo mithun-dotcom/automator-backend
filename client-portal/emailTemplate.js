@@ -56,8 +56,10 @@ function button(cta) {
  *  cta       main button
  *  note      highlighted notice (e.g. the Mixxbee LLC payment note)
  *  reason    why they're getting this email (footer)
+ *  html      optional pre-built HTML block (e.g. an invoice table), shown after the text
+ *  after     optional plain text shown after that block
  */
-function render({ heading, text, cta, note, preheader, reason }) {
+function render({ heading, text, cta, note, preheader, reason, html, after }) {
   const logo = brand.appUrl ? `${brand.appUrl}/logo-full.png` : '';
   const links = [
     ['Website', brand.website], ['Client portal', brand.appUrl], ['Privacy policy', brand.privacyUrl], ['Terms', brand.termsUrl],
@@ -76,6 +78,8 @@ function render({ heading, text, cta, note, preheader, reason }) {
         </td></tr></table>
         ${heading ? `<h1 style="margin:28px 0 16px;font-size:22px;line-height:1.3;font-weight:700;color:${C.ink}">${esc(heading)}</h1>` : '<div style="height:24px"></div>'}
         ${textToHtml(text, cta && cta.url)}
+        ${html || ''}
+        ${after ? textToHtml(after) : ''}
         ${cta ? button(cta) : ''}
         ${note ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 4px"><tr><td style="background:${C.goldBg};border:1px solid ${C.goldLine};border-radius:10px;padding:14px 16px;font-size:13px;line-height:1.55;color:${C.text}"><strong style="color:${C.gold}">Payment notice:</strong> ${esc(note)}</td></tr></table>` : ''}
         <p style="margin:24px 0 0;line-height:1.6;color:${C.text}">Best regards,<br><strong style="color:${C.ink}">The MithMill team</strong></p>
@@ -94,4 +98,4 @@ function render({ heading, text, cta, note, preheader, reason }) {
 </body></html>`;
 }
 
-module.exports = { render, setBrand, brand };
+module.exports = { render, setBrand, brand, esc, C };

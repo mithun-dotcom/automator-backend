@@ -200,3 +200,6 @@ UPDATE orders SET cancelled_at = COALESCE(activated_at, created_at)
 -- The invoice a batch was created from, so re-saving that invoice updates its
 -- recurring "Other" batches instead of adding them again.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS from_invoice_id INT REFERENCES invoices(id) ON DELETE SET NULL;
+
+-- When an admin last emailed the invoice to the client (Send invoice button).
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;

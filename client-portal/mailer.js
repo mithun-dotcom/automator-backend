@@ -21,7 +21,9 @@ const enabled = () => Boolean(transport);
 // Builds the branded HTML from the plain text: the button carries the main
 // link (lines ending with it are dropped), the note gets its own box, and the
 // text's own "Mithmill" sign-off gives way to the template's.
-function toHtml({ subject, text, heading, cta, note, reason, preheader }) {
+function toHtml({ subject, text, heading, cta, note, reason, preheader, html, after, htmlText }) {
+  // With a pre-built block, `htmlText` is the intro shown above it; `text` stays the plain-text part.
+  if (html) return render({ heading: heading || subject, text: htmlText, html, after, cta, note, reason, preheader: preheader || String(htmlText || '').replace(/\s+/g, ' ').slice(0, 140) });
   let body = String(text || '');
   if (note) body = body.split(note).join('');
   if (cta && cta.url) body = body.split('\n').filter((l) => !l.trim().endsWith(cta.url)).join('\n');

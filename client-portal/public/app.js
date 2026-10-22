@@ -1445,9 +1445,11 @@ function renderInvoiceView(inv, isAdmin) {
         ${isAdmin ? `${inv.order_id ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
           ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
           ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
+        ${isAdmin && inv.status !== 'void' ? `<button class="btn" id="send-inv" title="${inv.sent_at ? `Last sent ${esc(fmtDate(inv.sent_at))}` : 'Not sent yet'}">${inv.sent_at ? 'Send again' : 'Send invoice'}</button>` : ''}
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
       </div>
     </div>
+    ${isAdmin && inv.sent_at ? `<p class="muted small no-print" style="margin:0 0 12px">Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}.</p>` : ''}
     <article class="invoice-sheet">
       <header class="inv-top">
         <img src="logo-full.png" alt="MithMill" class="inv-logo">
@@ -1485,6 +1487,18 @@ function renderInvoiceView(inv, isAdmin) {
     </article>`);
 
   document.getElementById('print').onclick = () => window.print();
+  const send = document.getElementById('send-inv');
+  if (send) {
+    send.onclick = async () => {
+      if (!confirm(`Email invoice #${inv.id} (${money(inv.amount)}) to ${inv.email}?\n\nIt includes every line, the total, the due date and your notes (payment details).`)) return;
+      send.disabled = true;
+      try {
+        const r = await api('POST', `/api/admin/invoices/${inv.id}/send`);
+        toast(`Invoice #${inv.id} sent to ${r.to}`);
+        route();
+      } catch (ex) { toast(ex.message); send.disabled = false; }
+    };
+  }
   const mk = document.getElementById('make-batch');
   if (mk) {
     wireCycleFields(document.getElementById('to-batch'));

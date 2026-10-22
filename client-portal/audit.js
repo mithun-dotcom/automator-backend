@@ -124,7 +124,7 @@ function diff(before, after) {
     .filter((c) => c.from !== c.to);
 }
 
-const VERB = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite', revoked: 'revoked', cancelled: 'cancelled' };
+const VERB = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite', revoked: 'revoked', cancelled: 'cancelled', sent: 'emailed' };
 
 async function record(actor, action, title, changes, { recipients, appUrl } = {}) {
   await query(
