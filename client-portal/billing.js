@@ -187,10 +187,18 @@ async function runBilling() {
   return { checked: orders.length, remindersSent: sent, today: now };
 }
 
-// Pay buttons from the payment links in an invoice's notes.
-const payButtons = (inv) => findPayLinks(inv.notes).map((l, _, all) => ({
-  url: l.url, label: all.length === 1 ? `Pay ${money(inv.amount)}${l.method ? ` with ${l.method}` : ''}` : l.label,
-}));
+const UPDATE_HINT = 'Your subscription renews automatically on your card. If your card has expired or the payment ' +
+  'didn\'t go through (for example, not enough funds), update your payment method so the renewal can be charged.';
+
+// Buttons for the payment links in an invoice's notes: "Pay now" for a payment
+// link, "Update payment method" for a Stripe subscription link.
+const payButtons = (inv) => {
+  const links = findPayLinks(inv.notes);
+  const pays = links.filter((l) => l.kind === 'pay').length;
+  return links.map((l) => (l.kind === 'update'
+    ? { url: l.url, kind: 'update', label: 'Update payment method', hint: UPDATE_HINT }
+    : { url: l.url, kind: 'pay', label: pays > 1 && l.method ? `Pay now with ${l.method}` : `Pay ${money(inv.amount)} now` }));
+};
 
 module.exports = {
   payButtons,

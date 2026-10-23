@@ -44,7 +44,7 @@ function textToHtml(text, skipUrl) {
 
 // Pay buttons (payment links found in an invoice's notes), one per row.
 function payButtons(buttons) {
-  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 8px">${buttons.map((b) => `<tr><td style="padding:0 0 10px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" bgcolor="${C.navy}" style="border-radius:8px">
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 8px">${buttons.map((b) => `${b.hint ? `<tr><td style="padding:0 0 10px;font-size:14px;line-height:1.55;color:${C.text}">${esc(b.hint)}</td></tr>` : ''}<tr><td style="padding:0 0 10px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" bgcolor="${C.navy}" style="border-radius:8px">
     <a href="${esc(b.url)}" target="_blank" style="display:inline-block;padding:14px 30px;font-family:${FONT};font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px;background:${C.navy}">${esc(b.label)}</a>
   </td></tr></table></td></tr>`).join('')}</table>
   <p style="margin:0 0 20px;font-size:12px;line-height:1.5;color:${C.faint}">Buttons not working? Open ${buttons.length === 1 ? 'this link' : 'these links'}:<br>${buttons.map((b) => `<a href="${esc(b.url)}" style="color:${C.muted};word-break:break-all">${esc(b.url)}</a>`).join('<br>')}</p>`;

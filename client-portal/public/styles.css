@@ -423,3 +423,4 @@ table.activity td { vertical-align: top; }
 .inv-pay { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 8px 0 20px; }
 .btn-pay { padding: 12px 22px; font-size: 15px; }
 .inv-notes a { word-break: break-all; }
+.pay-hint { flex-basis: 100%; font-size: 14px; color: var(--text-2); }

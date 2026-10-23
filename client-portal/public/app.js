@@ -1484,7 +1484,7 @@ function renderInvoiceView(inv, isAdmin) {
             <div style="min-width:260px">${cycleFields(1)}</div>
             <button class="btn btn-primary" id="make-batch" style="margin-bottom:16px">Add as active batch</button>
           </div></div></div>` : ''}
-      ${inv.payLinks && inv.payLinks.length ? `<section class="inv-pay no-print">${inv.payLinks.map((l) => `<a class="btn btn-primary btn-pay" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}
+      ${inv.payLinks && inv.payLinks.length ? `<section class="inv-pay no-print">${inv.payLinks.map((l) => `${l.hint ? `<div class="pay-hint">${esc(l.hint)}</div>` : ''}<a class="btn btn-primary btn-pay" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}
         <div class="muted small">After paying, send us the payment screenshot by replying to the invoice email or in your WhatsApp or Slack group with us.</div></section>` : ''}
       ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${linkify(esc(inv.notes))}</div></section>` : ''}
       <div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>

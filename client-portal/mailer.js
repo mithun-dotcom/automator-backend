@@ -44,7 +44,7 @@ async function sendMail(opts) {
   try {
     let text = opts.text || '';
     const missing = (opts.buttons || []).filter((b) => !text.includes(b.url));
-    if (missing.length) text += `\n\n${missing.map((b) => `${b.label}: ${b.url}`).join('\n')}`;
+    if (missing.length) text += `\n\n${missing.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n')}`;
     if (opts.cta && opts.cta.url && !text.includes(opts.cta.url)) text += `\n\n${opts.cta.label}: ${opts.cta.url}`;
     await transport.sendMail({ from: SMTP_FROM || SMTP_USER, to, subject, text, html: toHtml(opts) });
     return true;

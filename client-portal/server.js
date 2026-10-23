@@ -1024,7 +1024,7 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
     intro,
     inv.items.map((it) => `• ${lineName(it)}: ${qty(it.quantity)} × ${money(it.unit_price)} = ${money(it.quantity * it.unit_price)}`).join('\n'),
     `${inv.discount ? `Discount: −${money(inv.discount)}\n` : ''}${paid ? 'Total paid' : 'Total due'}: ${money(inv.amount)}${paid ? '' : ` (due ${due})`}`,
-    inv.payLinks.map((b) => `${b.label}: ${b.url}`).join('\n'),
+    inv.payLinks.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n'),
     inv.notes ? `Notes:\n${inv.notes}` : '',
     confirm,
     link ? `View your invoice: ${link}` : '',
