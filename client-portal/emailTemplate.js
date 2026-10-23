@@ -42,6 +42,16 @@ function textToHtml(text, skipUrl) {
   }).join('');
 }
 
+// Red "Critical alert" box for urgent payment reminders.
+function alertBox({ title, body }) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 18px"><tr>
+    <td style="background:#fff1f2;border:1px solid #fda4af;border-left:4px solid #e11d48;border-radius:10px;padding:14px 16px;font-size:14px;line-height:1.55;color:#881337">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#be123c">⚠ Critical alert</div>
+      <div style="margin-top:4px;font-size:16px;font-weight:700;color:#881337">${esc(title)}</div>
+      ${body ? `<div style="margin-top:4px">${esc(body)}</div>` : ''}
+    </td></tr></table>`;
+}
+
 // Pay buttons (payment links found in an invoice's notes), one per row.
 function payButtons(buttons) {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 8px">${buttons.map((b) => `${b.hint ? `<tr><td style="padding:0 0 10px;font-size:14px;line-height:1.55;color:${C.text}">${esc(b.hint)}</td></tr>` : ''}<tr><td style="padding:0 0 10px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" bgcolor="${C.navy}" style="border-radius:8px">
@@ -71,8 +81,9 @@ function button(cta, secondary) {
  *  html      optional pre-built HTML block (e.g. an invoice table), shown after the text
  *  after     optional plain text shown after that block
  *  buttons   optional Pay buttons [{label, url}], shown before `after`
+ *  alert     optional { title, body } red critical-alert box under the heading
  */
-function render({ heading, text, cta, note, preheader, reason, html, after, buttons }) {
+function render({ heading, text, cta, note, preheader, reason, html, after, buttons, alert }) {
   const pay = buttons && buttons.length ? buttons : null;
   const logo = brand.appUrl ? `${brand.appUrl}/logo-full.png` : '';
   const links = [
@@ -91,6 +102,7 @@ function render({ heading, text, cta, note, preheader, reason, html, after, butt
           ${logo ? `<img src="${esc(logo)}" width="180" alt="MithMill" style="display:block;width:180px;max-width:60%;height:auto;border:0">` : `<span style="font-size:22px;font-weight:700;color:${C.navy}">MithMill</span>`}
         </td></tr></table>
         ${heading ? `<h1 style="margin:28px 0 16px;font-size:22px;line-height:1.3;font-weight:700;color:${C.ink}">${esc(heading)}</h1>` : '<div style="height:24px"></div>'}
+        ${alert ? alertBox(alert) : ''}
         ${textToHtml(text, cta && cta.url)}
         ${html || ''}
         ${pay ? payButtons(pay) : ''}
@@ -113,4 +125,4 @@ function render({ heading, text, cta, note, preheader, reason, html, after, butt
 </body></html>`;
 }
 
-module.exports = { render, setBrand, brand, esc, C, linkify };
+module.exports = { render, setBrand, brand, esc, C, linkify, alertBox };

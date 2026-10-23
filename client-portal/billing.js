@@ -63,8 +63,9 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 // portal once they accept their invite, but get no emails before then, except
 // with { always: true } (renewal reminders), which they get without the portal link.
 // emailExtra is added to the email only, not the portal notification.
-// buttons: Pay buttons [{label, url}] for the email.
-async function notify(user, title, body, { always = false, emailExtra = '', buttons = [] } = {}) {
+// buttons: Pay buttons [{label, url}] for the email; subject, heading and
+// alert ({ title, body } red box) override the email's look.
+async function notify(user, title, body, { always = false, emailExtra = '', buttons = [], subject, heading, alert } = {}) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
   const { rows: [u] } = await query('SELECT password_set FROM users WHERE id = $1', [user.id]);
   const joined = !u || u.password_set;
@@ -72,11 +73,13 @@ async function notify(user, title, body, { always = false, emailExtra = '', butt
   const portal = joined && APP_URL;
   await sendMail({
     to: user.email,
-    subject: title,
-    text: `Hi ${user.name || 'there'},\n\n${body}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
-    heading: title,
+    subject: subject || title,
+    text: `Hi ${user.name || 'there'},\n\n${body}${buttons.length ? `\n\n${buttons.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n')}` : ''}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
+    heading: heading || title,
+    alert,
     cta: portal ? { label: 'Open your portal', url: APP_URL } : null,
     buttons,
+    after: emailExtra || undefined,
     note: PAYMENT_NOTE,
   });
 }
@@ -169,16 +172,31 @@ async function runBilling() {
     let body =
       `Your batch #${order.id} (${order.inbox_type === 'other' ? whatLabel(order) : `${order.label}, ${order.quantity} mailboxes`}) will renew in ${dayWord}, ` +
       `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
-    if (invoice && invoice.status === 'paid') {
+    const paid = invoice && invoice.status === 'paid';
+    const user = { id: order.user_id, email: order.email, name: order.name };
+    const buttons = paid || !invoice ? [] : payButtons(invoice);
+    if (paid) {
       body += ' We have already received your payment for this period. Thank you!';
     } else if (threshold === 1) {
+      // The last reminder, still unpaid: the critical alert.
+      const amount = money(invoice ? invoice.amount : cycleAmount(order));
       body += ' Please make the payment if not made. Today is the last day to renew: if payment is not made by today, ' +
-        'your accounts will be cancelled tomorrow.';
+        'your accounts will be cancelled tomorrow. To keep your mailboxes active, please complete the payment now.';
+      await notify(user, `Critical: batch #${order.id} will be deactivated tomorrow`, body, {
+        always: true,
+        buttons,
+        subject: `URGENT: your mailboxes will be deactivated tomorrow (batch #${order.id} renewal unpaid)`,
+        heading: 'Critical alert: your mailboxes expire tomorrow',
+        alert: { title: 'Your mailboxes will be deactivated tomorrow', body: `The renewal of batch #${order.id} (${amount}) is still unpaid. Today is the last day to pay.` },
+        emailExtra: 'Already paid? Reply to this email with a screenshot of the payment, or share it in your dedicated WhatsApp or ' +
+          'Slack group with us (recommended), so we can confirm it and keep your mailboxes active.',
+      });
+      sent += 1;
+      continue;
     }
-    const paid = invoice && invoice.status === 'paid';
-    await notify({ id: order.user_id, email: order.email, name: order.name }, `Your batch will renew in ${dayWord}`, body, {
+    await notify(user, `Your batch will renew in ${dayWord}`, body, {
       always: true,
-      buttons: paid || !invoice ? [] : payButtons(invoice),
+      buttons,
       emailExtra: paid ? '' : 'To confirm your payment, please reply to this email with a screenshot of the payment, ' +
         'or share it in your dedicated WhatsApp or Slack group with us (recommended).',
     });

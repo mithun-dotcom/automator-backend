@@ -36,7 +36,7 @@ Each active batch renews monthly. Before each renewal date the client gets an in
 |---|---|
 | 7 days before | Your batch will renew in 7 days |
 | 3 days before | Your batch will renew in 3 days |
-| 1 day before | Your batch will renew in 1 day. Please make the payment if not made. Today is the last day to renew: if payment is not made by today, your accounts will be cancelled tomorrow. |
+| 1 day before | If still unpaid, a **critical alert**: "URGENT: your mailboxes will be deactivated tomorrow", with a red alert box, the line that today is the last day to renew and accounts will be cancelled tomorrow, and the Pay button. If already paid, a thank-you. |
 
 While the renewal invoice is unpaid, each reminder email also asks the client to confirm their payment by replying with a screenshot, or by sharing it in their WhatsApp or Slack group with you (recommended).
 

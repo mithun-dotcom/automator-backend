@@ -21,16 +21,17 @@ const enabled = () => Boolean(transport);
 // Builds the branded HTML from the plain text: the button carries the main
 // link (lines ending with it are dropped), the note gets its own box, and the
 // text's own "Mithmill" sign-off gives way to the template's.
-function toHtml({ subject, text, heading, cta, note, reason, preheader, html, after, htmlText, buttons }) {
+function toHtml({ subject, text, heading, cta, note, reason, preheader, html, after, htmlText, buttons, alert }) {
   // With a pre-built block, `htmlText` is the intro shown above it; `text` stays the plain-text part.
-  if (html) return render({ heading: heading || subject, text: htmlText, html, after, buttons, cta, note, reason, preheader: preheader || String(htmlText || '').replace(/\s+/g, ' ').slice(0, 140) });
+  if (html) return render({ heading: heading || subject, text: htmlText, html, after, buttons, alert, cta, note, reason, preheader: preheader || String(htmlText || '').replace(/\s+/g, ' ').slice(0, 140) });
   let body = String(text || '');
   if (note) body = body.split(note).join('');
+  if (after) body = body.split(after).join(''); // shown below the Pay buttons instead
   if (cta && cta.url) body = body.split('\n').filter((l) => !l.trim().endsWith(cta.url)).join('\n');
   // Pay links get buttons; their "Pay with …: url" lines are dropped from the body.
-  (buttons || []).forEach((b) => { body = body.split('\n').filter((l) => !l.trim().endsWith(b.url)).join('\n'); });
+  (buttons || []).forEach((b) => { body = body.split('\n').filter((l) => !l.trim().endsWith(b.url) && (!b.hint || l.trim() !== b.hint)).join('\n'); });
   body = body.replace(/\n+Mithmill\s*$/, '').replace(/\n{3,}/g, '\n\n');
-  return render({ heading: heading || subject, text: body, buttons, after, cta, note, reason, preheader: preheader || body.replace(/\s+/g, ' ').slice(0, 140) });
+  return render({ heading: heading || subject, text: body, buttons, after, alert, cta, note, reason, preheader: preheader || body.replace(/\s+/g, ' ').slice(0, 140) });
 }
 
 // Never throws: a failed email must not break an invite, order or reminder.

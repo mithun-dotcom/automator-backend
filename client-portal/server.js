@@ -1012,13 +1012,8 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
   const num = `${td};text-align:right;white-space:nowrap`;
   const th = `padding:8px;border-bottom:1px solid ${C.line};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};text-align:left`;
   const row = (l, v, strong) => `<tr><td style="padding:6px 8px;text-align:right;font-size:${strong ? 16 : 14}px;color:${strong ? C.ink : C.muted};${strong ? 'font-weight:700' : ''}">${l}</td><td style="padding:6px 8px;text-align:right;white-space:nowrap;font-size:${strong ? 16 : 14}px;color:${C.ink};${strong ? 'font-weight:700' : ''}">${v}</td></tr>`;
-  const html = `${urgent ? `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 18px"><tr>
-      <td style="background:#fff1f2;border:1px solid #fda4af;border-left:4px solid #e11d48;border-radius:10px;padding:14px 16px;font-size:14px;line-height:1.55;color:#881337">
-        <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#be123c">⚠ Critical alert</div>
-        <div style="margin-top:4px;font-size:16px;font-weight:700;color:#881337">Your mailboxes will be deactivated in about ${esc(hrs)}</div>
-        <div style="margin-top:4px">Invoice #${inv.id} (${esc(billing.money(inv.amount))}) is still unpaid. Pay now to keep them active.</div>
-      </td></tr></table>` : ''}
+  const html = `${urgent ? emailTemplate.alertBox({ title: `Your mailboxes will be deactivated in about ${hrs}`,
+    body: `Invoice #${inv.id} (${billing.money(inv.amount)}) is still unpaid. Pay now to keep them active.` }) : ''}
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 6px;font-size:13px;color:${C.muted}">
       <tr><td>Invoice <strong style="color:${C.ink}">#${inv.id}</strong></td><td align="right">Issued ${esc(issued)} · ${paid ? `<strong style="color:#047857">Paid</strong>` : `Due <strong style="color:${C.ink}">${esc(due)}</strong>`}</td></tr>
     </table>
