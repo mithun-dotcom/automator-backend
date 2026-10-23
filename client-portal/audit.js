@@ -31,6 +31,7 @@ async function order(id) {
       Domains: o.domains,
       Usernames: o.usernames,
       'Internal notes': o.admin_notes,
+      'Sold by': o.sold_by,
     },
   };
 }
@@ -61,6 +62,7 @@ async function invoice(id) {
       'Linked batch': i.order_id ? `#${i.order_id}` : '',
       Lines: lines,
       Notes: i.notes,
+      'Sold by': i.sold_by,
     },
   };
 }

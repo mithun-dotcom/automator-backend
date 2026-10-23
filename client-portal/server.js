@@ -391,7 +391,7 @@ const byParam = (req) => req.params.id;
 
 admin.get('/overview', asyncRoute(async (req, res) => {
   const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
-    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.user_id, u.email, u.name, u.company,
+    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.sold_by, o.user_id, u.email, u.name, u.company,
              f.row_count AS csv_rows, f.filename AS csv_filename
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
            LEFT JOIN order_files f ON f.order_id = o.id
@@ -413,7 +413,8 @@ admin.get('/overview', asyncRoute(async (req, res) => {
   ]);
   res.json({
     orders: orders.rows, clients: clients.rows, invites: invites.rows,
-    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, settings: await getSettings(), mailEnabled: mailEnabled(), today: billing.today(),
+    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, settings: await getSettings(),
+    sellers: (await query("SELECT COALESCE(NULLIF(name, ''), email) AS name FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows.map((r) => r.name), mailEnabled: mailEnabled(), today: billing.today(),
   });
 }));
 
@@ -434,6 +435,10 @@ admin.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) 
   }
   if (typeof req.body.batch_name === 'string') {
     await query('UPDATE orders SET batch_name = $1 WHERE id = $2', [str(req.body.batch_name, 200), id]);
+  }
+  if (typeof req.body.sold_by === 'string') {
+    order.sold_by = str(req.body.sold_by, 100);
+    await query('UPDATE orders SET sold_by = $1 WHERE id = $2', [order.sold_by, id]);
   }
   if (typeof req.body.admin_notes === 'string') {
     await query('UPDATE orders SET admin_notes = $1 WHERE id = $2', [str(req.body.admin_notes), id]);
@@ -695,12 +700,12 @@ admin.post('/orders', audited('added', 'order', (req, body) => (body ? body.id :
   const { rows: [order] } = await query(
     `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames,
        domain_access_method, sequencer, sequencer_workspace, admin_notes, batch_name, status,
-       activated_at, billing_day, next_billing_date, created_at, billing_months)
-     VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
+       activated_at, billing_day, next_billing_date, created_at, billing_months, sold_by)
+     VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
     [client.id, type.inbox_type, quantity, price, str(b.domains, 20000), str(b.usernames, 20000),
      str(b.sequencer, 50), str(b.sequencer_workspace, 200), str(b.admin_notes), str(b.batch_name, 200), status,
      status === 'pending' ? null : `${start}T00:00:00Z`, status === 'active' ? day : null,
-     next, `${start}T00:00:00Z`, months],
+     next, `${start}T00:00:00Z`, months, str(b.sold_by, 100)],
   );
 
   // Optionally record the current billing period (the one ending at the next renewal).
@@ -783,7 +788,7 @@ async function parseInvoice(body) {
   const paidDate = str(body.paid_date, 10);
   if (status === 'paid' && paidDate && !DATE_RE.test(paidDate)) throw new HttpError(400, 'Paid date must be a date');
   return {
-    user, orderId, issueDate, dueDate, items, discount, amount, description, notes: str(body.notes, 5000),
+    user, orderId, issueDate, dueDate, items, discount, amount, description, notes: str(body.notes, 5000), soldBy: str(body.sold_by, 100),
     status, paidAt: status === 'paid' ? `${paidDate || billing.today()}T12:00:00Z` : null,
   };
 }
@@ -828,6 +833,7 @@ async function invoiceWithItems(id, userId) {
   const { rows: pricing } = await query('SELECT inbox_type, label FROM pricing ORDER BY sort_order');
   // Invoices from before line items existed show as a single line.
   if (!items.length) items.push({ inbox_type: '', batch_name: '', description: inv.description, quantity: 1, unit_price: inv.amount + inv.discount });
+  if (userId) delete inv.sold_by; // admin-only
   return { ...inv, items, pricing, paymentNote: billing.PAYMENT_NOTE, payLinks: inv.status === 'unpaid' ? billing.payButtons(inv) : [] };
 }
 
@@ -863,10 +869,10 @@ async function createBatchesFromInvoice(invoiceId, months) {
   for (const it of lines) {
     const { rows: [o] } = await query(
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
-         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id)
-       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9, $10) RETURNING id`,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by)
+       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9, $10, $11) RETURNING id`,
       [inv.user_id, it.inbox_type, it.quantity, Math.round((it.unit_price / months) * 100) / 100,
-       otherName(it), `${start}T00:00:00Z`, day, next, months, invoiceId],
+       otherName(it), `${start}T00:00:00Z`, day, next, months, invoiceId, inv.sold_by],
     );
     ids.push(o.id);
   }
@@ -909,10 +915,10 @@ async function syncRecurringOtherLines(invoiceId) {
     }
     const { rows: [o] } = await query(
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
-         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id)
-       VALUES ($1, 'other', $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10) RETURNING id`,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by)
+       VALUES ($1, 'other', $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10, $11) RETURNING id`,
       [inv.user_id, it.quantity, price, name, base.status === 'active' ? 'active' : base.status,
-       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId]);
+       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId, inv.sold_by || base.sold_by]);
     ids.push(o.id);
   }
   return ids;
@@ -928,9 +934,9 @@ admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.
   const cycle = req.body.create_batches === true && !v.orderId ? parseCycle(req.body) : null;
   const id = await inTransaction(async (client) => {
     const { rows: [inv] } = await client.query(
-      `INSERT INTO invoices (user_id, order_id, description, amount, discount, due_date, issue_date, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes],
+      `INSERT INTO invoices (user_id, order_id, description, amount, discount, due_date, issue_date, notes, sold_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes, v.soldBy],
     );
     await writeItems(client, inv.id, v.items);
     if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, inv.id]);
@@ -944,6 +950,7 @@ admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.
       if (!(err instanceof HttpError)) throw err; // no mailbox lines: nothing to add
     }
   }
+  if (v.orderId && v.soldBy) await query("UPDATE orders SET sold_by = $1 WHERE id = $2 AND sold_by = ''", [v.soldBy, v.orderId]);
   if (v.orderId) batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify !== false) {
     await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
@@ -961,13 +968,14 @@ admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res
   await inTransaction(async (client) => {
     await client.query(
       `UPDATE invoices SET user_id = $1, order_id = $2, description = $3, amount = $4, discount = $5,
-         due_date = $6, issue_date = $7, notes = $8 WHERE id = $9`,
-      [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes, id],
+         due_date = $6, issue_date = $7, notes = $8, sold_by = $10 WHERE id = $9`,
+      [v.user.id, v.orderId, v.description, v.amount, v.discount, v.dueDate, v.issueDate, v.notes, id, v.soldBy],
     );
     await writeItems(client, id, v.items);
     if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, id]);
     if (v.status === 'unpaid') await client.query("UPDATE invoices SET status = 'unpaid', paid_at = NULL WHERE id = $1", [id]);
   });
+  if (v.orderId && v.soldBy) await query("UPDATE orders SET sold_by = $1 WHERE id = $2 AND sold_by = ''", [v.soldBy, v.orderId]);
   const batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify === true) {
     await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,
@@ -1206,7 +1214,7 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
   const local = (col) => `(${col} AT TIME ZONE $2)::date`;
   const activeAt = (cut) => `o.activated_at IS NOT NULL AND ${local('o.activated_at')} < ${cut}
     AND (o.status = 'active' OR (o.status = 'cancelled' AND ${local('o.cancelled_at')} >= ${cut}))`;
-  const [months, compare, outstanding, byType, topClients, recent] = await Promise.all([
+  const [months, compare, outstanding, byType, topClients, recent, bySeller] = await Promise.all([
     query(`WITH m AS (
              SELECT ms::date AS ms, (ms + interval '1 month')::date AS me,
                     LEAST((ms + interval '1 month')::date, $1::date + 1) AS cut
@@ -1251,10 +1259,19 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
     query(`SELECT i.id, i.amount, i.paid_at, i.description, u.email, u.company
            FROM invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND i.paid_at IS NOT NULL ORDER BY i.paid_at DESC, i.id DESC LIMIT 10`),
+    // Commission view: payments received per seller, this month and last.
+    query(`SELECT COALESCE(NULLIF(i.sold_by, ''), NULLIF(o.sold_by, ''), '') AS seller,
+             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)), 0) AS this_month,
+             (count(*) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)))::int AS this_count,
+             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month,
+             (count(*) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)))::int AS last_count
+           FROM invoices i LEFT JOIN orders o ON o.id = i.order_id
+           WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
+           GROUP BY 1 ORDER BY this_month DESC, last_month DESC`, [today, tz]),
   ]);
   res.json({
     today, months: months.rows, lastMonthToDate: compare.rows[0], outstanding: outstanding.rows[0],
-    byType: byType.rows, topClients: topClients.rows, recentPayments: recent.rows,
+    byType: byType.rows, topClients: topClients.rows, recentPayments: recent.rows, bySeller: bySeller.rows,
   });
 }));
 

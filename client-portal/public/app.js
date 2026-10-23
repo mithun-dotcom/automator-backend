@@ -813,7 +813,7 @@ function adminOrders(focusId) {
       <details class="order" id="order-${o.id}" ${o.id === focusId ? 'open' : ''}>
         <summary>
           <strong>#${o.id}</strong>
-          <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}</div></span>
+          <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}${o.sold_by ? ` · Sold by ${esc(o.sold_by)}` : ''}</div></span>
           <span class="hide-sm">${esc(o.inbox_label)}</span>
           <span class="hide-sm num">${o.quantity} boxes</span>
           <span class="hide-sm">${o.status === 'active' && o.next_billing_date ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : `<span class="muted small">Ordered</span> ${fmtDate(o.created_at)}`}</span>
@@ -825,6 +825,7 @@ function adminOrders(focusId) {
             ${o.usernames ? `<div><h3>Usernames</h3><pre>${esc(o.usernames)}</pre></div>` : ''}
             <dl class="kv">
               ${kv('Type', o.inbox_label)}
+              ${o.sold_by ? kv('Sold by', o.sold_by) : ''}
               ${kv('Mailboxes', String(o.quantity))}
               ${kv('Price', `${money(o.price_per_mailbox)} / mailbox / month → ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`)}
               ${kv('Billing', `${cycleName(cycleOf(o))}${o.status === 'active' && o.next_billing_date ? `, next renewal ${fmtDate(o.next_billing_date)}` : ''}`)}
@@ -860,6 +861,7 @@ function adminOrders(focusId) {
             </div>
             <div class="hint" style="margin:-8px 0 14px">Shown to the client and listed per domain in their cancellation email. Use "Name - user@domain.com" so mailboxes are counted per domain.</div>
             <div class="field"><label>Batch name</label><input name="batch_name" value="${esc(o.batch_name || '')}" placeholder="e.g. Q4 outreach"></div>
+            ${soldByField(o.sold_by)}
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
             <div class="row" style="justify-content:space-between">
               <button class="btn btn-primary" type="submit">Save</button>
@@ -890,7 +892,7 @@ function adminOrders(focusId) {
   wireCycleFields(document);
   document.querySelectorAll('.order-form').forEach((form) => {
     onSubmit(form, async (d) => {
-      const body = { status: d.status, admin_notes: d.admin_notes, batch_name: d.batch_name, domains: d.domains, usernames: d.usernames, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
+      const body = { status: d.status, admin_notes: d.admin_notes, sold_by: d.sold_by, batch_name: d.batch_name, domains: d.domains, usernames: d.usernames, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
       if (d.billing_cycle) Object.assign(body, { billing_cycle: d.billing_cycle, custom_months: d.custom_months });
       const r = await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
@@ -944,6 +946,14 @@ function adminOrders(focusId) {
 
 // Add a batch on a client's behalf: an existing purchase with its billing
 // dates, or an order taken outside the portal.
+// "Sold by" (who gets the commission): admin-only, suggests team members' names.
+function soldByField(value, attrs = 'name="sold_by"') {
+  const names = (state.admin && state.admin.sellers) || [];
+  return `<div class="field"><label>Sold by <span class="muted small">(admin only, not shown to the client)</span></label>
+    <input ${attrs} list="sellers-list" value="${esc(value || '')}" placeholder="Team member who made the sale" maxlength="100">
+    <datalist id="sellers-list">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist></div>`;
+}
+
 function openBatchDialog(userId) {
   const { clients, pricing, clientPricing, today } = state.admin;
   const priceFor = (uid, type) => {
@@ -985,6 +995,7 @@ function openBatchDialog(userId) {
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
       </div>
+      ${soldByField('')}
       <div class="field"><label>Internal notes (optional)</label><input name="admin_notes"></div>
       <div class="error"></div>
       <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn btn-primary" type="submit">Add batch</button></div>
@@ -1219,7 +1230,7 @@ function adminInvoices() {
         <thead><tr><th>#</th><th>Client</th><th>Description</th><th>Issued</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>${invoices.map((i) => {
           const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
-          return `<tr><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
+          return `<tr><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}${i.sold_by ? `<div class="muted small">Sold by ${esc(i.sold_by)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
           <td><div class="row" style="flex-wrap:nowrap">
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
@@ -1249,6 +1260,7 @@ function invoiceEditor(inv) {
     due_date: inv ? inv.due_date : plus(today, 7),
     discount: inv && inv.discount ? String(inv.discount) : '',
     notes: inv ? inv.notes || '' : '',
+    sold_by: inv ? inv.sold_by || '' : '',
     status: inv && inv.status === 'paid' ? 'paid' : 'unpaid',
     paid_date: inv && inv.paid_at ? String(inv.paid_at).slice(0, 10) : today,
     items: inv ? inv.items.map((it) => ({ ...it, quantity: String(it.quantity), unit_price: String(it.unit_price) }))
@@ -1300,6 +1312,7 @@ function invoiceEditor(inv) {
       </div>
 
       <div class="card card-pad">
+        ${soldByField(ed.sold_by, 'id="e-soldby"')}
         <div class="field"><label for="e-notes">Notes (shown on the invoice)</label><textarea id="e-notes" style="font-family:inherit;min-height:80px" placeholder="e.g. Payment terms, bank details, thank-you note">${esc(ed.notes)}</textarea></div>
         <div class="grid-2">
           <div class="field"><label for="e-status">Payment status</label><select id="e-status">
@@ -1396,6 +1409,7 @@ function invoiceEditor(inv) {
   $('e-due').oninput = (e) => { ed.due_date = e.target.value; };
   $('e-discount').oninput = (e) => { ed.discount = e.target.value; recalc(); };
   $('e-notes').oninput = (e) => { ed.notes = e.target.value; };
+  $('e-soldby').oninput = (e) => { ed.sold_by = e.target.value; };
   $('e-status').onchange = (e) => { $('e-paid-wrap').hidden = e.target.value !== 'paid'; };
   if (isNew) {
     wireCycleFields($('e-batch-box'));
@@ -1411,7 +1425,7 @@ function invoiceEditor(inv) {
     btn.disabled = true; $('e-error').textContent = '';
     const body = {
       user_id: ed.user_id, order_id: ed.order_id || null, issue_date: ed.issue_date, due_date: ed.due_date,
-      discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: $('e-notify').checked,
+      discount: ed.discount || 0, notes: ed.notes, sold_by: ed.sold_by, items: ed.items, notify: $('e-notify').checked,
       status: $('e-status').value, paid_date: $('e-paid').value,
       ...(isNew && !ed.order_id && $('e-batches').checked ? {
         create_batches: true,
@@ -1451,7 +1465,7 @@ function renderInvoiceView(inv, isAdmin) {
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
       </div>
     </div>
-    ${isAdmin && inv.sent_at ? `<p class="muted small no-print" style="margin:0 0 12px">Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}.</p>` : ''}
+    ${isAdmin && (inv.sent_at || inv.sold_by) ? `<p class="muted small no-print" style="margin:0 0 12px">${[inv.sold_by ? `Sold by <strong>${esc(inv.sold_by)}</strong> (only admins see this)` : '', inv.sent_at ? `Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
     <article class="invoice-sheet">
       <header class="inv-top">
         <img src="logo-full.png" alt="MithMill" class="inv-logo">
@@ -1809,7 +1823,7 @@ function drawChart(el, points, { kind = 'bar', money: isMoney = false } = {}) {
 
 let analyticsRange = 12;
 function renderAnalytics(data) {
-  const { months, lastMonthToDate: prev, outstanding, byType, topClients, recentPayments, today } = data;
+  const { months, lastMonthToDate: prev, outstanding, byType, topClients, recentPayments, today, bySeller = [] } = data;
   const cur = months[months.length - 1];
   const last = months[months.length - 2];
   const day = Number(today.slice(8));
@@ -1871,6 +1885,12 @@ function renderAnalytics(data) {
             ${topClients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td><td class="num">${money(c.this_month)}</td><td class="num">${money(c.last_month)}</td></tr>`).join('')}
           </tbody></table></div>` : '<div class="card-pad muted">No payments in the last two months.</div>'}</div>
       </div>
+      <div class="card"><div class="card-head"><div><h2>Sales by team member</h2><div class="muted small">Payments received, by who made the sale (Sold by on the invoice or its batch)</div></div></div>
+        ${bySeller.length ? `<div class="table-wrap"><table><thead><tr><th>Sold by</th><th class="num">${monthName(cur.month, { month: 'long' })}</th><th class="num">${lastName}</th></tr></thead><tbody>
+          ${bySeller.map((r) => `<tr><td>${r.seller ? `<strong>${esc(r.seller)}</strong>` : '<span class="muted">Not set</span>'}</td>
+            <td class="num">${money(r.this_month)}<div class="muted small">${count(r.this_count)} payment${r.this_count === 1 ? '' : 's'}</div></td>
+            <td class="num">${money(r.last_month)}<div class="muted small">${count(r.last_count)} payment${r.last_count === 1 ? '' : 's'}</div></td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="card-pad muted">No payments in the last two months.</div>'}</div>
       <div class="card"><div class="card-head"><h2>Recent payments</h2></div>
         ${recentPayments.length ? `<div class="table-wrap"><table><thead><tr><th>Paid</th><th>Client</th><th>Invoice</th><th class="num">Amount</th></tr></thead><tbody>
           ${recentPayments.map((p) => `<tr><td>${fmtDate(p.paid_at)}</td><td>${esc(p.company || p.email)}</td><td><a href="#/admin/invoice/${p.id}">#${p.id}</a> <span class="muted small">${esc(p.description)}</span></td><td class="num">${money(p.amount)}</td></tr>`).join('')}

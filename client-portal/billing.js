@@ -89,11 +89,11 @@ async function createOrderInvoice(order, periodStart, description, itemDescripti
   const months = cycleMonths(order);
   const amount = cycleAmount(order);
   const { rows: [inv] } = await query(
-    `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date, issue_date)
-     VALUES ($1, $2, $3, $4, $5, $3, $6)
+    `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date, issue_date, sold_by)
+     VALUES ($1, $2, $3, $4, $5, $3, $6, $7)
      ON CONFLICT (order_id, period_start) WHERE order_id IS NOT NULL AND period_start IS NOT NULL
      DO NOTHING RETURNING id`,
-    [order.user_id, order.id, periodStart, description, amount, today()],
+    [order.user_id, order.id, periodStart, description, amount, today(), order.sold_by || ''],
   );
   if (inv) {
     await query(
