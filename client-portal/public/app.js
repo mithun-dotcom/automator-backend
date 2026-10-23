@@ -1461,11 +1461,12 @@ function renderInvoiceView(inv, isAdmin) {
         ${isAdmin ? `${inv.order_id ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
           ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
           ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
+        ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-danger" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">⚠ Urgent reminder</button>` : ''}
         ${isAdmin && inv.status !== 'void' ? `<button class="btn" id="send-inv" title="${inv.sent_at ? `Last sent ${esc(fmtDate(inv.sent_at))}` : 'Not sent yet'}">${inv.sent_at ? 'Send again' : 'Send invoice'}</button>` : ''}
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
       </div>
     </div>
-    ${isAdmin && (inv.sent_at || inv.sold_by) ? `<p class="muted small no-print" style="margin:0 0 12px">${[inv.sold_by ? `Sold by <strong>${esc(inv.sold_by)}</strong> (only admins see this)` : '', inv.sent_at ? `Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
+    ${isAdmin && (inv.sent_at || inv.sold_by || inv.urgent_sent_at) ? `<p class="muted small no-print" style="margin:0 0 12px">${[inv.sold_by ? `Sold by <strong>${esc(inv.sold_by)}</strong> (only admins see this)` : '', inv.sent_at ? `Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}` : '', inv.urgent_sent_at ? `Urgent reminder sent ${fmtDate(inv.urgent_sent_at)}` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
     <article class="invoice-sheet">
       <header class="inv-top">
         <img src="logo-full.png" alt="MithMill" class="inv-logo">
@@ -1515,6 +1516,21 @@ function renderInvoiceView(inv, isAdmin) {
         toast(`Invoice #${inv.id} sent to ${r.to}`);
         route();
       } catch (ex) { toast(ex.message); send.disabled = false; }
+    };
+  }
+  const urgentBtn = document.getElementById('send-urgent');
+  if (urgentBtn) {
+    urgentBtn.onclick = async () => {
+      const h = prompt(`Send a CRITICAL ALERT to ${inv.email}?\n\nIt says invoice #${inv.id} (${money(inv.amount)}) is unpaid and their mailboxes will be deactivated in a few hours unless they pay now, with the invoice and Pay buttons.\n\nMailboxes expire in how many hours?`, '3');
+      if (h === null) return;
+      const hours = Number(h);
+      if (!(hours >= 1 && hours <= 72)) return toast('Enter a number of hours between 1 and 72');
+      urgentBtn.disabled = true;
+      try {
+        const r = await api('POST', `/api/admin/invoices/${inv.id}/send`, { urgent: true, hours });
+        toast(`Urgent reminder sent to ${r.to}`);
+        route();
+      } catch (ex) { toast(ex.message); urgentBtn.disabled = false; }
     };
   }
   const mk = document.getElementById('make-batch');

@@ -207,3 +207,4 @@ ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
 -- Who made the sale (for commission). Admin-only; never sent to clients.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS urgent_sent_at TIMESTAMPTZ;
