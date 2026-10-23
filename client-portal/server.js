@@ -828,7 +828,7 @@ async function invoiceWithItems(id, userId) {
   const { rows: pricing } = await query('SELECT inbox_type, label FROM pricing ORDER BY sort_order');
   // Invoices from before line items existed show as a single line.
   if (!items.length) items.push({ inbox_type: '', batch_name: '', description: inv.description, quantity: 1, unit_price: inv.amount + inv.discount });
-  return { ...inv, items, pricing, paymentNote: billing.PAYMENT_NOTE };
+  return { ...inv, items, pricing, paymentNote: billing.PAYMENT_NOTE, payLinks: inv.status === 'unpaid' ? billing.payButtons(inv) : [] };
 }
 
 app.get('/api/invoices/:id', auth, asyncRoute(async (req, res) => {
@@ -947,7 +947,8 @@ admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.
   if (v.orderId) batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify !== false) {
     await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
-      `Invoice #${id} for ${billing.money(v.amount)} (${v.description}) is due on ${billing.prettyDate(v.dueDate)}.`);
+      `Invoice #${id} for ${billing.money(v.amount)} (${v.description}) is due on ${billing.prettyDate(v.dueDate)}.`,
+      { buttons: v.status === 'paid' ? [] : billing.payButtons({ notes: v.notes, amount: v.amount }) });
   }
   res.status(201).json({ id, batchIds });
 }));
@@ -970,7 +971,8 @@ admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res
   const batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify === true) {
     await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,
-      `Invoice #${id} has been updated. Total ${billing.money(v.amount)}, due on ${billing.prettyDate(v.dueDate)}.`);
+      `Invoice #${id} has been updated. Total ${billing.money(v.amount)}, due on ${billing.prettyDate(v.dueDate)}.`,
+      { buttons: v.status === 'paid' ? [] : billing.payButtons({ notes: v.notes, amount: v.amount }) });
   }
   res.json({ ok: true, batchIds });
 }));
@@ -1009,7 +1011,7 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
       ${row(paid ? 'Total paid' : 'Total due', money(inv.amount), true)}
     </table>
     <div style="clear:both"></div>
-    ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${esc(inv.notes).replace(/\n/g, '<br>')}</div>` : ''}`;
+    ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${emailTemplate.linkify(esc(inv.notes)).replace(/\n/g, '<br>')}</div>` : ''}`;
 
   const name = inv.name || 'there';
   const intro = paid
@@ -1022,6 +1024,7 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
     intro,
     inv.items.map((it) => `• ${lineName(it)}: ${qty(it.quantity)} × ${money(it.unit_price)} = ${money(it.quantity * it.unit_price)}`).join('\n'),
     `${inv.discount ? `Discount: −${money(inv.discount)}\n` : ''}${paid ? 'Total paid' : 'Total due'}: ${money(inv.amount)}${paid ? '' : ` (due ${due})`}`,
+    inv.payLinks.map((b) => `${b.label}: ${b.url}`).join('\n'),
     inv.notes ? `Notes:\n${inv.notes}` : '',
     confirm,
     link ? `View your invoice: ${link}` : '',
@@ -1037,6 +1040,7 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
     htmlText: intro,
     html,
     after: confirm,
+    buttons: inv.payLinks,
     cta: link ? { label: 'View invoice', url: link } : null,
     note: billing.PAYMENT_NOTE,
     reason: 'You receive this because MithMill sent you an invoice for your account.',
@@ -1352,7 +1356,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' });
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: status >= 500 ? 'Something went wrong' : err.message });
+  res.status(status).json({ error: status >= 500 && !(err instanceof HttpError) ? 'Something went wrong' : err.message });
 });
 
 // ---------------------------------------------------------------- boot

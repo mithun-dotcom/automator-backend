@@ -1,5 +1,6 @@
 const { query } = require('./db');
 const { sendMail } = require('./mailer');
+const { findPayLinks } = require('./payLinks');
 
 const TZ = process.env.BILLING_TZ || 'Asia/Dhaka';
 const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
@@ -62,7 +63,8 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 // portal once they accept their invite, but get no emails before then, except
 // with { always: true } (renewal reminders), which they get without the portal link.
 // emailExtra is added to the email only, not the portal notification.
-async function notify(user, title, body, { always = false, emailExtra = '' } = {}) {
+// buttons: Pay buttons [{label, url}] for the email.
+async function notify(user, title, body, { always = false, emailExtra = '', buttons = [] } = {}) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
   const { rows: [u] } = await query('SELECT password_set FROM users WHERE id = $1', [user.id]);
   const joined = !u || u.password_set;
@@ -74,6 +76,7 @@ async function notify(user, title, body, { always = false, emailExtra = '' } = {
     text: `Hi ${user.name || 'there'},\n\n${body}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
     heading: title,
     cta: portal ? { label: 'Open your portal', url: APP_URL } : null,
+    buttons,
     note: PAYMENT_NOTE,
   });
 }
@@ -159,7 +162,7 @@ async function runBilling() {
     if (!claim.rows.some((r) => r.days_before === threshold)) continue;
 
     const { rows: [invoice] } = await query(
-      'SELECT status, amount FROM invoices WHERE order_id = $1 AND period_start = $2',
+      'SELECT status, amount, notes FROM invoices WHERE order_id = $1 AND period_start = $2',
       [order.id, billingDate],
     );
     const dayWord = daysLeft === 1 ? '1 day' : `${daysLeft} days`;
@@ -175,6 +178,7 @@ async function runBilling() {
     const paid = invoice && invoice.status === 'paid';
     await notify({ id: order.user_id, email: order.email, name: order.name }, `Your batch will renew in ${dayWord}`, body, {
       always: true,
+      buttons: paid || !invoice ? [] : payButtons(invoice),
       emailExtra: paid ? '' : 'To confirm your payment, please reply to this email with a screenshot of the payment, ' +
         'or share it in your dedicated WhatsApp or Slack group with us (recommended).',
     });
@@ -183,7 +187,13 @@ async function runBilling() {
   return { checked: orders.length, remindersSent: sent, today: now };
 }
 
+// Pay buttons from the payment links in an invoice's notes.
+const payButtons = (inv) => findPayLinks(inv.notes).map((l, _, all) => ({
+  url: l.url, label: all.length === 1 ? `Pay ${money(inv.amount)}${l.method ? ` with ${l.method}` : ''}` : l.label,
+}));
+
 module.exports = {
+  payButtons,
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
   cycleMonths, cycleLabel, cycleAmount,
 };

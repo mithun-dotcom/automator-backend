@@ -27,6 +27,8 @@ async function api(method, url, body) {
   return data;
 }
 
+// Turns URLs in already-escaped text into links.
+const linkify = (html) => html.replace(/\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)]/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
 const money = (n) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 function fmtDate(d) {
@@ -1482,7 +1484,9 @@ function renderInvoiceView(inv, isAdmin) {
             <div style="min-width:260px">${cycleFields(1)}</div>
             <button class="btn btn-primary" id="make-batch" style="margin-bottom:16px">Add as active batch</button>
           </div></div></div>` : ''}
-      ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${esc(inv.notes)}</div></section>` : ''}
+      ${inv.payLinks && inv.payLinks.length ? `<section class="inv-pay no-print">${inv.payLinks.map((l) => `<a class="btn btn-primary btn-pay" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}
+        <div class="muted small">After paying, send us the payment screenshot by replying to the invoice email or in your WhatsApp or Slack group with us.</div></section>` : ''}
+      ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${linkify(esc(inv.notes))}</div></section>` : ''}
       <div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>
     </article>`);
 

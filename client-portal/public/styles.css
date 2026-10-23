@@ -420,3 +420,6 @@ table.activity td { vertical-align: top; }
 @media (max-width: 600px) { .kpis { gap: 10px; } .kpi { padding: 14px; } .kpi-value { font-size: 21px; } }
 @media (max-width: 340px) { .kpis { grid-template-columns: minmax(0, 1fr); } }
 .client-actions { gap: 6px; min-width: 250px; max-width: 330px; }
+.inv-pay { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 8px 0 20px; }
+.btn-pay { padding: 12px 22px; font-size: 15px; }
+.inv-notes a { word-break: break-all; }
