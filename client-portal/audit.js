@@ -31,7 +31,6 @@ async function order(id) {
       Domains: o.domains,
       Usernames: o.usernames,
       'Internal notes': o.admin_notes,
-      'Sold by': o.sold_by,
     },
   };
 }
@@ -62,7 +61,6 @@ async function invoice(id) {
       'Linked batch': i.order_id ? `#${i.order_id}` : '',
       Lines: lines,
       Notes: i.notes,
-      'Sold by': i.sold_by,
     },
   };
 }
@@ -73,7 +71,7 @@ async function user(idOrEmail) {
   if (!u) return null;
   return {
     title: `${u.role === 'client' ? 'client' : 'team member'} ${u.company || u.name || u.email} <${u.email}>`,
-    fields: { Email: u.email, Name: u.name, Company: u.company, Role: u.role === 'staff' ? 'Team member' : cap(u.role), Account: u.password_set ? 'Joined' : 'Not joined yet' },
+    fields: { Email: u.email, Name: u.name, Company: u.company, 'Sold by': u.sold_by, Role: u.role === 'staff' ? 'Team member' : cap(u.role), Account: u.password_set ? 'Joined' : 'Not joined yet' },
   };
 }
 

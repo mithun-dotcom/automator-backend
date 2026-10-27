@@ -245,3 +245,9 @@ DROP VIEW IF EXISTS direct_orders;
 CREATE VIEW direct_orders AS SELECT o.* FROM orders o JOIN users u ON u.id = o.user_id WHERE u.reseller_id IS NULL;
 DROP VIEW IF EXISTS direct_invoices;
 CREATE VIEW direct_invoices AS SELECT i.* FROM invoices i JOIN users u ON u.id = i.user_id WHERE u.reseller_id IS NULL;
+
+-- "Sold by" belongs to the client: the team member who brought them in gets
+-- the commission on all their batches and invoices. (Batches and invoices
+-- carried it before; their old values are copied over once at boot.)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';

@@ -170,11 +170,12 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
   const hash = await bcrypt.hash(password, 10);
 
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, role) VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO users (email, name, company, password_hash, role, sold_by) VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set = true,
-       name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END
+       name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
+       sold_by = CASE WHEN users.sold_by = '' THEN EXCLUDED.sold_by ELSE users.sold_by END
      RETURNING *`,
-    [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client'],
+    [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client', invite.sold_by || ''],
   );
   await query('UPDATE invites SET accepted_at = now() WHERE id = $1', [invite.id]);
   setSession(res, user);
@@ -437,13 +438,13 @@ shared.get('/overview', asyncRoute(async (req, res) => {
   const scope = clientScope(req);
   const reseller = req.user.role === 'reseller';
   const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
-    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.sold_by, o.user_id, u.email, u.name, u.company, u.reseller_id,
+    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, u.sold_by AS seller, o.user_id, u.email, u.name, u.company, u.reseller_id,
              f.row_count AS csv_rows, f.filename AS csv_filename
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
            LEFT JOIN order_files f ON f.order_id = o.id
            WHERE ${scope}
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
-    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set, u.reseller_id,
+    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set, u.reseller_id, u.sold_by AS seller,
              EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
@@ -453,7 +454,7 @@ shared.get('/overview', asyncRoute(async (req, res) => {
            WHERE u.role = 'client' AND ${scope} GROUP BY u.id ORDER BY u.created_at DESC`),
     reseller ? { rows: [] } : query(`SELECT id, email, name, company, expires_at, created_at FROM invites
            WHERE accepted_at IS NULL AND expires_at > now() AND role = 'client' ORDER BY created_at DESC`),
-    query(`SELECT i.*, u.email, u.company, u.reseller_id FROM invoices i JOIN users u ON u.id = i.user_id
+    query(`SELECT i.*, u.email, u.company, u.reseller_id, u.sold_by AS seller FROM invoices i JOIN users u ON u.id = i.user_id
            WHERE ${scope}
            ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`),
     query("SELECT * FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order"),
@@ -486,10 +487,6 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
   }
   if (typeof req.body.batch_name === 'string') {
     await query('UPDATE orders SET batch_name = $1 WHERE id = $2', [str(req.body.batch_name, 200), id]);
-  }
-  if (typeof req.body.sold_by === 'string') {
-    order.sold_by = str(req.body.sold_by, 100);
-    await query('UPDATE orders SET sold_by = $1 WHERE id = $2', [order.sold_by, id]);
   }
   if (typeof req.body.admin_notes === 'string') {
     await query('UPDATE orders SET admin_notes = $1 WHERE id = $2', [str(req.body.admin_notes), id]);
@@ -622,10 +619,13 @@ admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.
   const company = str(req.body.company, 200) || (found && found.company) || '';
 
   const token = crypto.randomBytes(24).toString('base64url');
+  const soldBy = str(req.body.sold_by, 100);
+  // An existing client keeps theirs unless one is given; a new one gets it when they accept.
+  if (found && soldBy) await query('UPDATE users SET sold_by = $1 WHERE email = $2', [soldBy, email]);
   const { rows: [created] } = await query(
-    `INSERT INTO invites (email, name, company, token, expires_at)
-     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days') RETURNING id`,
-    [email, name, company, token],
+    `INSERT INTO invites (email, name, company, token, expires_at, sold_by)
+     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', $5) RETURNING id`,
+    [email, name, company, token, soldBy],
   );
   const link = `${baseUrl(req)}/#/invite/${token}`;
   const emailed = await sendMail({
@@ -672,8 +672,8 @@ shared.post('/clients', audited('added', 'user', (req, body) => (body ? body.id 
   }
   const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id) VALUES ($1, $2, $3, $4, false, $5) RETURNING id`,
-    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null],
+    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id, sold_by) VALUES ($1, $2, $3, $4, false, $5, $6) RETURNING id`,
+    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null, reseller ? '' : str(req.body.sold_by, 100)],
   );
   res.status(201).json({ id: user.id });
 }));
@@ -694,7 +694,9 @@ shared.patch('/clients/:id', audited('edited', 'user', byParam, async (req, res)
     if (taken && req.user.role === 'reseller') throw new HttpError(400, 'That email can\'t be used. Use a different one.');
     if (taken) throw new HttpError(400, taken.role === 'client' ? 'Another client already uses that email' : 'That email belongs to a team member');
   }
-  await query('UPDATE users SET email = $1, name = $2, company = $3 WHERE id = $4', [email, name, company, id]);
+  // Sold by (who gets the commission on this client) is for MithMill's team only.
+  const soldBy = req.user.role === 'reseller' || req.body.sold_by === undefined ? client.sold_by : str(req.body.sold_by, 100);
+  await query('UPDATE users SET email = $1, name = $2, company = $3, sold_by = $4 WHERE id = $5', [email, name, company, soldBy, id]);
   if (emailChanged) {
     await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [client.email]);
     if (client.password_set) {
@@ -882,7 +884,7 @@ async function inTransaction(fn) {
 
 async function invoiceWithItems(id, userId) {
   const { rows: [inv] } = await query(
-    `SELECT i.*, u.email, u.name, u.company FROM invoices i JOIN users u ON u.id = i.user_id
+    `SELECT i.*, u.email, u.name, u.company, u.sold_by AS seller FROM invoices i JOIN users u ON u.id = i.user_id
       WHERE i.id = $1 ${userId ? "AND i.user_id = $2 AND i.status <> 'void'" : ''}`,
     userId ? [id, userId] : [id],
   );
@@ -894,7 +896,7 @@ async function invoiceWithItems(id, userId) {
   const { rows: pricing } = await query('SELECT inbox_type, label FROM pricing ORDER BY sort_order');
   // Invoices from before line items existed show as a single line.
   if (!items.length) items.push({ inbox_type: '', batch_name: '', description: inv.description, quantity: 1, unit_price: inv.amount + inv.discount });
-  if (userId) delete inv.sold_by; // admin-only
+  if (userId) { delete inv.sold_by; delete inv.seller; } // admin-only
   // A white-label reseller's client sees the reseller's name, logo and payment details.
   const wl = await brands.forClient(inv.user_id);
   const reseller = userId ? null : await brands.resellerOf(inv.user_id);
@@ -1021,7 +1023,6 @@ shared.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body
       if (!(err instanceof HttpError)) throw err; // no mailbox lines: nothing to add
     }
   }
-  if (v.orderId && v.soldBy) await query("UPDATE orders SET sold_by = $1 WHERE id = $2 AND sold_by = ''", [v.soldBy, v.orderId]);
   if (v.orderId) batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify !== false) {
     await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
@@ -1047,7 +1048,6 @@ shared.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, re
     if (v.status === 'paid') await client.query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [v.paidAt, id]);
     if (v.status === 'unpaid') await client.query("UPDATE invoices SET status = 'unpaid', paid_at = NULL WHERE id = $1", [id]);
   });
-  if (v.orderId && v.soldBy) await query("UPDATE orders SET sold_by = $1 WHERE id = $2 AND sold_by = ''", [v.soldBy, v.orderId]);
   const batchIds = await syncRecurringOtherLines(id);
   if (req.body.notify === true) {
     await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,
@@ -1356,12 +1356,12 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
            FROM direct_invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND i.paid_at IS NOT NULL ORDER BY i.paid_at DESC, i.id DESC LIMIT 10`),
     // Commission view: payments received per seller, this month and last.
-    query(`SELECT COALESCE(NULLIF(i.sold_by, ''), NULLIF(o.sold_by, ''), '') AS seller,
+    query(`SELECT u.sold_by AS seller,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)), 0) AS this_month,
              (count(*) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)))::int AS this_count,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month,
              (count(*) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)))::int AS last_count
-           FROM direct_invoices i LEFT JOIN orders o ON o.id = i.order_id
+           FROM direct_invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
            GROUP BY 1 ORDER BY this_month DESC, last_month DESC`, [today, tz]),
   ]);
@@ -1769,6 +1769,21 @@ async function syncExistingOtherLines() {
   await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [flag, new Date().toISOString()]);
 }
 
+// One-time: Sold by moved from batches/invoices to the client. Each client
+// takes the value from their most recent invoice or batch that had one.
+async function moveSoldByToClients() {
+  const flag = 'sold_by_on_clients_v1';
+  const { rows: [done] } = await query('SELECT 1 FROM settings WHERE key = $1', [flag]);
+  if (done) return;
+  await query(`UPDATE users u SET sold_by = s.sold_by FROM (
+      SELECT DISTINCT ON (user_id) user_id, sold_by FROM (
+        SELECT user_id, sold_by, created_at FROM invoices WHERE sold_by <> ''
+        UNION ALL SELECT user_id, sold_by, created_at FROM orders WHERE sold_by <> '') x
+      ORDER BY user_id, created_at DESC) s
+    WHERE u.id = s.user_id AND u.sold_by = ''`);
+  await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [flag, new Date().toISOString()]);
+}
+
 async function scheduledBilling() {
   try {
     const result = await billing.runBilling();
@@ -1783,6 +1798,7 @@ async function scheduledBilling() {
   await ensureAdmin();
   await linkStandaloneInvoices();
   await syncExistingOtherLines();
+  await moveSoldByToClients();
   await syncEmailBrand();
   // One-time switch requested by Mithmill: cancellation requests go to support@.
   await query(
