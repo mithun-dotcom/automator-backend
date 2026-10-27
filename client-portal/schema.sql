@@ -160,8 +160,10 @@ ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS recurring BOOLEAN NOT NULL DE
 
 -- Team members ("staff") use the admin panel; the owner ("admin") also manages
 -- the team and settings.
+-- (Resellers, added later, are allowed here too: this runs on every boot,
+-- before the reseller section below, and must accept existing reseller rows.)
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
-ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('client', 'admin', 'staff'));
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('client', 'admin', 'staff', 'reseller'));
 ALTER TABLE invites ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'client';
 
 -- Every admin-panel change: who, what, and the before/after of each field.
@@ -208,3 +210,38 @@ ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS urgent_sent_at TIMESTAMPTZ;
+
+-- Resellers: partners who manage their own clients' billing in the portal.
+-- Their clients are ordinary client rows with reseller_id set; they don't log
+-- in. White-label (set by the owner) brands those clients' emails and invoices
+-- with the reseller's name, logo, sender and payment details.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reseller_id INT REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS users_reseller ON users (reseller_id);
+
+CREATE TABLE IF NOT EXISTS resellers (
+  user_id       INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  brand_name    TEXT NOT NULL DEFAULT '',
+  white_label   BOOLEAN NOT NULL DEFAULT false,
+  active        BOOLEAN NOT NULL DEFAULT true,
+  logo          BYTEA,
+  logo_type     TEXT NOT NULL DEFAULT '',
+  logo_version  INT NOT NULL DEFAULT 0,
+  website       TEXT NOT NULL DEFAULT '',
+  support_email TEXT NOT NULL DEFAULT '',
+  payment_note  TEXT NOT NULL DEFAULT '',
+  sender_name   TEXT NOT NULL DEFAULT '',
+  sender_email  TEXT NOT NULL DEFAULT '',
+  reply_to      TEXT NOT NULL DEFAULT '',
+  smtp_host     TEXT NOT NULL DEFAULT '',
+  smtp_port     INT NOT NULL DEFAULT 465,
+  smtp_user     TEXT NOT NULL DEFAULT '',
+  smtp_pass     BYTEA,  -- AES-256-GCM, like onboarding CSVs
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Mithmill's own (direct) business, without resellers' clients: used by
+-- Analytics so reseller billing doesn't mix into Mithmill's numbers.
+DROP VIEW IF EXISTS direct_orders;
+CREATE VIEW direct_orders AS SELECT o.* FROM orders o JOIN users u ON u.id = o.user_id WHERE u.reseller_id IS NULL;
+DROP VIEW IF EXISTS direct_invoices;
+CREATE VIEW direct_invoices AS SELECT i.* FROM invoices i JOIN users u ON u.id = i.user_id WHERE u.reseller_id IS NULL;

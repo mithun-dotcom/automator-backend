@@ -24,6 +24,16 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Resellers
+
+The owner invites resellers under **Resellers** (owner only). A reseller logs in to the same portal and gets a reseller panel (Batches, Clients, Invoices, Settings) that shows only their own clients. There they add clients, batches and invoices, and send invoices and urgent reminders. Their clients don't log in; they get invoices and the 7/3/1-day renewal reminders by email.
+
+- **White-label switch** (per reseller, set by the owner). Off: their clients' emails and invoices use MithMill's branding and the Mixxbee LLC payment notice. On: they use the reseller's brand name, logo, sender name, reply-to, support email and payment details. A payment link in those details becomes a Pay button.
+- **Sending address.** By default, white-label emails go out from the portal's mail account under the reseller's sender name, with replies going to the reseller's reply-to email. To send from the reseller's own address, enter their mail server (SMTP) on their reseller page. If it fails, the email goes out from the portal's account instead.
+- **What the reseller edits.** With white-label on, the reseller can change their sender name, reply-to, support email and payment details. The brand name, logo, mail server and switch stay with the owner.
+- **Owner visibility.** The owner sees every reseller's clients, batches and invoices on that reseller's page, and can open, edit and email their invoices. The reseller isn't shown this. Resellers' clients are left out of the main Orders, Clients and Invoices lists and out of Analytics, and team members can't see them.
+- **Access switch.** "Reseller can log in" turns a reseller's access off without touching their clients' billing.
+
 ## Onboarding CSV
 
 On the order form, clients download a sample CSV (one row per mailbox user: domain name, users per domain, full name, username, preferred password, domain access email/username, domain provider password and login URL, sequencer access email/password/workspace, profile picture Drive link, domain forward), fill it in and upload it. It's checked on upload, fills in the domains, usernames and mailbox count, and is required for orders at or above the threshold set under **Settings** (default 10). The file is stored encrypted, and only admins can download it from the order.

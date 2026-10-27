@@ -82,13 +82,16 @@ function button(cta, secondary) {
  *  after     optional plain text shown after that block
  *  buttons   optional Pay buttons [{label, url}], shown before `after`
  *  alert     optional { title, body } red critical-alert box under the heading
+ *  brand     optional reseller white-label branding (brands.js); replaces MithMill's
  */
-function render({ heading, text, cta, note, preheader, reason, html, after, buttons, alert }) {
+function render({ heading, text, cta, note, preheader, reason, html, after, buttons, alert, brand: wl }) {
   const pay = buttons && buttons.length ? buttons : null;
-  const logo = brand.appUrl ? `${brand.appUrl}/logo-full.png` : '';
-  const links = [
-    ['Website', brand.website], ['Client portal', brand.appUrl], ['Privacy policy', brand.privacyUrl], ['Terms', brand.termsUrl],
-  ].filter(([, url]) => url).map(([label, url]) => `<a href="${esc(url)}" style="color:${C.muted};text-decoration:underline">${label}</a>`).join(' &nbsp;·&nbsp; ');
+  const name = wl ? wl.name : 'MithMill';
+  const logo = wl ? wl.logoUrl : brand.appUrl ? `${brand.appUrl}/logo-full.png` : '';
+  const linkList = wl ? [['Website', wl.website]]
+    : [['Website', brand.website], ['Client portal', brand.appUrl], ['Privacy policy', brand.privacyUrl], ['Terms', brand.termsUrl]];
+  const links = linkList.filter(([, url]) => url).map(([label, url]) => `<a href="${esc(url)}" style="color:${C.muted};text-decoration:underline">${label}</a>`).join(' &nbsp;·&nbsp; ');
+  const support = wl ? wl.supportEmail : brand.supportEmail;
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${esc(heading || '')}</title></head>
@@ -99,7 +102,7 @@ function render({ heading, text, cta, note, preheader, reason, html, after, butt
       <tr><td style="height:6px;background:${C.navyDark};border-radius:12px 12px 0 0;font-size:0;line-height:0">&nbsp;</td></tr>
       <tr><td style="background:#ffffff;border:1px solid ${C.line};border-top:0;border-radius:0 0 12px 12px;padding:32px 36px 28px">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-bottom:24px;border-bottom:1px solid ${C.line}">
-          ${logo ? `<img src="${esc(logo)}" width="180" alt="MithMill" style="display:block;width:180px;max-width:60%;height:auto;border:0">` : `<span style="font-size:22px;font-weight:700;color:${C.navy}">MithMill</span>`}
+          ${logo ? `<img src="${esc(logo)}" width="180" alt="${esc(name)}" style="display:block;width:auto;max-width:180px;max-height:64px;height:auto;border:0">` : `<span style="font-size:22px;font-weight:700;color:${C.navy}">${esc(name)}</span>`}
         </td></tr></table>
         ${heading ? `<h1 style="margin:28px 0 16px;font-size:22px;line-height:1.3;font-weight:700;color:${C.ink}">${esc(heading)}</h1>` : '<div style="height:24px"></div>'}
         ${alert ? alertBox(alert) : ''}
@@ -108,17 +111,17 @@ function render({ heading, text, cta, note, preheader, reason, html, after, butt
         ${pay ? payButtons(pay) : ''}
         ${after ? textToHtml(after) : ''}
         ${cta ? button(cta, Boolean(pay)) : ''}
-        ${note ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 4px"><tr><td style="background:${C.goldBg};border:1px solid ${C.goldLine};border-radius:10px;padding:14px 16px;font-size:13px;line-height:1.55;color:${C.text}"><strong style="color:${C.gold}">Payment notice:</strong> ${esc(note)}</td></tr></table>` : ''}
-        <p style="margin:24px 0 0;line-height:1.6;color:${C.text}">Best regards,<br><strong style="color:${C.ink}">The MithMill team</strong></p>
+        ${note ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 4px"><tr><td style="background:${C.goldBg};border:1px solid ${C.goldLine};border-radius:10px;padding:14px 16px;font-size:13px;line-height:1.55;color:${C.text}"><strong style="color:${C.gold}">${wl ? 'Payment details:' : 'Payment notice:'}</strong> ${wl ? `<br>${linkify(esc(note)).replace(/\n/g, '<br>')}` : esc(note)}</td></tr></table>` : ''}
+        <p style="margin:24px 0 0;line-height:1.6;color:${C.text}">Best regards,<br><strong style="color:${C.ink}">The ${esc(name)} team</strong></p>
       </td></tr>
       <tr><td align="center" style="padding:24px 12px 8px;font-size:12px;line-height:1.7;color:${C.faint}">
-        <div style="font-weight:600;color:${C.navy};font-size:13px">MithMill</div>
-        <div>From Cold to Gold: Email Strategies That Shine</div>
-        <div style="margin-top:8px">${links}</div>
-        <div style="margin-top:8px">Questions? <a href="mailto:${esc(brand.supportEmail)}" style="color:${C.muted}">${esc(brand.supportEmail)}</a></div>
-        <div style="margin-top:8px">Payments are collected by Mixxbee LLC, MithMill's billing company.</div>
-        <div style="margin-top:8px">${esc(reason || 'You are receiving this email because you have an account on the MithMill client portal.')}</div>
-        <div style="margin-top:8px">© ${new Date().getFullYear()} MithMill. All rights reserved.</div>
+        <div style="font-weight:600;color:${C.navy};font-size:13px">${esc(name)}</div>
+        ${wl ? '' : '<div>From Cold to Gold: Email Strategies That Shine</div>'}
+        ${links ? `<div style="margin-top:8px">${links}</div>` : ''}
+        ${support ? `<div style="margin-top:8px">Questions? <a href="mailto:${esc(support)}" style="color:${C.muted}">${esc(support)}</a></div>` : ''}
+        ${wl ? '' : '<div style="margin-top:8px">Payments are collected by Mixxbee LLC, MithMill\'s billing company.</div>'}
+        <div style="margin-top:8px">${esc(reason || `You are receiving this email because you have an account with ${name}.`)}</div>
+        <div style="margin-top:8px">© ${new Date().getFullYear()} ${esc(name)}. All rights reserved.</div>
       </td></tr>
     </table>
   </td></tr></table>

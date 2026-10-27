@@ -135,8 +135,13 @@ function cancelNote() {
 
 // Team members ("staff") get the admin panel too; the owner ("admin") also
 // sees Team and Settings.
-const isAdminRole = (r) => r === 'admin' || r === 'staff';
+// Admins, team members and resellers all use the admin-style panel; a
+// reseller's is limited to their own clients.
+const isAdminRole = (r) => r === 'admin' || r === 'staff' || r === 'reseller';
 const isOwner = () => state.me && state.me.role === 'admin';
+const isReseller = () => state.me && state.me.role === 'reseller';
+// Resellers use the same pages against their own, scoped API.
+const API = () => (isReseller() ? '/api/reseller' : '/api/admin');
 
 // ------------------------------------------------------------------ state + router
 
@@ -179,6 +184,7 @@ const ICONS = {
   invoices: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
   team: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/><path d="m17 3 1.5 1.5L21 2"/>',
   chart: '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 6-7"/>',
+  reseller: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
@@ -188,7 +194,7 @@ const ICONS = {
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
   '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
-  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart',
+  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller',
 };
 
 // Layout borrowed from the MithMill commission portal: navy sidebar with the
@@ -205,12 +211,12 @@ function shell(tabs, active, content) {
   document.body.classList.remove('nav-open');
   $app.innerHTML = `
     <aside class="sidebar" aria-label="Main navigation">
-      <div class="row" style="flex-wrap:nowrap">${logo(isClient ? 'Client Portal' : 'Admin Portal')}<button class="sb-close" id="nav-close" aria-label="Close menu">${icon('close')}</button></div>
+      <div class="row" style="flex-wrap:nowrap">${logo(isClient ? 'Client Portal' : isReseller() ? 'Reseller Portal' : 'Admin Portal')}<button class="sb-close" id="nav-close" aria-label="Close menu">${icon('close')}</button></div>
       <div class="sb-sep"></div>
       <nav class="sb-nav">${nav}</nav>
       <div class="sb-user">
         <div class="avatar">${esc((state.me.name || state.me.email || '?').charAt(0).toUpperCase())}</div>
-        <div class="sb-user-info"><div class="email" title="${esc(state.me.email)}">${esc(state.me.email)}</div><div class="role">${isClient ? esc(state.me.company || 'Client') : isOwner() ? 'Owner' : 'Team member'}</div></div>
+        <div class="sb-user-info"><div class="email" title="${esc(state.me.email)}">${esc(state.me.email)}</div><div class="role">${isClient ? esc(state.me.company || 'Client') : isOwner() ? 'Owner' : isReseller() ? 'Reseller' : 'Team member'}</div></div>
         <a class="sb-icon-btn" href="#/password" title="Change password" aria-label="Change password">${icon('key')}</a>
         <button class="sb-icon-btn" id="logout" title="Log out" aria-label="Log out">${icon('logout')}</button>
       </div>
@@ -731,22 +737,39 @@ function renderOrder() {
 const ADMIN_TABS = [];
 function setAdminTabs() {
   ADMIN_TABS.length = 0;
+  if (isReseller()) {
+    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/invoices', 'Invoices'], ['#/admin/settings', 'Settings']);
+    return;
+  }
   ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices']);
   if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
-  if (isOwner()) ADMIN_TABS.push(['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
+  if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
 
 async function renderAdmin(page, arg, sub) {
-  state.admin = await api('GET', '/api/admin/overview');
+  const raw = await api('GET', `${API()}/overview`);
+  // The owner's main pages leave out resellers' clients; they're on the Resellers page.
+  const direct = (rows) => rows.filter((r) => !r.reseller_id);
+  state.admin = isOwner() && page !== 'invoice'
+    ? { ...raw, orders: direct(raw.orders), clients: direct(raw.clients), invoices: direct(raw.invoices) } : raw;
+  if (isReseller()) {
+    if (page === 'settings') return resellerSettings(await api('GET', '/api/reseller/settings'));
+    if (['team', 'analytics', 'resellers'].includes(page)) return go('#/admin/orders');
+  }
+  if (page === 'resellers') {
+    if (!isOwner()) return go('#/admin/orders');
+    return arg ? renderResellerDetail(await api('GET', `/api/admin/resellers/${encodeURIComponent(arg)}`))
+      : renderResellers(await api('GET', '/api/admin/resellers'));
+  }
   if (page === 'invoice') {
     if (arg === 'new') return invoiceEditor(null);
-    const inv = await api('GET', `/api/admin/invoices/${encodeURIComponent(arg)}`);
+    const inv = await api('GET', `${API()}/invoices/${encodeURIComponent(arg)}`);
     return sub === 'edit' ? invoiceEditor(inv) : renderInvoiceView(inv, true);
   }
-  if (page === 'team' && isOwner()) return renderTeam(await api('GET', '/api/admin/team'));
-  if (page === 'analytics') return isOwner() ? renderAnalytics(await api('GET', '/api/admin/analytics')) : go('#/admin/orders');
+  if (page === 'team' && isOwner()) return renderTeam(await api('GET', `${API()}/team`));
+  if (page === 'analytics') return isOwner() ? renderAnalytics(await api('GET', `${API()}/analytics`)) : go('#/admin/orders');
   if (page === 'settings' && !isOwner()) return go('#/admin/orders');
-  const pages = { orders: adminOrders, clients: adminClients, invoices: adminInvoices, settings: adminSettings };
+  const pages = { orders: adminOrders, clients: isReseller() ? resellerClients : adminClients, invoices: adminInvoices, settings: adminSettings };
   if (page === 'orders' && arg) return adminOrders(Number(arg));
   (pages[page] || adminOrders)();
 }
@@ -785,7 +808,7 @@ function upcomingRenewalsCard(orders, invoices, today) {
 // domains box ready to edit.
 function adminOrders(focusId) {
   const { orders } = state.admin;
-  const filter = focusId ? 'all' : sessionStorage.getItem('orderFilter') || 'open';
+  const filter = focusId ? 'all' : sessionStorage.getItem('orderFilter') || (isReseller() ? 'active' : 'open');
   const shown = orders.filter((o) => (filter === 'all' ? true
     : filter === 'open' ? ['pending', 'in_progress'].includes(o.status) : o.status === filter));
   const counts = (s) => orders.filter((o) => (s === 'open' ? ['pending', 'in_progress'].includes(o.status) : s === 'all' || o.status === s)).length;
@@ -793,15 +816,16 @@ function adminOrders(focusId) {
 
   shell(ADMIN_TABS, '#/admin/orders', `
     <div class="page-head">
-      <div><h1>Orders</h1><p class="muted">Open an order and click ✓ Mark as completed once its mailboxes are delivered. That activates them for the client and creates the first invoice.</p></div>
+      ${isReseller() ? '<div><h1>Batches</h1><p class="muted">Your clients\' mailboxes. Add a batch for a client; renewal invoices and the 7, 3 and 1-day reminders then go out automatically.</p></div>'
+        : '<div><h1>Orders</h1><p class="muted">Open an order and click ✓ Mark as completed once its mailboxes are delivered. That activates them for the client and creates the first invoice.</p></div>'}
       <div class="row"><button class="btn btn-sm btn-primary" id="add-batch">+ Add batch</button>${[['open', 'To do'], ['active', 'Active'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, l]) => `<button class="btn btn-sm ${filter === k ? 'btn-primary' : ''}" data-filter="${k}">${l} (${counts(k)})</button>`).join('')}</div>
     </div>
     <div class="stack">
     ${(() => {
       const active = orders.filter((o) => o.status === 'active');
       const unpaid = state.admin.invoices.filter((i) => i.status === 'unpaid');
-      return welcome((state.me.name || 'Admin').split(' ')[0], [
-        [counts('open'), 'Orders to do'],
+      return welcome((state.me.name || (isReseller() ? 'there' : 'Admin')).split(' ')[0], [
+        isReseller() ? [state.admin.clients.length, 'Clients'] : [counts('open'), 'Orders to do'],
         [active.reduce((n, o) => n + o.quantity, 0), 'Active mailboxes'],
         [money(active.reduce((n, o) => n + o.quantity * o.price_per_mailbox, 0)), 'Monthly revenue'],
         [money(unpaid.reduce((n, i) => n + i.amount, 0)), `Unpaid · ${unpaid.length} invoice${unpaid.length === 1 ? '' : 's'}`],
@@ -839,7 +863,7 @@ function adminOrders(focusId) {
               ${kv('Sequencer notes', o.sequencer_notes)}
               ${kv('Client notes', o.notes)}
             </dl>
-            ${o.csv_rows ? `<div><a class="btn btn-primary btn-sm" href="/api/admin/orders/${o.id}/onboarding.csv">⬇ Download onboarding CSV (${o.csv_rows} rows)</a></div>` : '<div class="muted small">No onboarding CSV uploaded.</div>'}
+            ${isReseller() ? '' : o.csv_rows ? `<div><a class="btn btn-primary btn-sm" href="/api/admin/orders/${o.id}/onboarding.csv">⬇ Download onboarding CSV (${o.csv_rows} rows)</a></div>` : '<div class="muted small">No onboarding CSV uploaded.</div>'}
           </div>
           <form class="order-form" data-id="${o.id}">
             ${['pending', 'in_progress'].includes(o.status) ? `<div class="complete-box">
@@ -861,7 +885,7 @@ function adminOrders(focusId) {
             </div>
             <div class="hint" style="margin:-8px 0 14px">Shown to the client and listed per domain in their cancellation email. Use "Name - user@domain.com" so mailboxes are counted per domain.</div>
             <div class="field"><label>Batch name</label><input name="batch_name" value="${esc(o.batch_name || '')}" placeholder="e.g. Q4 outreach"></div>
-            ${soldByField(o.sold_by)}
+            ${isReseller() ? '' : soldByField(o.sold_by)}
             <div class="field"><label>Internal notes</label><textarea name="admin_notes" style="min-height:64px">${esc(o.admin_notes)}</textarea></div>
             <div class="row" style="justify-content:space-between">
               <button class="btn btn-primary" type="submit">Save</button>
@@ -894,7 +918,7 @@ function adminOrders(focusId) {
     onSubmit(form, async (d) => {
       const body = { status: d.status, admin_notes: d.admin_notes, sold_by: d.sold_by, batch_name: d.batch_name, domains: d.domains, usernames: d.usernames, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox };
       if (d.billing_cycle) Object.assign(body, { billing_cycle: d.billing_cycle, custom_months: d.custom_months });
-      const r = await api('PATCH', `/api/admin/orders/${form.dataset.id}`, body);
+      const r = await api('PATCH', `${API()}/orders/${form.dataset.id}`, body);
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
       reloadAdmin();
     });
@@ -904,7 +928,7 @@ function adminOrders(focusId) {
       const o = orders.find((x) => String(x.id) === b.dataset.cancelSub);
       if (!confirm(`Cancel the subscription for ${batchTitle(o)} (${o.company || o.email})?\n\nIt stops renewing, its unpaid upcoming invoices are voided, and it no longer counts in the client's dashboard. The client is notified.`)) return;
       try {
-        await api('PATCH', `/api/admin/orders/${o.id}`, { status: 'cancelled' });
+        await api('PATCH', `${API()}/orders/${o.id}`, { status: 'cancelled' });
         toast(`${batchTitle(o)} cancelled`);
         reloadAdmin();
       } catch (ex) { toast(ex.message); }
@@ -915,7 +939,7 @@ function adminOrders(focusId) {
       const o = orders.find((x) => String(x.id) === b.dataset.deleteBatch);
       if (!confirm(`Delete ${batchTitle(o)} (${o.company || o.email}) permanently?\n\nUse this for batches added by mistake. Its unpaid invoices are voided; paid invoices stay as history. To end a real subscription, use Cancel subscription instead.`)) return;
       try {
-        await api('DELETE', `/api/admin/orders/${o.id}`);
+        await api('DELETE', `${API()}/orders/${o.id}`);
         toast(`${batchTitle(o)} deleted`);
         reloadAdmin();
       } catch (ex) { toast(ex.message); }
@@ -930,7 +954,7 @@ function adminOrders(focusId) {
       if (!confirm(`Mark order #${id} as completed?\n\nThis activates the mailboxes for the client, creates the first month's invoice (${total}) and sends them a notification.`)) return;
       b.disabled = true;
       try {
-        const r = await api('PATCH', `/api/admin/orders/${id}`, {
+        const r = await api('PATCH', `${API()}/orders/${id}`, {
           status: 'active', admin_notes: d.admin_notes, quantity: Number(d.quantity), price_per_mailbox: d.price_per_mailbox,
           billing_cycle: d.billing_cycle, custom_months: d.custom_months,
         });
@@ -966,7 +990,7 @@ function openBatchDialog(userId) {
   dlg.innerHTML = `
     <form id="batch-form">
       <div class="modal-head"><h2>Add batch</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
-      <p class="muted small" style="margin:-6px 0 16px">For mailboxes a client already has with you, or an order taken outside the portal. The client sees it as soon as they log in.</p>
+      <p class="muted small" style="margin:-6px 0 16px">${isReseller() ? 'Mailboxes for one of your clients. Renewal invoices and reminders are sent to the client automatically.' : 'For mailboxes a client already has with you, or an order taken outside the portal. The client sees it as soon as they log in.'}</p>
       <div class="grid-2">
         <div class="field"><label>Client</label><select name="user_id" required><option value="">Choose…</option>
           ${clients.map((c) => `<option value="${c.id}" ${c.id === userId ? 'selected' : ''}>${esc(c.company || c.name || c.email)} (${esc(c.email)})</option>`).join('')}</select></div>
@@ -995,7 +1019,7 @@ function openBatchDialog(userId) {
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
       </div>
-      ${soldByField('')}
+      ${isReseller() ? '' : soldByField('')}
       <div class="field"><label>Internal notes (optional)</label><input name="admin_notes"></div>
       <div class="error"></div>
       <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn btn-primary" type="submit">Add batch</button></div>
@@ -1021,7 +1045,7 @@ function openBatchDialog(userId) {
   ['input', 'change'].forEach((ev) => f.addEventListener(ev, preview));
   preview();
   onSubmit(f, async (d) => {
-    const r = await api('POST', '/api/admin/orders', d);
+    const r = await api('POST', `${API()}/orders`, d);
     dlg.close();
     toast(`Batch #${r.id} added${r.invoiceId ? ` with invoice #${r.invoiceId}` : ''}`);
     reloadAdmin();
@@ -1035,9 +1059,9 @@ function openClientDialog(c) {
   dlg.className = 'modal';
   dlg.innerHTML = `<div class="modal-head"><h2>Edit client</h2><button class="btn btn-sm btn-ghost" type="button" id="c-close" aria-label="Close">✕</button></div>
     <form id="client-form">
-    <div class="field"><label for="c-email">Login email</label>
-      <input id="c-email" name="email" type="email" required value="${esc(c.email)}" ${isOwner() ? '' : 'readonly'}>
-      <div class="hint">${isOwner() ? (c.password_set ? 'They log in with this email. If you change it, both the old and new address get an email about it, and their password stays the same.' : 'Pending invites to the old email stop working. Send a new invite afterwards.') : 'Only the owner can change a client\'s email.'}</div></div>
+    <div class="field"><label for="c-email">${isReseller() ? 'Email' : 'Login email'}</label>
+      <input id="c-email" name="email" type="email" required value="${esc(c.email)}" ${isOwner() || isReseller() ? '' : 'readonly'}>
+      <div class="hint">${isReseller() ? 'Invoices and renewal reminders are sent to this email.' : isOwner() ? (c.password_set ? 'They log in with this email. If you change it, both the old and new address get an email about it, and their password stays the same.' : 'Pending invites to the old email stop working. Send a new invite afterwards.') : 'Only the owner can change a client\'s email.'}</div></div>
     <div class="field"><label for="c-name">Name</label><input id="c-name" name="name" value="${esc(c.name)}"></div>
     <div class="field"><label for="c-company">Company</label><input id="c-company" name="company" value="${esc(c.company)}"></div>
     <div class="row"><button class="btn btn-primary" type="submit">Save</button><button class="btn" type="button" id="c-cancel">Cancel</button></div>
@@ -1049,8 +1073,8 @@ function openClientDialog(c) {
   dlg.querySelector('#c-close').onclick = () => dlg.close();
   dlg.showModal();
   onSubmit(dlg.querySelector('form'), async (d) => {
-    if (!isOwner()) delete d.email;
-    const r = await api('PATCH', `/api/admin/clients/${c.id}`, d);
+    if (!isOwner() && !isReseller()) delete d.email;
+    const r = await api('PATCH', `${API()}/clients/${c.id}`, d);
     dlg.close();
     toast(r.emailChanged ? `Email changed to ${d.email}` : 'Client saved');
     reloadAdmin();
@@ -1130,25 +1154,25 @@ function adminClients() {
     const err = form.querySelector('.error');
     err.textContent = '';
     try {
-      const r = await api('POST', '/api/admin/clients', d);
+      const r = await api('POST', `${API()}/clients`, d);
       toast(`${d.email} added. Now add their batches.`);
-      state.admin = await api('GET', '/api/admin/overview');
+      state.admin = await api('GET', `${API()}/overview`);
       adminClients();
       openBatchDialog(r.id);
     } catch (ex) { err.textContent = ex.message; }
   };
   document.querySelectorAll('[data-batch]').forEach((b) => { b.onclick = () => openBatchDialog(Number(b.dataset.batch)); });
   onSubmit(document.getElementById('inv'), async (d) => {
-    const r = await api('POST', '/api/admin/invites', d);
-    state.admin = await api('GET', '/api/admin/overview');
+    const r = await api('POST', `${API()}/invites`, d);
+    state.admin = await api('GET', `${API()}/overview`);
     adminClients();
     showLink(r, d.email);
   });
   document.querySelectorAll('[data-reset]').forEach((b) => {
     b.onclick = async () => {
       try {
-        const r = await api('POST', '/api/admin/invites', { email: b.dataset.reset });
-        state.admin = await api('GET', '/api/admin/overview');
+        const r = await api('POST', `${API()}/invites`, { email: b.dataset.reset });
+        state.admin = await api('GET', `${API()}/overview`);
         adminClients();
         showLink(r, b.dataset.reset);
         window.scrollTo(0, 0);
@@ -1163,7 +1187,7 @@ function adminClients() {
   });
   document.querySelectorAll('.client-prices').forEach((form) => {
     onSubmit(form, async (d) => {
-      await api('PUT', `/api/admin/clients/${form.dataset.id}/pricing`, {
+      await api('PUT', `${API()}/clients/${form.dataset.id}/pricing`, {
         prices: Object.entries(d).map(([inbox_type, v]) => ({ inbox_type, price_per_mailbox: v === '' ? null : v })),
       });
       toast('Client pricing saved');
@@ -1183,7 +1207,7 @@ function adminClients() {
       if (typed === null) return;
       if (typed.trim().toLowerCase() !== c.email) return toast('The email didn\'t match. Nothing was deleted.');
       try {
-        await api('DELETE', `/api/admin/clients/${c.id}`);
+        await api('DELETE', `${API()}/clients/${c.id}`);
         toast(`${c.email} deleted`);
         reloadAdmin();
       } catch (ex) { toast(ex.message); }
@@ -1191,7 +1215,7 @@ function adminClients() {
   });
   document.querySelectorAll('[data-revoke]').forEach((b) => {
     b.onclick = async () => {
-      await api('DELETE', `/api/admin/invites/${b.dataset.revoke}`);
+      await api('DELETE', `${API()}/invites/${b.dataset.revoke}`);
       toast('Invite revoked');
       reloadAdmin();
     };
@@ -1206,13 +1230,13 @@ function typeLabel(type, pricing) {
 
 async function setInvoiceStatus(id, status, orderId) {
   if (status === 'void' && !confirm(`Void invoice #${id}?`)) return false;
-  await api('PATCH', `/api/admin/invoices/${id}`, { status });
+  await api('PATCH', `${API()}/invoices/${id}`, { status });
   toast(`Invoice #${id} updated`);
   // Voiding a bill doesn't end the subscription behind it; offer to do that too.
   const order = status === 'void' && orderId && state.admin.orders.find((o) => String(o.id) === String(orderId));
   if (order && order.status !== 'cancelled'
     && confirm(`Invoice #${id} is voided.\n\nAlso cancel the subscription for ${batchTitle(order)}? It will stop renewing and no longer count in the client's dashboard.`)) {
-    await api('PATCH', `/api/admin/orders/${order.id}`, { status: 'cancelled' });
+    await api('PATCH', `${API()}/orders/${order.id}`, { status: 'cancelled' });
     toast(`Invoice #${id} voided and ${batchTitle(order)} cancelled`);
   }
   return true;
@@ -1287,7 +1311,7 @@ function invoiceEditor(inv) {
         <div class="grid-2">
           <div class="field"><label for="e-user">Client</label>
             <select id="e-user" required><option value="">Choose…</option>
-              ${clients.map((c) => `<option value="${c.id}" ${String(c.id) === ed.user_id ? 'selected' : ''}>${esc(c.company || c.name)} (${esc(c.email)})</option>`).join('')}</select></div>
+              ${clients.filter((c) => !isOwner() || !c.reseller_id || String(c.id) === ed.user_id).map((c) => `<option value="${c.id}" ${String(c.id) === ed.user_id ? 'selected' : ''}>${esc(c.company || c.name || c.email)} (${esc(c.email)})</option>`).join('')}</select></div>
           <div class="field"><label for="e-order">Linked batch (optional)</label><select id="e-order"></select>
             <div class="hint">Choosing a batch adds a line for it. <a id="e-batch-link" href="#" hidden>Edit batch details (domains, usernames) →</a></div></div>
         </div>
@@ -1312,7 +1336,7 @@ function invoiceEditor(inv) {
       </div>
 
       <div class="card card-pad">
-        ${soldByField(ed.sold_by, 'id="e-soldby"')}
+        ${isReseller() ? '' : soldByField(ed.sold_by, 'id="e-soldby"')}
         <div class="field"><label for="e-notes">Notes (shown on the invoice)</label><textarea id="e-notes" style="font-family:inherit;min-height:80px" placeholder="e.g. Payment terms, bank details, thank-you note">${esc(ed.notes)}</textarea></div>
         <div class="grid-2">
           <div class="field"><label for="e-status">Payment status</label><select id="e-status">
@@ -1409,7 +1433,7 @@ function invoiceEditor(inv) {
   $('e-due').oninput = (e) => { ed.due_date = e.target.value; };
   $('e-discount').oninput = (e) => { ed.discount = e.target.value; recalc(); };
   $('e-notes').oninput = (e) => { ed.notes = e.target.value; };
-  $('e-soldby').oninput = (e) => { ed.sold_by = e.target.value; };
+  if ($('e-soldby')) $('e-soldby').oninput = (e) => { ed.sold_by = e.target.value; };
   $('e-status').onchange = (e) => { $('e-paid-wrap').hidden = e.target.value !== 'paid'; };
   if (isNew) {
     wireCycleFields($('e-batch-box'));
@@ -1434,7 +1458,7 @@ function invoiceEditor(inv) {
       } : {}),
     };
     try {
-      const r = isNew ? await api('POST', '/api/admin/invoices', body) : await api('PUT', `/api/admin/invoices/${inv.id}`, body);
+      const r = isNew ? await api('POST', `${API()}/invoices`, body) : await api('PUT', `${API()}/invoices/${inv.id}`, body);
       const id = isNew ? r.id : inv.id;
       toast(isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved`);
       go(`#/admin/invoice/${id}`);
@@ -1458,7 +1482,7 @@ function renderInvoiceView(inv, isAdmin) {
     <div class="page-head no-print">
       <a class="btn" href="${back}">← Back</a>
       <div class="row">
-        ${isAdmin ? `${inv.order_id ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
+        ${isAdmin ? `${inv.order_id && !(isOwner() && inv.resellerName) ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
           ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
           ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
         ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-danger" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">⚠ Urgent reminder</button>` : ''}
@@ -1466,15 +1490,16 @@ function renderInvoiceView(inv, isAdmin) {
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
       </div>
     </div>
-    ${isAdmin && (inv.sent_at || inv.sold_by || inv.urgent_sent_at) ? `<p class="muted small no-print" style="margin:0 0 12px">${[inv.sold_by ? `Sold by <strong>${esc(inv.sold_by)}</strong> (only admins see this)` : '', inv.sent_at ? `Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}` : '', inv.urgent_sent_at ? `Urgent reminder sent ${fmtDate(inv.urgent_sent_at)}` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
+    ${isAdmin && (inv.sent_at || inv.sold_by || inv.urgent_sent_at || (isOwner() && inv.resellerName)) ? `<p class="muted small no-print" style="margin:0 0 12px">${[isOwner() && inv.resellerName ? `Reseller client of <strong>${esc(inv.resellerName)}</strong>` : '', inv.sold_by ? `Sold by <strong>${esc(inv.sold_by)}</strong> (only admins see this)` : '', inv.sent_at ? `Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}` : '', inv.urgent_sent_at ? `Urgent reminder sent ${fmtDate(inv.urgent_sent_at)}` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
     <article class="invoice-sheet">
       <header class="inv-top">
-        <img src="logo-full.png" alt="MithMill" class="inv-logo">
+        ${inv.brand ? (inv.brand.logo ? `<img src="${esc(inv.brand.logo)}" alt="${esc(inv.brand.name)}" class="inv-logo">` : `<div class="inv-brand">${esc(inv.brand.name)}</div>`)
+          : '<img src="logo-full.png" alt="MithMill" class="inv-logo">'}
         <div class="inv-title"><div class="inv-word">INVOICE</div><div class="inv-num">#${inv.id}</div>${badge(status)}</div>
       </header>
       <section class="inv-meta">
         <div><div class="inv-label">Billed to</div><strong>${esc(inv.company || inv.name)}</strong>${inv.company && inv.name ? `<div>${esc(inv.name)}</div>` : ''}<div>${esc(inv.email)}</div></div>
-        <div><div class="inv-label">Payable to</div><strong>Mixxbee LLC</strong><div>on behalf of Mithmill</div></div>
+        <div><div class="inv-label">Payable to</div>${inv.brand ? `<strong>${esc(inv.brand.name)}</strong>` : '<strong>Mixxbee LLC</strong><div>on behalf of Mithmill</div>'}</div>
         <div class="inv-dates">
           <div><span class="inv-label">Issue date</span><span>${fmtDate(inv.issue_date || inv.created_at)}</span></div>
           <div><span class="inv-label">Due date</span><span>${fmtDate(inv.due_date)}</span></div>
@@ -1502,7 +1527,8 @@ function renderInvoiceView(inv, isAdmin) {
       ${inv.payLinks && inv.payLinks.length ? `<section class="inv-pay no-print">${inv.payLinks.map((l) => `${l.hint ? `<div class="pay-hint">${esc(l.hint)}</div>` : ''}<a class="btn btn-primary btn-pay" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}
         <div class="muted small">After paying, send us the payment screenshot by replying to the invoice email or in your WhatsApp or Slack group with us.</div></section>` : ''}
       ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${linkify(esc(inv.notes))}</div></section>` : ''}
-      <div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>
+      ${inv.brand ? (inv.paymentNote ? `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment details:</strong><div>${linkify(esc(inv.paymentNote)).replace(/\n/g, '<br>')}</div></div></div>` : '')
+        : `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>`}
     </article>`);
 
   document.getElementById('print').onclick = () => window.print();
@@ -1512,7 +1538,7 @@ function renderInvoiceView(inv, isAdmin) {
       if (!confirm(`Email invoice #${inv.id} (${money(inv.amount)}) to ${inv.email}?\n\nIt includes every line, the total, the due date and your notes (payment details).`)) return;
       send.disabled = true;
       try {
-        const r = await api('POST', `/api/admin/invoices/${inv.id}/send`);
+        const r = await api('POST', `${API()}/invoices/${inv.id}/send`);
         toast(`Invoice #${inv.id} sent to ${r.to}`);
         route();
       } catch (ex) { toast(ex.message); send.disabled = false; }
@@ -1527,7 +1553,7 @@ function renderInvoiceView(inv, isAdmin) {
       if (!(hours >= 1 && hours <= 72)) return toast('Enter a number of hours between 1 and 72');
       urgentBtn.disabled = true;
       try {
-        const r = await api('POST', `/api/admin/invoices/${inv.id}/send`, { urgent: true, hours });
+        const r = await api('POST', `${API()}/invoices/${inv.id}/send`, { urgent: true, hours });
         toast(`Urgent reminder sent to ${r.to}`);
         route();
       } catch (ex) { toast(ex.message); urgentBtn.disabled = false; }
@@ -1540,7 +1566,7 @@ function renderInvoiceView(inv, isAdmin) {
       const box = document.getElementById('to-batch');
       mk.disabled = true;
       try {
-        const r = await api('POST', `/api/admin/invoices/${inv.id}/batches`, {
+        const r = await api('POST', `${API()}/invoices/${inv.id}/batches`, {
           billing_cycle: box.querySelector('[name=billing_cycle]').value, custom_months: box.querySelector('[name=custom_months]').value,
         });
         toast(`Added ${r.batchIds.length} active batch${r.batchIds.length === 1 ? '' : 'es'} to the client's dashboard`);
@@ -1609,8 +1635,8 @@ function renderTeam(team) {
     </div>`);
 
   onSubmit(document.getElementById('team-form'), async (d) => {
-    const r = await api('POST', '/api/admin/team', d);
-    renderTeam(await api('GET', '/api/admin/team'));
+    const r = await api('POST', `${API()}/team`, d);
+    renderTeam(await api('GET', `${API()}/team`));
     document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="flex:1;min-width:0">
       <strong>Team invite for ${esc(d.email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
       <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}"></div></div></div>`;
@@ -1618,12 +1644,12 @@ function renderTeam(team) {
   document.querySelectorAll('[data-remove-member]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm(`Remove ${b.dataset.email} from the team? They lose access to the admin panel immediately.`)) return;
-      try { await api('DELETE', `/api/admin/team/${b.dataset.removeMember}`); toast('Team member removed'); route(); } catch (ex) { toast(ex.message); }
+      try { await api('DELETE', `${API()}/team/${b.dataset.removeMember}`); toast('Team member removed'); route(); } catch (ex) { toast(ex.message); }
     };
   });
   document.querySelectorAll('[data-revoke-team]').forEach((b) => {
     b.onclick = async () => {
-      try { await api('DELETE', `/api/admin/invites/${b.dataset.revokeTeam}`); toast('Invite revoked'); route(); } catch (ex) { toast(ex.message); }
+      try { await api('DELETE', `${API()}/invites/${b.dataset.revokeTeam}`); toast('Invite revoked'); route(); } catch (ex) { toast(ex.message); }
     };
   });
 }
@@ -1692,11 +1718,11 @@ function adminSettings() {
 
   document.getElementById('test-email').onclick = async (e) => {
     e.target.disabled = true;
-    try { const r = await api('POST', '/api/admin/test-email', {}); toast(`Test email sent to ${r.to}`); } catch (ex) { toast(ex.message); }
+    try { const r = await api('POST', `${API()}/test-email`, {}); toast(`Test email sent to ${r.to}`); } catch (ex) { toast(ex.message); }
     e.target.disabled = false;
   };
   onSubmit(document.getElementById('settings'), async (d) => {
-    await api('PUT', '/api/admin/settings', d);
+    await api('PUT', `${API()}/settings`, d);
     toast('Settings saved');
   });
   onSubmit(document.getElementById('prices'), async () => {
@@ -1707,7 +1733,7 @@ function adminSettings() {
       price_per_mailbox: tr.querySelector('[data-f=price_per_mailbox]').value,
       active: tr.querySelector('[data-f=active]').checked,
     }));
-    await api('PUT', '/api/admin/pricing', { prices });
+    await api('PUT', `${API()}/pricing`, { prices });
     toast('Mailbox types saved');
     reloadAdmin();
   });
@@ -1716,7 +1742,7 @@ function adminSettings() {
     const price = document.getElementById('nt-price').value;
     if (!label || price === '') { toast('Enter a name and a price for the new type'); return; }
     try {
-      await api('POST', '/api/admin/pricing/types', { label, price_per_mailbox: price, description: document.getElementById('nt-desc').value });
+      await api('POST', `${API()}/pricing/types`, { label, price_per_mailbox: price, description: document.getElementById('nt-desc').value });
       toast(`${label} added`);
       reloadAdmin();
     } catch (ex) { toast(ex.message); }
@@ -1725,13 +1751,13 @@ function adminSettings() {
     b.onclick = async () => {
       const name = b.closest('tr').querySelector('[data-f=label]').value;
       if (!confirm(`Delete the mailbox type "${name}"? This only works if no batch or invoice uses it.`)) return;
-      try { await api('DELETE', `/api/admin/pricing/types/${encodeURIComponent(b.dataset.delType)}`); toast(`${name} deleted`); reloadAdmin(); } catch (ex) { toast(ex.message); }
+      try { await api('DELETE', `${API()}/pricing/types/${encodeURIComponent(b.dataset.delType)}`); toast(`${name} deleted`); reloadAdmin(); } catch (ex) { toast(ex.message); }
     };
   });
   document.getElementById('run').onclick = async (e) => {
     e.target.disabled = true;
     try {
-      const r = await api('POST', '/api/admin/billing/run', {});
+      const r = await api('POST', `${API()}/billing/run`, {});
       document.getElementById('run-out').textContent = `Checked ${r.checked} active batches, sent ${r.remindersSent} reminders.`;
     } catch (ex) { toast(ex.message); } finally { e.target.disabled = false; }
   };
@@ -1945,4 +1971,274 @@ function renderAnalytics(data) {
     clearTimeout(t);
     t = setTimeout(() => { if (location.hash.startsWith('#/admin/analytics')) draw(); else window.onresize = null; }, 150);
   };
+}
+
+// ------------------------------------------------------------------ reseller portal
+
+// A reseller's clients: added here, never invited (they don't log in), and
+// billed by email.
+function resellerClients() {
+  const { clients, whiteLabel } = state.admin;
+  shell(ADMIN_TABS, '#/admin/clients', `
+    <div class="page-head"><div><h1>Clients</h1><p class="muted">Your clients get their invoices and renewal reminders by email${whiteLabel ? ', under your brand' : ''}. They don't log in to the portal.</p></div></div>
+    <div class="stack">
+      <form class="card card-pad" id="add-client-form">
+        <h2 style="margin-bottom:14px">Add a client</h2>
+        <div class="grid-2">
+          <div class="field"><label for="rc-email">Email</label><input id="rc-email" name="email" type="email" required></div>
+          <div class="field"><label for="rc-name">Name</label><input id="rc-name" name="name"></div>
+        </div>
+        <div class="field"><label for="rc-company">Company</label><input id="rc-company" name="company"></div>
+        <div class="row"><button class="btn btn-primary" type="submit">Add client</button><span class="muted small">Then add their batches and billing.</span></div>
+        <div class="error"></div>
+      </form>
+      <div class="card">
+        <div class="card-head"><h2>Your clients</h2><span class="muted small">${clients.length} total</span></div>
+        ${clients.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Client</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
+          <tbody>${clients.map((c) => `<tr>
+            <td>${esc(c.company || c.name || c.email)}<div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}${esc(c.email)}</div></td>
+            <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
+            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button><button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button></div></td>
+          </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet. Add your first one above.</div>'}
+      </div>
+    </div>`);
+
+  onSubmit(document.getElementById('add-client-form'), async (d) => {
+    const r = await api('POST', `${API()}/clients`, d);
+    toast(`${d.email} added. Now add their batches.`);
+    state.admin = await api('GET', `${API()}/overview`);
+    resellerClients();
+    openBatchDialog(r.id);
+  });
+  document.querySelectorAll('[data-batch]').forEach((b) => { b.onclick = () => openBatchDialog(Number(b.dataset.batch)); });
+  document.querySelectorAll('[data-edit]').forEach((b) => {
+    b.onclick = () => openClientDialog(clients.find((c) => c.id === Number(b.dataset.edit)));
+  });
+  document.querySelectorAll('[data-delete-client]').forEach((b) => {
+    b.onclick = async () => {
+      const c = clients.find((x) => x.id === Number(b.dataset.deleteClient));
+      const typed = prompt(`Delete ${c.company || c.name || c.email} permanently?\n\nThis deletes the client with all their batches and invoices. ` +
+        `It can't be undone.\n\nType the client's email to confirm:\n${c.email}`);
+      if (typed === null) return;
+      if (typed.trim().toLowerCase() !== c.email) return toast('The email didn\'t match. Nothing was deleted.');
+      try {
+        await api('DELETE', `${API()}/clients/${c.id}`);
+        toast(`${c.email} deleted`);
+        reloadAdmin();
+      } catch (ex) { toast(ex.message); }
+    };
+  });
+}
+
+function resellerSettings(st) {
+  shell(ADMIN_TABS, '#/admin/settings', `
+    <div class="page-head"><div><h1>Settings</h1><p class="muted">How your clients' emails and invoices look.</p></div></div>
+    <div class="stack">
+      <div class="card card-pad">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div><h2>White-label</h2><div class="muted small" style="margin-top:4px">${st.white_label
+            ? 'On: your clients\' invoices and reminder emails carry your brand, sender name and payment details.'
+            : 'Off: your clients\' emails and invoices are sent under the MithMill brand. Contact MithMill to turn on white-label.'}</div></div>
+          <span class="badge ${st.white_label ? 'b-active' : 'b-pending'}">${st.white_label ? 'On' : 'Off'}</span>
+        </div>
+        ${st.white_label ? `<div class="brand-preview">
+          ${st.logo ? `<img src="${esc(st.logo)}" alt="">` : ''}<div><strong>${esc(st.brand_name)}</strong>${st.website ? `<div class="muted small">${esc(st.website)}</div>` : ''}
+          <div class="muted small">Brand name, logo${st.sender_email ? ' and sending address' : ''} are set up by MithMill.</div></div></div>` : ''}
+      </div>
+      ${st.white_label ? `<form class="card card-pad" id="rs-form">
+        <h2 style="margin-bottom:14px">Your clients' emails</h2>
+        <div class="grid-2">
+          <div class="field"><label>Sender name</label><input name="sender_name" value="${esc(st.sender_name)}" placeholder="${esc(st.brand_name)}"><div class="hint">Shown as who the email is from.</div></div>
+          <div class="field"><label>Reply-to email</label><input name="reply_to" type="email" value="${esc(st.reply_to)}" placeholder="billing@yourcompany.com"><div class="hint">Where your clients' replies (and payment screenshots) go.</div></div>
+        </div>
+        ${st.sender_email ? `<p class="muted small" style="margin:-4px 0 14px">Emails are sent from <strong>${esc(st.sender_email)}</strong>.</p>` : ''}
+        <div class="field"><label>Support email (in the email footer)</label><input name="support_email" type="email" value="${esc(st.support_email)}"></div>
+        <div class="field"><label>Payment details</label><textarea name="payment_note" style="min-height:110px" placeholder="e.g. bank details, or a payment link such as https://buy.stripe.com/...">${esc(st.payment_note)}</textarea>
+          <div class="hint">Shown on every invoice and reminder email. Per-invoice payment links go in the invoice's notes, where they become Pay buttons.</div></div>
+        <button class="btn btn-primary" type="submit">Save</button>
+        <div class="error"></div>
+      </form>` : ''}
+    </div>`);
+  const f = document.getElementById('rs-form');
+  if (f) onSubmit(f, async (d) => { await api('PUT', '/api/reseller/settings', d); toast('Settings saved'); route(); });
+}
+
+// ------------------------------------------------------------------ resellers (owner)
+
+function renderResellers({ resellers, mailEnabled }) {
+  shell(ADMIN_TABS, '#/admin/resellers', `
+    <div class="page-head"><div><h1>Resellers</h1><p class="muted">Partners who manage their own clients' billing. Only you see this page.</p></div></div>
+    <div class="stack">
+      <form class="card card-pad" id="rs-invite">
+        <h2 style="margin-bottom:14px">Invite a reseller</h2>
+        <div class="grid-2">
+          <div class="field"><label>Email</label><input name="email" type="email" required></div>
+          <div class="field"><label>Name</label><input name="name"></div>
+        </div>
+        <div class="field"><label>Company (their brand name)</label><input name="company"></div>
+        <div class="row"><button class="btn btn-primary" type="submit">Invite reseller</button><span class="muted small">${mailEnabled ? 'They get an email to set their password; you also get the link.' : 'Email isn\'t set up: copy the link and send it yourself.'}</span></div>
+        <div class="error"></div>
+        <div id="rs-link"></div>
+      </form>
+      <div class="card">
+        <div class="card-head"><h2>Resellers</h2><span class="muted small">${resellers.length} total</span></div>
+        ${resellers.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Reseller</th><th>Access</th><th>White-label</th><th class="num">Clients</th><th class="num">Mailboxes</th><th class="num">Monthly</th><th class="num">Unpaid</th><th></th></tr></thead>
+          <tbody>${resellers.map((r) => `<tr>
+            <td><a href="#/admin/resellers/${r.id}"><strong>${esc(r.brand_name || r.company || r.email)}</strong></a><div class="muted small">${esc(r.name ? `${r.name} · ` : '')}${esc(r.email)}</div></td>
+            <td>${!r.active ? '<span class="badge b-cancelled">Turned off</span>' : r.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-in_progress">Invited</span>'}</td>
+            <td><label class="switch"><input type="checkbox" data-wl="${r.id}" ${r.white_label ? 'checked' : ''}><span></span></label></td>
+            <td class="num">${r.clients}</td><td class="num">${r.mailboxes}</td><td class="num">${money(r.monthly)}</td><td class="num">${money(r.unpaid)}</td>
+            <td><a class="btn btn-sm" href="#/admin/resellers/${r.id}">Open</a></td>
+          </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No resellers yet.</div>'}
+      </div>
+    </div>`);
+  onSubmit(document.getElementById('rs-invite'), async (d) => {
+    const r = await api('POST', '/api/admin/resellers', d);
+    toast(`${d.email} invited`);
+    location.hash = `#/admin/resellers/${r.id}`;
+    setTimeout(() => showResellerLink(r, d.email), 600);
+  });
+  document.querySelectorAll('[data-wl]').forEach((cb) => {
+    cb.onchange = async () => {
+      try {
+        await api('PUT', `/api/admin/resellers/${cb.dataset.wl}`, { white_label: cb.checked });
+        toast(`White-label ${cb.checked ? 'on' : 'off'}`);
+      } catch (ex) { toast(ex.message); cb.checked = !cb.checked; }
+    };
+  });
+}
+
+function showResellerLink(r, email) {
+  const box = document.getElementById('rs-link');
+  if (!box) return;
+  box.innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="min-width:0;flex:1">
+    <strong>${r.reset ? 'Password reset' : 'Invite'} link for ${esc(email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
+    <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}" id="rs-link-val"><button type="button" class="btn btn-sm" id="rs-copy">Copy</button></div></div></div>`;
+  document.getElementById('rs-copy').onclick = async () => {
+    try { await navigator.clipboard.writeText(r.link); toast('Link copied'); } catch { document.getElementById('rs-link-val').select(); }
+  };
+}
+
+function renderResellerDetail({ reseller: r, clients, orders, invoices, today }) {
+  const active = orders.filter((o) => o.status === 'active');
+  const unpaid = invoices.filter((i) => i.status === 'unpaid');
+  shell(ADMIN_TABS, '#/admin/resellers', `
+    <div class="page-head"><div><a class="muted small" href="#/admin/resellers">← Resellers</a><h1>${esc(r.brand_name || r.company || r.email)}</h1>
+      <p class="muted">${esc(r.name ? `${r.name} · ` : '')}${esc(r.email)} · ${!r.active ? 'access turned off' : r.password_set ? 'joined' : 'invited, not joined yet'}</p></div>
+      <div class="row"><button class="btn btn-sm" id="rs-resend">${r.password_set ? 'Password reset link' : 'Resend invite'}</button></div></div>
+    <div class="stack">
+      <div id="rs-link"></div>
+      ${welcome('Their business', [
+        [clients.length, 'Clients'], [active.reduce((n, o) => n + (o.inbox_type === 'other' ? 0 : o.quantity), 0), 'Active mailboxes'],
+        [money(active.reduce((n, o) => n + o.quantity * o.price_per_mailbox, 0)), 'Monthly billing'],
+        [money(unpaid.reduce((n, i) => n + i.amount, 0)), `Unpaid · ${unpaid.length}`],
+      ], 'Reseller')}
+
+      <form class="card card-pad" id="rs-brand">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+          <div><h2>White-label</h2><div class="muted small" style="margin-top:4px">On: their clients' emails and invoices use the branding below. Off: they go out under MithMill's brand.</div></div>
+          <label class="switch switch-lg"><input type="checkbox" name="white_label" ${r.white_label ? 'checked' : ''}><span></span></label>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>Brand name</label><input name="brand_name" required value="${esc(r.brand_name)}"></div>
+          <div class="field"><label>Website</label><input name="website" value="${esc(r.website)}" placeholder="https://"></div>
+        </div>
+        <div class="field"><label>Logo</label>
+          <div class="row" style="align-items:center">
+            <div class="logo-box">${r.has_logo ? `<img src="/brand/${r.id}/logo?v=${r.logo_version}" alt="">` : '<span class="muted small">No logo</span>'}</div>
+            <label class="btn btn-sm">Upload logo<input type="file" id="rs-logo" accept="image/png,image/jpeg,image/gif,image/webp" hidden></label>
+            ${r.has_logo ? '<button type="button" class="btn btn-sm btn-ghost" id="rs-logo-remove">Remove</button>' : ''}
+          </div><div class="hint">PNG or JPG, up to 300 KB. A wide logo on a white or transparent background works best.</div></div>
+        <div class="grid-2">
+          <div class="field"><label>Sender name</label><input name="sender_name" value="${esc(r.sender_name)}" placeholder="${esc(r.brand_name)}"></div>
+          <div class="field"><label>Reply-to email</label><input name="reply_to" type="email" value="${esc(r.reply_to)}"><div class="hint">Where their clients' replies go.</div></div>
+        </div>
+        <div class="field"><label>Support email (email footer)</label><input name="support_email" type="email" value="${esc(r.support_email)}"></div>
+        <div class="field"><label>Payment details</label><textarea name="payment_note" style="min-height:90px" placeholder="Their payment method: bank details, or a payment link">${esc(r.payment_note)}</textarea>
+          <div class="hint">Replaces the Mixxbee LLC notice on their clients' invoices and emails while white-label is on. The reseller can also edit this, the sender name and the reply-to.</div></div>
+        <details class="smtp-box" ${r.smtp_host ? 'open' : ''}><summary><strong>Send from their own email address</strong> <span class="muted small">(optional: their mail server)</span></summary>
+          <p class="muted small">Without this, their clients' emails come from the MithMill mail account under their sender name, with replies going to their reply-to email. With it, emails are sent from their own address. For Google Workspace: smtp.gmail.com, port 465, their email and an app password.</p>
+          <div class="grid-2">
+            <div class="field"><label>SMTP server</label><input name="smtp_host" value="${esc(r.smtp_host)}" placeholder="smtp.gmail.com"></div>
+            <div class="field"><label>Port</label><input name="smtp_port" type="number" value="${esc(r.smtp_port)}"></div>
+          </div>
+          <div class="grid-2">
+            <div class="field"><label>Username</label><input name="smtp_user" value="${esc(r.smtp_user)}" autocomplete="off"></div>
+            <div class="field"><label>Password ${r.has_smtp_pass ? '<span class="muted small">(saved; leave blank to keep)</span>' : ''}</label><input name="smtp_pass" type="password" autocomplete="new-password"></div>
+          </div>
+          <div class="field"><label>Sending email</label><input name="sender_email" type="email" value="${esc(r.sender_email)}" placeholder="Same as the username"></div>
+        </details>
+        <div class="row" style="justify-content:space-between;margin-top:8px">
+          <div class="row"><button class="btn btn-primary" type="submit">Save</button><button type="button" class="btn" id="rs-test">Send me a test email</button></div>
+          <label class="check"><input type="checkbox" name="active" ${r.active ? 'checked' : ''}> Reseller can log in</label>
+        </div>
+        <div class="error"></div>
+      </form>
+
+      <div class="card">
+        <div class="card-head"><div><h2>Their clients</h2><div class="muted small">The reseller doesn't see that you can see these.</div></div><span class="muted small">${clients.length}</span></div>
+        ${clients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th class="num">Batches</th><th>Added</th></tr></thead><tbody>
+          ${clients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}<a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div></td>
+            <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td class="num">${c.batch_count}</td><td>${fmtDate(c.created_at)}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Their batches</h2><span class="muted small">${active.length} active</span></div>
+        ${orders.length ? `<div class="table-wrap"><table><thead><tr><th>Batch</th><th>Client</th><th class="num">Mailboxes</th><th class="num">Price</th><th>Renews</th><th>Status</th></tr></thead><tbody>
+          ${orders.map((o) => `<tr><td>${esc(batchTitle(o))}<div class="muted small">${esc(o.inbox_label)}${o.domains ? ` · ${esc(o.domains.split('\n').filter(Boolean).length)} domain(s)` : ''}</div></td>
+            <td>${esc(o.company || o.name || o.email)}<div class="muted small">${esc(o.email)}</div></td>
+            <td class="num">${o.quantity}</td><td class="num">${money(o.price_per_mailbox)}<div class="muted small">${cycleName(cycleOf(o))}</div></td>
+            <td>${o.status === 'active' && o.next_billing_date ? fmtDate(o.next_billing_date) : '—'}</td><td>${badge(o.status)}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="empty">No batches yet.</div>'}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Their invoices</h2><span class="muted small">${unpaid.length} unpaid</span></div>
+        ${invoices.length ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>Client</th><th>Description</th><th>Due</th><th>Status</th><th class="num">Amount</th></tr></thead><tbody>
+          ${invoices.map((i) => {
+            const st = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
+            return `<tr><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}<div class="muted small">${esc(i.email)}</div></td>
+              <td>${esc(i.description)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(st)}</td><td class="num">${money(i.amount)}</td></tr>`;
+          }).join('')}
+        </tbody></table></div>` : '<div class="empty">No invoices yet.</div>'}
+      </div>
+    </div>`);
+
+  const f = document.getElementById('rs-brand');
+  onSubmit(f, async (d) => {
+    await api('PUT', `/api/admin/resellers/${r.id}`, {
+      ...d, white_label: f.white_label.checked, active: f.active.checked, smtp_port: Number(d.smtp_port) || 465,
+    });
+    toast('Reseller saved');
+    route();
+  });
+  f.white_label.onchange = async () => {
+    try {
+      await api('PUT', `/api/admin/resellers/${r.id}`, { white_label: f.white_label.checked });
+      toast(`White-label ${f.white_label.checked ? 'on' : 'off'}`);
+    } catch (ex) { toast(ex.message); f.white_label.checked = !f.white_label.checked; }
+  };
+  document.getElementById('rs-test').onclick = async (e) => {
+    e.target.disabled = true;
+    try { const t = await api('POST', `/api/admin/resellers/${r.id}/test-email`, {}); toast(`Test email sent to ${t.to} via ${t.via}`); } catch (ex) { toast(ex.message); }
+    e.target.disabled = false;
+  };
+  document.getElementById('rs-resend').onclick = async () => {
+    try { showResellerLink(await api('POST', `/api/admin/resellers/${r.id}/invite`, {}), r.email); } catch (ex) { toast(ex.message); }
+  };
+  document.getElementById('rs-logo').onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 300 * 1024) return toast('The logo must be 300 KB or smaller');
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try { await api('PUT', `/api/admin/resellers/${r.id}/logo`, { data_url: reader.result }); toast('Logo uploaded'); route(); } catch (ex) { toast(ex.message); }
+    };
+    reader.readAsDataURL(file);
+  };
+  const rm = document.getElementById('rs-logo-remove');
+  if (rm) rm.onclick = async () => { await api('PUT', `/api/admin/resellers/${r.id}/logo`, { data_url: null }); toast('Logo removed'); route(); };
 }

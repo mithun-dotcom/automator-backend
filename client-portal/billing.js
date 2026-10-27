@@ -1,6 +1,7 @@
 const { query } = require('./db');
 const { sendMail } = require('./mailer');
 const { findPayLinks } = require('./payLinks');
+const brands = require('./brands');
 
 const TZ = process.env.BILLING_TZ || 'Asia/Dhaka';
 const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
@@ -65,22 +66,30 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 // emailExtra is added to the email only, not the portal notification.
 // buttons: Pay buttons [{label, url}] for the email; subject, heading and
 // alert ({ title, body } red box) override the email's look.
+// A reseller's client gets the reseller's branding when white-label is on
+// (their name, logo, sender and payment details instead of MithMill's).
 async function notify(user, title, body, { always = false, emailExtra = '', buttons = [], subject, heading, alert } = {}) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
-  const { rows: [u] } = await query('SELECT password_set FROM users WHERE id = $1', [user.id]);
+  const { rows: [u] } = await query('SELECT password_set, reseller_id FROM users WHERE id = $1', [user.id]);
   const joined = !u || u.password_set;
   if (!joined && !always) return;
   const portal = joined && APP_URL;
+  const brand = u && u.reseller_id ? await brands.forClient(user.id) : null;
+  const note = brand ? brand.paymentNote : PAYMENT_NOTE;
+  const name = brand ? brand.name : 'Mithmill';
+  const reseller = u && u.reseller_id ? await brands.resellerOf(user.id) : null;
   await sendMail({
     to: user.email,
     subject: subject || title,
-    text: `Hi ${user.name || 'there'},\n\n${body}${buttons.length ? `\n\n${buttons.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n')}` : ''}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}\n\n${PAYMENT_NOTE}\n\nMithmill`,
+    text: `Hi ${user.name || 'there'},\n\n${body}${buttons.length ? `\n\n${buttons.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n')}` : ''}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}${note ? `\n\n${note}` : ''}\n\n${name}`,
     heading: heading || title,
     alert,
     cta: portal ? { label: 'Open your portal', url: APP_URL } : null,
     buttons,
     after: emailExtra || undefined,
-    note: PAYMENT_NOTE,
+    note: note || undefined,
+    brand,
+    reason: reseller ? `You receive this because you have an active service with ${brand ? brand.name : 'MithMill'}.` : undefined,
   });
 }
 
@@ -174,7 +183,8 @@ async function runBilling() {
       `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
     const paid = invoice && invoice.status === 'paid';
     const user = { id: order.user_id, email: order.email, name: order.name };
-    const buttons = paid || !invoice ? [] : payButtons(invoice);
+    const brand = paid || !invoice ? null : await brands.forClient(order.user_id);
+    const buttons = paid || !invoice ? [] : payButtons(invoice, brand ? brand.paymentNote : '');
     if (paid) {
       body += ' We have already received your payment for this period. Thank you!';
     } else if (threshold === 1) {
@@ -209,9 +219,11 @@ const UPDATE_HINT = 'Your subscription renews automatically on your card. If you
   'didn\'t go through (for example, not enough funds), update your payment method so the renewal can be charged.';
 
 // Buttons for the payment links in an invoice's notes: "Pay now" for a payment
-// link, "Update payment method" for a Stripe subscription link.
-const payButtons = (inv) => {
-  const links = findPayLinks(inv.notes);
+// link, "Update payment method" for a Stripe subscription link. A white-label
+// reseller's own payment details are used when the invoice has no link.
+const payButtons = (inv, fallbackNote = '') => {
+  let links = findPayLinks(inv.notes);
+  if (!links.length && fallbackNote) links = findPayLinks(fallbackNote);
   const pays = links.filter((l) => l.kind === 'pay').length;
   return links.map((l) => (l.kind === 'update'
     ? { url: l.url, kind: 'update', label: 'Update payment method', hint: UPDATE_HINT }

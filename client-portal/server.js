@@ -11,6 +11,7 @@ const billing = require('./billing');
 const onboarding = require('./onboarding');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
+const brands = require('./brands');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -54,6 +55,7 @@ function setSession(res, user) {
 }
 
 const auth = asyncRoute(async (req, res, next) => {
+  if (req.user) return next();
   let uid;
   try {
     uid = jwt.verify(req.cookies.session || '', SESSION_SECRET).uid;
@@ -64,9 +66,16 @@ const auth = asyncRoute(async (req, res, next) => {
     'SELECT id, email, name, company, role FROM users WHERE id = $1', [uid],
   );
   if (!user) throw new HttpError(401, 'Please log in');
+  if (user.role === 'reseller') await assertResellerActive(user.id);
   req.user = user;
   next();
 });
+
+// The owner can turn a reseller's access off; they can't log in or use the portal then.
+async function assertResellerActive(id) {
+  const { rows: [r] } = await query('SELECT active FROM resellers WHERE user_id = $1', [id]);
+  if (!r || !r.active) throw new HttpError(403, 'Your reseller access is turned off. Please contact MithMill.');
+}
 
 // Team members ("staff") use the admin panel; the owner ("admin") also
 // manages the team and settings.
@@ -113,6 +122,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     throw new HttpError(401, 'Wrong email or password');
   }
   loginAttempts.delete(`${email}|${req.ip}`);
+  if (user.role === 'reseller') await assertResellerActive(user.id);
   setSession(res, user);
   res.json({ ok: true, role: user.role });
 }));
@@ -164,7 +174,7 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
      ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set = true,
        name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END
      RETURNING *`,
-    [invite.email, name, invite.company, hash, invite.role === 'staff' ? 'staff' : 'client'],
+    [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client'],
   );
   await query('UPDATE invites SET accepted_at = now() WHERE id = $1', [invite.id]);
   setSession(res, user);
@@ -264,6 +274,7 @@ const ACCESS_METHODS = ['delegate', 'registrar_login', 'client_dns'];
 const SEQUENCERS = ['Instantly', 'Smartlead', 'Lemlist', 'Reply.io', 'Other', 'None'];
 
 app.post('/api/orders', auth, asyncRoute(async (req, res) => {
+  if (req.user.role !== 'client') throw new HttpError(403, 'Only clients place orders here');
   const b = req.body;
   const { rows: [price] } = await query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type = $2`,
     [req.user.id, str(b.inbox_type, 50)]);
@@ -352,6 +363,37 @@ app.post('/api/notifications/read', auth, asyncRoute(async (req, res) => {
 const admin = express.Router();
 admin.use(auth, adminOnly);
 
+// Clients, batches and invoices are shared by the admin panel and the reseller
+// portal: this router is mounted under both /api/admin and /api/reseller, and
+// every route checks the caller may see the client involved.
+const shared = express.Router();
+shared.use(auth, (req, res, next) => (
+  ['admin', 'staff', 'reseller'].includes(req.user.role) ? next() : next(new HttpError(403, 'Not allowed'))));
+
+// The owner sees every client; team members only Mithmill's own (not
+// resellers'); a reseller only their own.
+function canSee(req, resellerId) {
+  if (req.user.role === 'admin') return true;
+  if (req.user.role === 'reseller') return resellerId === req.user.id;
+  return resellerId == null;
+}
+async function assertClient(req, userId) {
+  const { rows: [c] } = await query("SELECT * FROM users WHERE id = $1 AND role = 'client'", [Number(userId) || 0]);
+  if (!c || !canSee(req, c.reseller_id)) throw new HttpError(404, 'Client not found');
+  return c;
+}
+async function assertOrder(req, id) {
+  const { rows: [o] } = await query('SELECT u.reseller_id FROM orders o JOIN users u ON u.id = o.user_id WHERE o.id = $1', [Number(id) || 0]);
+  if (!o || !canSee(req, o.reseller_id)) throw new HttpError(404, 'Batch not found');
+}
+async function assertInvoice(req, id) {
+  const { rows: [i] } = await query('SELECT u.reseller_id FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.id = $1', [Number(id) || 0]);
+  if (!i || !canSee(req, i.reseller_id)) throw new HttpError(404, 'Invoice not found');
+}
+// SQL condition on `users u` for list queries, matching canSee.
+const clientScope = (req) => (req.user.role === 'admin' ? 'true'
+  : req.user.role === 'reseller' ? `u.reseller_id = ${Number(req.user.id)}` : 'u.reseller_id IS NULL');
+
 async function activityRecipients() {
   const st = await getSettings();
   return emailList(st.activity_emails || st.order_notify_emails);
@@ -389,37 +431,46 @@ function audited(action, snap, getId, handler) {
 }
 const byParam = (req) => req.params.id;
 
-admin.get('/overview', asyncRoute(async (req, res) => {
+// Everything the panel lists. The owner also gets resellers' clients (marked
+// with reseller_id; the main pages leave them out and the Resellers page shows them).
+shared.get('/overview', asyncRoute(async (req, res) => {
+  const scope = clientScope(req);
+  const reseller = req.user.role === 'reseller';
   const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
-    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.sold_by, o.user_id, u.email, u.name, u.company,
+    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.sold_by, o.user_id, u.email, u.name, u.company, u.reseller_id,
              f.row_count AS csv_rows, f.filename AS csv_filename
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
            LEFT JOIN order_files f ON f.order_id = o.id
+           WHERE ${scope}
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
-    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set,
+    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set, u.reseller_id,
              EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
              count(o.id)::int AS batch_count,
              (SELECT count(*) FROM invoices i WHERE i.user_id = u.id)::int AS invoice_count
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
-           WHERE u.role = 'client' GROUP BY u.id ORDER BY u.created_at DESC`),
-    query(`SELECT id, email, name, company, expires_at, created_at FROM invites
+           WHERE u.role = 'client' AND ${scope} GROUP BY u.id ORDER BY u.created_at DESC`),
+    reseller ? { rows: [] } : query(`SELECT id, email, name, company, expires_at, created_at FROM invites
            WHERE accepted_at IS NULL AND expires_at > now() AND role = 'client' ORDER BY created_at DESC`),
-    query(`SELECT i.*, u.email, u.company FROM invoices i JOIN users u ON u.id = i.user_id
+    query(`SELECT i.*, u.email, u.company, u.reseller_id FROM invoices i JOIN users u ON u.id = i.user_id
+           WHERE ${scope}
            ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`),
     query("SELECT * FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order"),
-    query('SELECT user_id, inbox_type, price_per_mailbox FROM client_pricing'),
+    reseller ? { rows: [] } : query('SELECT user_id, inbox_type, price_per_mailbox FROM client_pricing'),
   ]);
   res.json({
     orders: orders.rows, clients: clients.rows, invites: invites.rows,
-    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, settings: await getSettings(),
-    sellers: (await query("SELECT COALESCE(NULLIF(name, ''), email) AS name FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows.map((r) => r.name), mailEnabled: mailEnabled(), today: billing.today(),
+    invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, settings: reseller ? {} : await getSettings(),
+    sellers: reseller ? [] : (await query("SELECT COALESCE(NULLIF(name, ''), email) AS name FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows.map((r) => r.name),
+    mailEnabled: mailEnabled(), today: billing.today(),
+    whiteLabel: reseller ? (await query('SELECT white_label FROM resellers WHERE user_id = $1', [req.user.id])).rows[0].white_label : undefined,
   });
 }));
 
-admin.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) => {
+shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) => {
   const id = Number(req.params.id);
+  await assertOrder(req, id);
   const { rows: [order] } = await query(
     `SELECT o.*, p.label, u.email, u.name FROM orders o
      JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id WHERE o.id = $1`, [id],
@@ -548,8 +599,9 @@ admin.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res) 
 
 // Removes a batch entirely (e.g. added by mistake). Its unpaid invoices are
 // voided; paid invoices stay as history.
-admin.delete('/orders/:id', audited('deleted', 'order', byParam, async (req, res) => {
+shared.delete('/orders/:id', audited('deleted', 'order', byParam, async (req, res) => {
   const id = Number(req.params.id);
+  await assertOrder(req, id);
   const { rows: [o] } = await query('SELECT id FROM orders WHERE id = $1', [id]);
   if (!o) throw new HttpError(404, 'Batch not found');
   await query("UPDATE invoices SET status = 'void' WHERE order_id = $1 AND status = 'unpaid'", [id]);
@@ -560,8 +612,10 @@ admin.delete('/orders/:id', audited('deleted', 'order', byParam, async (req, res
 admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.id : null), async (req, res) => {
   const email = str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
-  const { rows: [found] } = await query('SELECT role, name, company, password_set FROM users WHERE email = $1', [email]);
-  if (found && found.role !== 'client') throw new HttpError(400, 'That email belongs to a team member');
+  const { rows: [found] } = await query('SELECT role, name, company, password_set, reseller_id FROM users WHERE email = $1', [email]);
+  if (found && found.role !== 'client') throw new HttpError(400, found.role === 'reseller' ? 'That email belongs to a reseller' : 'That email belongs to a team member');
+  // Resellers' clients don't log in to the portal.
+  if (found && found.reseller_id) throw new HttpError(400, 'That email belongs to a reseller\'s client, who can\'t be invited');
   // A client you added yourself but who never joined gets a normal invite, not a reset.
   const existing = found && found.password_set ? found : null;
   const name = str(req.body.name, 200) || (found && found.name) || '';
@@ -606,33 +660,38 @@ function parseCycle(b) {
 
 // Adds a client without inviting them, so existing batches and billing can be
 // loaded first. They get their password when they accept an invite later.
-admin.post('/clients', audited('added', 'user', (req, body) => (body ? body.id : null), async (req, res) => {
+// A reseller's clients belong to that reseller (reseller_id) and never log in.
+shared.post('/clients', audited('added', 'user', (req, body) => (body ? body.id : null), async (req, res) => {
   const email = str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
-  const { rows: [found] } = await query('SELECT id, role FROM users WHERE email = $1', [email]);
-  if (found) throw new HttpError(400, found.role === 'client' ? 'A client with that email already exists' : 'That email belongs to a team member');
+  const reseller = req.user.role === 'reseller';
+  const { rows: [found] } = await query('SELECT id, role, reseller_id FROM users WHERE email = $1', [email]);
+  if (found) {
+    if (reseller) throw new HttpError(400, found.reseller_id === req.user.id ? 'You already have a client with that email' : 'That email can\'t be used. Use a different one.');
+    throw new HttpError(400, found.role === 'client' ? 'A client with that email already exists' : 'That email belongs to a team member');
+  }
   const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, password_set) VALUES ($1, $2, $3, $4, false) RETURNING id`,
-    [email, str(req.body.name, 200), str(req.body.company, 200), unusable],
+    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id) VALUES ($1, $2, $3, $4, false, $5) RETURNING id`,
+    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null],
   );
   res.status(201).json({ id: user.id });
 }));
 
 // Edits a client's details. Changing the login email is owner-only; the old
 // address is told, and pending invites to it stop working.
-admin.patch('/clients/:id', audited('edited', 'user', byParam, async (req, res) => {
+shared.patch('/clients/:id', audited('edited', 'user', byParam, async (req, res) => {
   const id = Number(req.params.id);
-  const { rows: [client] } = await query("SELECT * FROM users WHERE id = $1 AND role = 'client'", [id]);
-  if (!client) throw new HttpError(404, 'Client not found');
+  const client = await assertClient(req, id);
   const email = req.body.email === undefined ? client.email : str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
   const name = req.body.name === undefined ? client.name : str(req.body.name, 200);
   const company = req.body.company === undefined ? client.company : str(req.body.company, 200);
   const emailChanged = email !== client.email;
   if (emailChanged) {
-    if (req.user.role !== 'admin') throw new HttpError(403, 'Only the account owner can change a client\'s email');
+    if (req.user.role === 'staff') throw new HttpError(403, 'Only the account owner can change a client\'s email');
     const { rows: [taken] } = await query('SELECT role FROM users WHERE email = $1 AND id <> $2', [email, id]);
+    if (taken && req.user.role === 'reseller') throw new HttpError(400, 'That email can\'t be used. Use a different one.');
     if (taken) throw new HttpError(400, taken.role === 'client' ? 'Another client already uses that email' : 'That email belongs to a team member');
   }
   await query('UPDATE users SET email = $1, name = $2, company = $3 WHERE id = $4', [email, name, company, id]);
@@ -662,10 +721,11 @@ admin.patch('/clients/:id', audited('edited', 'user', byParam, async (req, res) 
 
 // Deletes a client and everything of theirs: batches, invoices (paid ones
 // too), notifications, pricing and uploaded CSVs. Owner-only; can't be undone.
-admin.delete('/clients/:id', ownerOnly, audited('deleted', 'user', byParam, async (req, res) => {
+// Owner, or a reseller for their own clients.
+shared.delete('/clients/:id', audited('deleted', 'user', byParam, async (req, res) => {
   const id = Number(req.params.id);
-  const { rows: [client] } = await query("SELECT email FROM users WHERE id = $1 AND role = 'client'", [id]);
-  if (!client) throw new HttpError(404, 'Client not found');
+  if (req.user.role === 'staff') throw new HttpError(403, 'Only the account owner can do this');
+  const client = await assertClient(req, id);
   await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [client.email]);
   await query('DELETE FROM users WHERE id = $1', [id]);
   res.json({ ok: true });
@@ -673,10 +733,10 @@ admin.delete('/clients/:id', ownerOnly, audited('deleted', 'user', byParam, asyn
 
 // Adds a batch on a client's behalf: an existing purchase (with its billing
 // dates) or a new order taken outside the portal.
-admin.post('/orders', audited('added', 'order', (req, body) => (body ? body.id : null), async (req, res) => {
+shared.post('/orders', audited('added', 'order', (req, body) => (body ? body.id : null), async (req, res) => {
   const b = req.body;
-  const { rows: [client] } = await query("SELECT id, email, name, password_set FROM users WHERE id = $1 AND role = 'client'", [Number(b.user_id)]);
-  if (!client) throw new HttpError(400, 'Choose a client');
+  if (!b.user_id) throw new HttpError(400, 'Choose a client');
+  const client = await assertClient(req, b.user_id);
   const { rows: [type] } = await query('SELECT inbox_type, label FROM pricing WHERE inbox_type = $1', [str(b.inbox_type, 50)]);
   if (!type) throw new HttpError(400, 'Choose a mailbox type');
   const quantity = Number(b.quantity);
@@ -739,10 +799,11 @@ admin.delete('/invites/:id', audited('revoked', 'invite', byParam, async (req, r
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Validates the invoice editor's payload. Returns the cleaned header and items.
-async function parseInvoice(body) {
+async function parseInvoice(req) {
+  const body = req.body;
   const userId = Number(body.user_id);
-  const { rows: [user] } = await query("SELECT id, email, name FROM users WHERE id = $1 AND role = 'client'", [userId]);
-  if (!user) throw new HttpError(400, 'Choose a client');
+  if (!userId) throw new HttpError(400, 'Choose a client');
+  const user = await assertClient(req, userId);
 
   const orderId = body.order_id ? Number(body.order_id) : null;
   if (orderId) {
@@ -834,14 +895,23 @@ async function invoiceWithItems(id, userId) {
   // Invoices from before line items existed show as a single line.
   if (!items.length) items.push({ inbox_type: '', batch_name: '', description: inv.description, quantity: 1, unit_price: inv.amount + inv.discount });
   if (userId) delete inv.sold_by; // admin-only
-  return { ...inv, items, pricing, paymentNote: billing.PAYMENT_NOTE, payLinks: inv.status === 'unpaid' ? billing.payButtons(inv) : [] };
+  // A white-label reseller's client sees the reseller's name, logo and payment details.
+  const wl = await brands.forClient(inv.user_id);
+  const reseller = userId ? null : await brands.resellerOf(inv.user_id);
+  return {
+    ...inv, items, pricing, paymentNote: wl ? wl.paymentNote : billing.PAYMENT_NOTE,
+    brand: wl ? { name: wl.name, logo: wl.logoPath } : null,
+    resellerName: reseller ? reseller.name : null,
+    payLinks: inv.status === 'unpaid' ? billing.payButtons(inv, wl ? wl.paymentNote : '') : [],
+  };
 }
 
 app.get('/api/invoices/:id', auth, asyncRoute(async (req, res) => {
   res.json(await invoiceWithItems(Number(req.params.id), req.user.id));
 }));
 
-admin.get('/invoices/:id', asyncRoute(async (req, res) => {
+shared.get('/invoices/:id', asyncRoute(async (req, res) => {
+  await assertInvoice(req, req.params.id);
   res.json(await invoiceWithItems(Number(req.params.id)));
 }));
 
@@ -924,13 +994,14 @@ async function syncRecurringOtherLines(invoiceId) {
   return ids;
 }
 
-admin.post('/invoices/:id/batches', audited('edited', 'invoice', byParam, async (req, res) => {
+shared.post('/invoices/:id/batches', audited('edited', 'invoice', byParam, async (req, res) => {
+  await assertInvoice(req, req.params.id);
   const ids = await createBatchesFromInvoice(Number(req.params.id), parseCycle(req.body));
   res.status(201).json({ batchIds: ids });
 }));
 
-admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.id : null), async (req, res) => {
-  const v = await parseInvoice(req.body);
+shared.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.id : null), async (req, res) => {
+  const v = await parseInvoice(req);
   const cycle = req.body.create_batches === true && !v.orderId ? parseCycle(req.body) : null;
   const id = await inTransaction(async (client) => {
     const { rows: [inv] } = await client.query(
@@ -960,11 +1031,12 @@ admin.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body.
   res.status(201).json({ id, batchIds });
 }));
 
-admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
+shared.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
   const id = Number(req.params.id);
+  await assertInvoice(req, id);
   const { rows: [existing] } = await query('SELECT id FROM invoices WHERE id = $1', [id]);
   if (!existing) throw new HttpError(404, 'Invoice not found');
-  const v = await parseInvoice(req.body);
+  const v = await parseInvoice(req);
   await inTransaction(async (client) => {
     await client.query(
       `UPDATE invoices SET user_id = $1, order_id = $2, description = $3, amount = $4, discount = $5,
@@ -989,15 +1061,18 @@ admin.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res
 // notes (payment details) and a link to it in the portal once they've joined.
 // With { urgent: true, hours } it's a critical alert instead: the mailboxes
 // will be deactivated in that many hours unless the invoice is paid now.
-admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
+shared.post('/invoices/:id/send', asyncRoute(async (req, res) => {
   if (!mailEnabled()) throw new HttpError(503, 'Email is not set up, so the invoice can\'t be sent');
+  await assertInvoice(req, req.params.id);
   const inv = await invoiceWithItems(Number(req.params.id));
   if (inv.status === 'void') throw new HttpError(400, 'This invoice is void');
   const urgent = req.body && req.body.urgent === true;
   if (urgent && inv.status === 'paid') throw new HttpError(400, 'This invoice is already paid');
   const hours = Math.min(72, Math.max(1, Math.round(Number(req.body && req.body.hours) || 3)));
   const hrs = `${hours} hour${hours === 1 ? '' : 's'}`;
-  const { rows: [client] } = await query('SELECT password_set FROM users WHERE id = $1', [inv.user_id]);
+  const { rows: [client] } = await query('SELECT password_set, reseller_id FROM users WHERE id = $1', [inv.user_id]);
+  const brand = await brands.forClient(inv.user_id);
+  const brandName = brand ? brand.name : 'MithMill';
   const { esc, C } = emailTemplate;
   const label = (t) => (inv.pricing.find((p) => p.inbox_type === t) || {}).label || '';
   const qty = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
@@ -1049,14 +1124,14 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
     inv.notes ? `Notes:\n${inv.notes}` : '',
     confirm,
     link ? `View your invoice: ${link}` : '',
-    billing.PAYMENT_NOTE,
-    'Mithmill',
+    inv.paymentNote,
+    brand ? brandName : 'Mithmill',
   ].filter(Boolean).join('\n\n');
 
   const sent = await sendMail({
     to: inv.email,
     subject: urgent ? `URGENT: your mailboxes will be deactivated in ${hrs} (invoice #${inv.id} unpaid)`
-      : paid ? `Invoice #${inv.id} from MithMill (paid)` : `Invoice #${inv.id} from MithMill: ${money(inv.amount)} due ${due}`,
+      : paid ? `Invoice #${inv.id} from ${brandName} (paid)` : `Invoice #${inv.id} from ${brandName}: ${money(inv.amount)} due ${due}`,
     text,
     heading: urgent ? `Critical alert: your mailboxes expire in ${hrs}`
       : paid ? `Invoice #${inv.id} (paid)` : `Invoice #${inv.id}: ${money(inv.amount)} due ${due}`,
@@ -1065,8 +1140,9 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
     after: confirm,
     buttons: inv.payLinks,
     cta: link ? { label: 'View invoice', url: link } : null,
-    note: billing.PAYMENT_NOTE,
-    reason: 'You receive this because MithMill sent you an invoice for your account.',
+    note: inv.paymentNote || undefined,
+    brand,
+    reason: `You receive this because ${brandName} sent you an invoice for your account.`,
   });
   if (!sent) throw new HttpError(502, 'The email could not be sent. Please try again in a moment.');
   const { rows: [upd] } = await query(
@@ -1082,7 +1158,8 @@ admin.post('/invoices/:id/send', asyncRoute(async (req, res) => {
   res.json({ ok: true, to: inv.email, sentAt: upd.sent_at });
 }));
 
-admin.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
+shared.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
+  await assertInvoice(req, req.params.id);
   const status = req.body.status;
   if (!['unpaid', 'paid', 'void'].includes(status)) throw new HttpError(400, 'Bad status');
   const { rows: [inv] } = await query(
@@ -1099,6 +1176,7 @@ admin.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, r
 }));
 
 admin.get('/orders/:id/onboarding.csv', asyncRoute(async (req, res) => {
+  await assertOrder(req, req.params.id);
   const { rows: [f] } = await query('SELECT * FROM order_files WHERE order_id = $1', [Number(req.params.id)]);
   if (!f) throw new HttpError(404, 'No onboarding CSV for this order');
   res.attachment(`order-${f.order_id}-onboarding.csv`).type('text/csv').send(onboarding.decrypt(f.data));
@@ -1199,8 +1277,7 @@ admin.delete('/pricing/types/:type', ownerOnly, audited('edited', 'standardPrici
 
 admin.put('/clients/:id/pricing', audited('edited', 'clientPricing', byParam, async (req, res) => {
   const userId = Number(req.params.id);
-  const { rows: [client] } = await query("SELECT id FROM users WHERE id = $1 AND role = 'client'", [userId]);
-  if (!client) throw new HttpError(404, 'Client not found');
+  await assertClient(req, userId);
   const prices = Array.isArray(req.body.prices) ? req.body.prices : [];
   for (const p of prices) {
     const type = str(p.inbox_type, 50);
@@ -1223,7 +1300,8 @@ admin.put('/clients/:id/pricing', audited('edited', 'clientPricing', byParam, as
 
 // ---- team (owner only)
 
-// Analytics (owner): month-by-month figures for the last 12 months in
+// Analytics (owner) covers Mithmill's own clients; resellers' clients are on
+// the Resellers page. Month-by-month figures for the last 12 months in
 // BILLING_TZ, plus this month to date against the same days of last month.
 // "Active" means activated before the end of that month and not cancelled by then.
 admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
@@ -1238,44 +1316,44 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
                     LEAST((ms + interval '1 month')::date, $1::date + 1) AS cut
                FROM generate_series(date_trunc('month', $1::date) - interval '11 months', date_trunc('month', $1::date), interval '1 month') ms)
            SELECT to_char(m.ms, 'YYYY-MM') AS month,
-             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me) AS payments,
-             (SELECT count(*) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me)::int AS payment_count,
-             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= m.ms AND COALESCE(issue_date, ${local('created_at')}) < m.me) AS invoiced,
-             (SELECT count(*) FROM users WHERE role = 'client' AND ${local('created_at')} >= m.ms AND ${local('created_at')} < m.me)::int AS new_clients,
-             (SELECT count(DISTINCT o.user_id) FROM orders o WHERE ${activeAt('m.cut')})::int AS active_clients,
-             (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM orders o WHERE ${activeAt('m.cut')}) AS mrr,
-             (SELECT COALESCE(SUM(o.quantity), 0) FROM orders o WHERE o.inbox_type <> 'other' AND ${activeAt('m.cut')})::int AS mailboxes,
-             (SELECT count(*) FROM orders o WHERE ${local('o.created_at')} >= m.ms AND ${local('o.created_at')} < m.me)::int AS new_batches,
-             (SELECT count(*) FROM orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= m.ms AND ${local('o.cancelled_at')} < m.me)::int AS cancellations
+             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me) AS payments,
+             (SELECT count(*) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me)::int AS payment_count,
+             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= m.ms AND COALESCE(issue_date, ${local('created_at')}) < m.me) AS invoiced,
+             (SELECT count(*) FROM users WHERE role = 'client' AND reseller_id IS NULL AND ${local('created_at')} >= m.ms AND ${local('created_at')} < m.me)::int AS new_clients,
+             (SELECT count(DISTINCT o.user_id) FROM direct_orders o WHERE ${activeAt('m.cut')})::int AS active_clients,
+             (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM direct_orders o WHERE ${activeAt('m.cut')}) AS mrr,
+             (SELECT COALESCE(SUM(o.quantity), 0) FROM direct_orders o WHERE o.inbox_type <> 'other' AND ${activeAt('m.cut')})::int AS mailboxes,
+             (SELECT count(*) FROM direct_orders o WHERE ${local('o.created_at')} >= m.ms AND ${local('o.created_at')} < m.me)::int AS new_batches,
+             (SELECT count(*) FROM direct_orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= m.ms AND ${local('o.cancelled_at')} < m.me)::int AS cancellations
            FROM m ORDER BY m.ms`, [today, tz]),
     // Last month up to the same day of the month as today (clamped to its length).
     query(`WITH r AS (
              SELECT (date_trunc('month', $1::date) - interval '1 month')::date AS ps, date_trunc('month', $1::date)::date AS ts)
            SELECT
              LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts) AS pe,
-             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS payments,
-             (SELECT count(*) FROM invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS payment_count,
-             (SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= r.ps AND COALESCE(issue_date, ${local('created_at')}) < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS invoiced,
-             (SELECT count(*) FROM users WHERE role = 'client' AND ${local('created_at')} >= r.ps AND ${local('created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_clients,
-             (SELECT count(*) FROM orders o WHERE ${local('o.created_at')} >= r.ps AND ${local('o.created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_batches,
-             (SELECT count(*) FROM orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= r.ps AND ${local('o.cancelled_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS cancellations
+             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS payments,
+             (SELECT count(*) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS payment_count,
+             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= r.ps AND COALESCE(issue_date, ${local('created_at')}) < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS invoiced,
+             (SELECT count(*) FROM users WHERE role = 'client' AND reseller_id IS NULL AND ${local('created_at')} >= r.ps AND ${local('created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_clients,
+             (SELECT count(*) FROM direct_orders o WHERE ${local('o.created_at')} >= r.ps AND ${local('o.created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_batches,
+             (SELECT count(*) FROM direct_orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= r.ps AND ${local('o.cancelled_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS cancellations
            FROM r`, [today, tz]),
     query(`SELECT COALESCE(SUM(amount), 0) AS unpaid, count(*)::int AS unpaid_count,
              COALESCE(SUM(amount) FILTER (WHERE due_date < $1), 0) AS overdue,
              (count(*) FILTER (WHERE due_date < $1))::int AS overdue_count
-           FROM invoices WHERE status = 'unpaid'`, [today]),
+           FROM direct_invoices WHERE status = 'unpaid'`, [today]),
     query(`SELECT p.label, SUM(o.quantity * o.price_per_mailbox) AS mrr, SUM(o.quantity)::int AS quantity
-           FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+           FROM direct_orders o JOIN pricing p ON p.inbox_type = o.inbox_type
            WHERE o.status = 'active' GROUP BY p.label, p.sort_order ORDER BY mrr DESC`),
     query(`SELECT u.id, u.email, u.name, u.company,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)), 0) AS this_month,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
                                              AND ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month
-           FROM invoices i JOIN users u ON u.id = i.user_id
+           FROM direct_invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
            GROUP BY u.id ORDER BY this_month DESC, last_month DESC LIMIT 10`, [today, tz]),
     query(`SELECT i.id, i.amount, i.paid_at, i.description, u.email, u.company
-           FROM invoices i JOIN users u ON u.id = i.user_id
+           FROM direct_invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND i.paid_at IS NOT NULL ORDER BY i.paid_at DESC, i.id DESC LIMIT 10`),
     // Commission view: payments received per seller, this month and last.
     query(`SELECT COALESCE(NULLIF(i.sold_by, ''), NULLIF(o.sold_by, ''), '') AS seller,
@@ -1283,7 +1361,7 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
              (count(*) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)))::int AS this_count,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month,
              (count(*) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)))::int AS last_count
-           FROM invoices i LEFT JOIN orders o ON o.id = i.order_id
+           FROM direct_invoices i LEFT JOIN orders o ON o.id = i.order_id
            WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
            GROUP BY 1 ORDER BY this_month DESC, last_month DESC`, [today, tz]),
   ]);
@@ -1356,6 +1434,243 @@ admin.post('/billing/run', asyncRoute(async (req, res) => {
   res.json(await billing.runBilling());
 }));
 
+// ---- resellers (owner only)
+// A reseller logs in to their own portal and manages their clients' billing.
+// The owner sets their branding and white-label switch here, and sees all
+// their clients, batches and invoices; nothing in the reseller portal shows that.
+
+const RESELLER_STATS = `
+  (SELECT count(*) FROM users c WHERE c.reseller_id = u.id)::int AS clients,
+  (SELECT count(*) FROM orders o JOIN users c ON c.id = o.user_id WHERE c.reseller_id = u.id AND o.status = 'active')::int AS active_batches,
+  (SELECT COALESCE(SUM(o.quantity), 0) FROM orders o JOIN users c ON c.id = o.user_id
+    WHERE c.reseller_id = u.id AND o.status = 'active' AND o.inbox_type <> 'other')::int AS mailboxes,
+  (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM orders o JOIN users c ON c.id = o.user_id
+    WHERE c.reseller_id = u.id AND o.status = 'active') AS monthly,
+  (SELECT COALESCE(SUM(i.amount), 0) FROM invoices i JOIN users c ON c.id = i.user_id
+    WHERE c.reseller_id = u.id AND i.status = 'unpaid') AS unpaid`;
+
+// A reseller's settings without the logo bytes or the SMTP password.
+function resellerOut(r) {
+  const { logo, smtp_pass: pass, ...rest } = r;
+  return { ...rest, has_logo: Boolean(r.logo_type), has_smtp_pass: Boolean(pass) };
+}
+
+async function findReseller(id) {
+  const { rows: [r] } = await query(
+    `SELECT r.*, u.id, u.email, u.name, u.company, u.password_set, u.created_at,
+       EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
+       ${RESELLER_STATS}
+     FROM users u JOIN resellers r ON r.user_id = u.id WHERE u.id = $1 AND u.role = 'reseller'`, [Number(id) || 0]);
+  if (!r) throw new HttpError(404, 'Reseller not found');
+  return r;
+}
+
+async function inviteReseller(req, user) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [user.email]);
+  await query(
+    `INSERT INTO invites (email, name, company, token, expires_at, role)
+     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', 'reseller')`,
+    [user.email, user.name || '', user.company || '', token],
+  );
+  const link = `${baseUrl(req)}/#/invite/${token}`;
+  const reset = Boolean(user.password_set);
+  const emailed = await sendMail({
+    to: user.email,
+    subject: reset ? 'Reset your MithMill reseller portal password' : "You're invited to the MithMill reseller portal",
+    text: reset
+      ? `Hi ${user.name || 'there'},\n\nUse this link to set a new password for the MithMill reseller portal (valid for ${INVITE_DAYS} days):\n\n${link}\n\nMithmill`
+      : `Hi ${user.name || 'there'},\n\nYou've been invited to the MithMill reseller portal, where you can add your clients and manage ` +
+        `their mailboxes, invoices and renewals.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n${link}\n\nMithmill`,
+    heading: reset ? 'Reset your password' : "You're invited to the MithMill reseller portal",
+    cta: { label: reset ? 'Set a new password' : 'Accept invitation', url: link },
+    reason: 'You receive this because MithMill added you as a reseller.',
+  });
+  return { link, emailed, reset };
+}
+
+admin.get('/resellers', ownerOnly, asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `SELECT u.id, u.email, u.name, u.company, u.password_set, u.created_at,
+       r.brand_name, r.white_label, r.active, r.logo_type <> '' AS has_logo, r.logo_version,
+       EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
+       ${RESELLER_STATS}
+     FROM users u JOIN resellers r ON r.user_id = u.id WHERE u.role = 'reseller' ORDER BY u.created_at DESC`);
+  res.json({ resellers: rows, mailEnabled: mailEnabled() });
+}));
+
+admin.get('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const [clients, orders, invoices] = await Promise.all([
+    query(`SELECT u.id, u.email, u.name, u.company, u.created_at,
+             COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
+             COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
+             count(o.id)::int AS batch_count
+           FROM users u LEFT JOIN orders o ON o.user_id = u.id
+           WHERE u.reseller_id = $1 GROUP BY u.id ORDER BY u.created_at DESC`, [r.id]),
+    query(`SELECT ${ORDER_COLUMNS}, o.user_id, u.email, u.company, u.name
+           FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
+           WHERE u.reseller_id = $1 ORDER BY (o.status = 'active') DESC, o.next_billing_date, o.id DESC`, [r.id]),
+    query(`SELECT i.id, i.user_id, i.order_id, i.description, i.amount, i.issue_date, i.due_date, i.status, i.paid_at, i.created_at, u.email, u.company
+           FROM invoices i JOIN users u ON u.id = i.user_id
+           WHERE u.reseller_id = $1 ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`, [r.id]),
+  ]);
+  res.json({ reseller: resellerOut(r), clients: clients.rows, orders: orders.rows, invoices: invoices.rows, today: billing.today() });
+}));
+
+admin.post('/resellers', ownerOnly, asyncRoute(async (req, res) => {
+  const email = str(req.body.email, 200).toLowerCase();
+  if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
+  const { rows: [found] } = await query('SELECT role FROM users WHERE email = $1', [email]);
+  if (found) throw new HttpError(400, `That email is already used by ${found.role === 'reseller' ? 'a reseller' : found.role === 'client' ? 'a client' : 'a team member'}`);
+  const name = str(req.body.name, 200);
+  const company = str(req.body.company, 200);
+  const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+  const user = await inTransaction(async (client) => {
+    const { rows: [u] } = await client.query(
+      `INSERT INTO users (email, name, company, password_hash, password_set, role) VALUES ($1, $2, $3, $4, false, 'reseller') RETURNING *`,
+      [email, name, company, unusable]);
+    await client.query('INSERT INTO resellers (user_id, brand_name) VALUES ($1, $2)', [u.id, company || name]);
+    return u;
+  });
+  const sent = await inviteReseller(req, user);
+  await audit.record(req.user, 'added', `reseller ${company || name || email} <${email}>`, []);
+  res.status(201).json({ id: user.id, ...sent });
+}));
+
+admin.post('/resellers/:id/invite', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  res.json(await inviteReseller(req, r));
+}));
+
+const optEmail = (v, label) => {
+  const e = str(v, 200).toLowerCase();
+  if (e && !isEmail(e)) throw new HttpError(400, `${label} must be a valid email`);
+  return e;
+};
+const optUrl = (v, label) => {
+  const u = str(v, 300);
+  if (u && !/^https?:\/\/\S+$/i.test(u)) throw new HttpError(400, `${label} must be a full link starting with https://`);
+  return u;
+};
+
+admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const b = req.body;
+  const v = {
+    brand_name: b.brand_name === undefined ? r.brand_name : str(b.brand_name, 120),
+    website: b.website === undefined ? r.website : optUrl(b.website, 'Website'),
+    support_email: b.support_email === undefined ? r.support_email : optEmail(b.support_email, 'Support email'),
+    payment_note: b.payment_note === undefined ? r.payment_note : str(b.payment_note, 3000),
+    sender_name: b.sender_name === undefined ? r.sender_name : str(b.sender_name, 120),
+    sender_email: b.sender_email === undefined ? r.sender_email : optEmail(b.sender_email, 'Sending email'),
+    reply_to: b.reply_to === undefined ? r.reply_to : optEmail(b.reply_to, 'Reply-to email'),
+    smtp_host: b.smtp_host === undefined ? r.smtp_host : str(b.smtp_host, 200),
+    smtp_port: b.smtp_port === undefined ? r.smtp_port : Number(b.smtp_port) || 465,
+    smtp_user: b.smtp_user === undefined ? r.smtp_user : str(b.smtp_user, 200),
+    white_label: b.white_label === undefined ? r.white_label : Boolean(b.white_label),
+    active: b.active === undefined ? r.active : Boolean(b.active),
+  };
+  if (!v.brand_name) throw new HttpError(400, 'Give the reseller a brand name');
+  if (v.smtp_port < 1 || v.smtp_port > 65535) throw new HttpError(400, 'SMTP port must be a number like 465 or 587');
+  // A new password replaces the stored one; clearing the server removes it.
+  let pass = r.smtp_pass;
+  if (typeof b.smtp_pass === 'string' && b.smtp_pass) pass = onboarding.encrypt(b.smtp_pass.slice(0, 500));
+  if (!v.smtp_host) { v.smtp_user = ''; pass = null; }
+  await query(
+    `UPDATE resellers SET brand_name = $1, website = $2, support_email = $3, payment_note = $4, sender_name = $5,
+       sender_email = $6, reply_to = $7, smtp_host = $8, smtp_port = $9, smtp_user = $10, smtp_pass = $11,
+       white_label = $12, active = $13 WHERE user_id = $14`,
+    [v.brand_name, v.website, v.support_email, v.payment_note, v.sender_name, v.sender_email, v.reply_to,
+     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id]);
+  const changes = Object.entries(v).filter(([k, val]) => String(val) !== String(r[k]))
+    .map(([k, val]) => ({ field: k.replace(/_/g, ' '), from: String(r[k] ?? ''), to: String(val) }));
+  if (pass !== r.smtp_pass) changes.push({ field: 'smtp password', from: '', to: pass ? '(changed)' : '(removed)' });
+  if (changes.length) await audit.record(req.user, 'edited', `reseller ${r.brand_name || r.email} <${r.email}>`, changes);
+  res.json({ ok: true });
+}));
+
+// Logo for white-label emails and invoices: a PNG/JPEG/GIF/WebP up to 300 KB,
+// sent as a data URL. null removes it.
+admin.put('/resellers/:id/logo', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  if (req.body.data_url === null) {
+    await query("UPDATE resellers SET logo = NULL, logo_type = '', logo_version = logo_version + 1 WHERE user_id = $1", [r.id]);
+    return res.json({ ok: true });
+  }
+  const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(req.body.data_url || ''));
+  if (!m) throw new HttpError(400, 'Upload a PNG, JPG, GIF or WebP image');
+  const data = Buffer.from(m[2], 'base64');
+  if (data.length > 300 * 1024) throw new HttpError(400, 'The logo must be 300 KB or smaller');
+  await query('UPDATE resellers SET logo = $1, logo_type = $2, logo_version = logo_version + 1 WHERE user_id = $3', [data, m[1], r.id]);
+  await audit.record(req.user, 'edited', `reseller ${r.brand_name || r.email} <${r.email}>`, [{ field: 'logo', from: '', to: '(new logo)' }]);
+  res.json({ ok: true });
+}));
+
+// Sends a sample of this reseller's white-label email to the owner (even with
+// white-label off), through their mail server if one is set.
+admin.post('/resellers/:id/test-email', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const brand = await brands.forReseller(r.id);
+  const sent = await sendMail({
+    to: req.user.email,
+    subject: `Test email: how ${brand.name}'s clients see their emails`,
+    text: `Hi there,\n\nThis is how renewal reminders and invoices look for ${brand.name}'s clients when white-label is on.` +
+      `${brand.paymentNote ? `\n\n${brand.paymentNote}` : ''}\n\n${brand.name}`,
+    heading: 'Your batch will renew in 7 days',
+    note: brand.paymentNote || undefined,
+    brand,
+    reason: `Test email for the reseller ${brand.name}, sent from the MithMill admin panel.`,
+  });
+  if (!sent) throw new HttpError(502, 'The email could not be sent. Check the mail server settings.');
+  res.json({ ok: true, to: req.user.email, via: brand.smtp ? 'their mail server' : 'the MithMill mail account' });
+}));
+
+// ---- reseller portal: their own settings
+
+const resellerRouter = express.Router();
+resellerRouter.use(auth, (req, res, next) => (req.user.role === 'reseller' ? next() : next(new HttpError(403, 'Resellers only'))));
+
+resellerRouter.get('/settings', asyncRoute(async (req, res) => {
+  const r = await findReseller(req.user.id);
+  res.json({
+    brand_name: r.brand_name, white_label: r.white_label, logo: r.logo_type ? `/brand/${r.id}/logo?v=${r.logo_version}` : null,
+    website: r.website, support_email: r.support_email, payment_note: r.payment_note, sender_name: r.sender_name,
+    reply_to: r.reply_to, sender_email: r.smtp_host ? (r.sender_email || r.smtp_user) : '', mailEnabled: mailEnabled(),
+  });
+}));
+
+// With white-label on, a reseller sets what their clients' emails say: sender
+// name, reply-to and support emails, and their payment details. Brand name,
+// logo and mail server are set by MithMill.
+resellerRouter.put('/settings', asyncRoute(async (req, res) => {
+  const r = await findReseller(req.user.id);
+  if (!r.white_label) throw new HttpError(403, 'White-label is not turned on for your account. Please contact MithMill.');
+  const b = req.body;
+  const v = {
+    sender_name: str(b.sender_name, 120),
+    reply_to: optEmail(b.reply_to, 'Reply-to email'),
+    support_email: optEmail(b.support_email, 'Support email'),
+    payment_note: str(b.payment_note, 3000),
+  };
+  await query('UPDATE resellers SET sender_name = $1, reply_to = $2, support_email = $3, payment_note = $4 WHERE user_id = $5',
+    [v.sender_name, v.reply_to, v.support_email, v.payment_note, r.id]);
+  const changes = Object.entries(v).filter(([k, val]) => val !== r[k]).map(([k, val]) => ({ field: k.replace(/_/g, ' '), from: r[k] || '', to: val }));
+  if (changes.length) await audit.record(req.user, 'edited', `reseller settings (${r.email})`, changes);
+  res.json({ ok: true });
+}));
+
+app.use('/api/reseller', shared);
+app.use('/api/reseller', resellerRouter);
+
+// Reseller logos, public so email clients can load them.
+app.get('/brand/:id/logo', asyncRoute(async (req, res) => {
+  const { rows: [r] } = await query("SELECT logo, logo_type FROM resellers WHERE user_id = $1 AND logo_type <> ''", [Number(req.params.id) || 0]);
+  if (!r) return res.status(404).end();
+  res.set('Cache-Control', 'public, max-age=86400').type(r.logo_type).send(r.logo);
+}));
+
+app.use('/api/admin', shared);
 app.use('/api/admin', admin);
 
 // External scheduler hook (e.g. cron-job.org hitting this daily). Also wakes a
