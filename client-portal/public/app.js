@@ -1081,6 +1081,67 @@ function openClientDialog(c) {
   });
 }
 
+
+// ---- search + filters for list tables
+// Rows carry data-search (lowercase text) and data-<filter> attributes (one or
+// more space-separated values); rows that don't match are hidden. Choices are
+// remembered for the session, per page.
+
+function filterBar(key, filters) {
+  return `<div class="filter-bar" data-fb="${key}">
+    <input type="search" class="fb-q" placeholder="Search name, email, company…" aria-label="Search">
+    ${filters.map((f) => `<select data-f="${f.name}" aria-label="${esc(f.label)}"><option value="">${esc(f.label)}</option>
+      ${f.options.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`).join('')}
+    <button type="button" class="btn btn-sm btn-ghost fb-clear" hidden>Clear</button>
+    <span class="muted small fb-count"></span>
+  </div>`;
+}
+
+function wireFilterBar(key) {
+  const bar = document.querySelector(`[data-fb="${key}"]`);
+  if (!bar) return;
+  const table = bar.parentElement.querySelector('table');
+  const q = bar.querySelector('.fb-q');
+  const selects = [...bar.querySelectorAll('select[data-f]')];
+  const clear = bar.querySelector('.fb-clear');
+  let saved = {};
+  try { saved = JSON.parse(sessionStorage.getItem(`fb:${key}`) || '{}'); } catch { saved = {}; }
+  q.value = saved.q || '';
+  selects.forEach((sel) => { if ([...sel.options].some((o) => o.value === saved[sel.dataset.f])) sel.value = saved[sel.dataset.f]; });
+  const apply = () => {
+    const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = table ? [...table.querySelectorAll('tbody tr[data-search]')] : [];
+    let shown = 0;
+    let total = 0;
+    rows.forEach((tr) => {
+      const ok = words.every((w) => tr.dataset.search.includes(w))
+        && selects.every((sel) => !sel.value || (tr.getAttribute(`data-${sel.dataset.f}`) || '').split(' ').includes(sel.value));
+      tr.hidden = !ok;
+      // Rows that belong to this one (e.g. the client's pricing editor) follow it.
+      if (!ok) table.querySelectorAll(`tr[data-for="${tr.dataset.id}"]`).forEach((x) => { x.hidden = true; });
+      if (ok) { shown += 1; total += Number(tr.dataset.amount || 0); }
+    });
+    const active = words.length || selects.some((sel) => sel.value);
+    clear.hidden = !active;
+    const sum = rows.some((tr) => tr.dataset.amount !== undefined) ? ` · ${money(total)}` : '';
+    bar.querySelector('.fb-count').textContent = active ? `${shown} of ${rows.length}${sum}` : '';
+    const state = { q: q.value };
+    selects.forEach((sel) => { state[sel.dataset.f] = sel.value; });
+    try { sessionStorage.setItem(`fb:${key}`, JSON.stringify(state)); } catch { /* private mode */ }
+  };
+  q.addEventListener('input', apply);
+  selects.forEach((sel) => sel.addEventListener('change', apply));
+  clear.onclick = () => { q.value = ''; selects.forEach((sel) => { sel.value = ''; }); apply(); q.focus(); };
+  apply();
+}
+
+// "Sold by" choices: team members plus anyone already set on a client.
+function sellerOptions(rows) {
+  const names = new Set([...(state.admin.sellers || []), ...rows.map((r) => r.seller).filter(Boolean)]);
+  return [...[...names].sort().map((n) => [n, n]), ['__none', 'Not set']];
+}
+const searchText = (...parts) => esc(parts.filter((x) => x !== null && x !== undefined).join(' ').toLowerCase());
+
 function adminClients() {
   const { clients, invites, mailEnabled, pricing, clientPricing } = state.admin;
   const labelOf = (t) => (pricing.find((p) => p.inbox_type === t) || {}).label || t;
@@ -1106,18 +1167,24 @@ function adminClients() {
 
       <div class="card">
         <div class="card-head"><h2>Clients</h2><span class="muted small">${clients.length} total</span></div>
+        ${clients.length ? filterBar('clients', [
+          { name: 'seller', label: 'Sold by: anyone', options: sellerOptions(clients) },
+          { name: 'account', label: 'Account: any', options: [['joined', 'Joined'], ['invited', 'Invited'], ['not_invited', 'Not invited']] },
+          { name: 'active', label: 'Mailboxes: any', options: [['yes', 'Has active mailboxes'], ['no', 'No active mailboxes']] },
+        ]) : ''}
         ${clients.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Client</th><th>Account</th><th>Pricing</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
           <tbody>${clients.map((c) => {
             const custom = clientPricing.filter((cp) => cp.user_id === c.id);
-            return `<tr>
+            return `<tr data-id="${c.id}" data-search="${searchText(c.company, c.name, c.email, c.seller)}" data-seller="${esc(c.seller || '__none')}"
+              data-account="${c.password_set ? 'joined' : c.invited ? 'invited' : 'not_invited'}" data-active="${c.active_mailboxes > 0 ? 'yes' : 'no'}">
             <td>${esc(c.company || c.name)}<div class="muted small">${esc(c.name)} · ${esc(c.email)}</div>${c.seller ? `<div class="muted small">Sold by <strong>${esc(c.seller)}</strong></div>` : ''}</td>
             <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
             <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button>${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
           </tr>
-          <tr class="price-row" id="prices-${c.id}" hidden><td colspan="7">
+          <tr class="price-row" id="prices-${c.id}" data-for="${c.id}" hidden><td colspan="7">
             <form class="client-prices" data-id="${c.id}">
               <p class="muted small" style="margin:0 0 12px">Price per mailbox / month for ${esc(c.company || c.name || c.email)}. Leave a field blank to use the standard price. New orders from this client use these prices.</p>
               <div class="grid-4">${pricing.map((p) => {
@@ -1140,6 +1207,7 @@ function adminClients() {
       </div>
     </div>`);
 
+  wireFilterBar('clients');
   const showLink = (r, email) => {
     document.getElementById('inv-link').innerHTML = `
       <div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="min-width:0;flex:1">
@@ -1247,17 +1315,25 @@ async function setInvoiceStatus(id, status, orderId) {
 
 function adminInvoices() {
   const { invoices, today } = state.admin;
+  const week = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10);
   shell(ADMIN_TABS, '#/admin/invoices', `
     <div class="page-head">
       <div><h1>Invoices</h1><p class="muted">Renewal invoices are created automatically 7 days before each renewal. Create and edit any invoice here.</p></div>
       <a class="btn btn-primary" href="#/admin/invoice/new">+ New invoice</a>
     </div>
     <div class="card">
+      ${invoices.length ? filterBar('invoices', [
+        { name: 'status', label: 'Status: any', options: [['unpaid', 'Unpaid (incl. overdue)'], ['overdue', 'Overdue'], ['due7', 'Due in the next 7 days'], ['paid', 'Paid'], ['void', 'Void']] },
+        ...(isReseller() ? [] : [{ name: 'seller', label: 'Sold by: anyone', options: sellerOptions(invoices) }]),
+        { name: 'month', label: 'Issued: any month', options: [...new Set(invoices.map((i) => String(i.issue_date || i.created_at).slice(0, 7)))].sort().reverse().map((m) => [m, monthName(m)]) },
+      ]) : ''}
       ${invoices.length ? `<div class="table-wrap"><table>
         <thead><tr><th>#</th><th>Client</th><th>Description</th><th>Issued</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>${invoices.map((i) => {
           const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
-          return `<tr><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
+          const in7 = i.status === 'unpaid' && i.due_date >= today && i.due_date <= week;
+          return `<tr data-id="${i.id}" data-search="${searchText(`#${i.id}`, i.id, i.company, i.name, i.email, i.description, i.seller)}"
+            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}"><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
           <td><div class="row" style="flex-wrap:nowrap">
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
@@ -1267,6 +1343,7 @@ function adminInvoices() {
         }).join('')}</tbody></table></div>` : '<div class="empty">No invoices yet. <a href="#/admin/invoice/new">Create one</a>.</div>'}
     </div>`);
 
+  wireFilterBar('invoices');
   document.querySelectorAll('[data-inv]').forEach((b) => {
     b.onclick = async () => {
       try { if (await setInvoiceStatus(b.dataset.inv, b.dataset.status, b.dataset.order)) reloadAdmin(); } catch (ex) { toast(ex.message); }
@@ -1994,9 +2071,10 @@ function resellerClients() {
       </form>
       <div class="card">
         <div class="card-head"><h2>Your clients</h2><span class="muted small">${clients.length} total</span></div>
+        ${clients.length ? filterBar('rclients', [{ name: 'active', label: 'Mailboxes: any', options: [['yes', 'Has active mailboxes'], ['no', 'No active mailboxes']] }]) : ''}
         ${clients.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Client</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
-          <tbody>${clients.map((c) => `<tr>
+          <tbody>${clients.map((c) => `<tr data-id="${c.id}" data-search="${searchText(c.company, c.name, c.email)}" data-active="${c.active_mailboxes > 0 ? 'yes' : 'no'}">
             <td>${esc(c.company || c.name || c.email)}<div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}${esc(c.email)}</div></td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
             <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button><button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button></div></td>
@@ -2004,6 +2082,7 @@ function resellerClients() {
       </div>
     </div>`);
 
+  wireFilterBar('rclients');
   onSubmit(document.getElementById('add-client-form'), async (d) => {
     const r = await api('POST', `${API()}/clients`, d);
     toast(`${d.email} added. Now add their batches.`);
