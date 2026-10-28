@@ -1695,6 +1695,7 @@ function renderInvoiceView(inv, isAdmin) {
       ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${linkify(esc(inv.notes))}</div></section>` : ''}
       ${inv.brand ? (inv.paymentNote ? `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment details:</strong><div>${linkify(esc(inv.paymentNote)).replace(/\n/g, '<br>')}</div></div></div>` : '')
         : `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>`}
+      ${inv.brand ? '' : `<div class="inv-powered"><span>Payments powered by</span><img src="mixxbee-logo.png" alt="Mixxbee"></div>`}
     </article>`);
 
   document.getElementById('print').onclick = () => window.print();

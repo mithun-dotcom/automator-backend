@@ -458,3 +458,5 @@ table.activity td { vertical-align: top; }
 .reason > span { display: grid; gap: 2px; }
 .btn-danger-solid { background: var(--red); color: #fff; border-color: var(--red); }
 .btn-danger-solid:hover { background: var(--red-700); }
+.inv-powered { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-soft); font-size: 12px; color: var(--faint); }
+.inv-powered img { height: 34px; width: auto; }

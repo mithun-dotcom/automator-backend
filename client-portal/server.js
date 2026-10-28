@@ -1230,7 +1230,11 @@ shared.post('/invoices/:id/send', asyncRoute(async (req, res) => {
       ${row(paid ? 'Total paid' : 'Total due', money(inv.amount), true)}
     </table>
     <div style="clear:both"></div>
-    ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${emailTemplate.linkify(esc(inv.notes)).replace(/\n/g, '<br>')}</div>` : ''}`;
+    ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${emailTemplate.linkify(esc(inv.notes)).replace(/\n/g, '<br>')}</div>` : ''}
+    ${brand ? '' : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px"><tr>
+      <td style="font-size:12px;color:${C.faint};padding-right:8px;vertical-align:middle">Payments powered by</td>
+      <td style="vertical-align:middle">${APP_URL ? `<img src="${esc(APP_URL)}/mixxbee-logo.png" alt="Mixxbee" width="60" style="display:block;width:60px;height:auto;border:0">` : '<strong>Mixxbee</strong>'}</td>
+    </tr></table>`}`;
 
   const name = inv.name || 'there';
   const intro = urgent
