@@ -167,7 +167,7 @@ async function route() {
       return await renderAdmin(parts[1] || 'orders', parts[2], parts[3]);
     }
     if (parts[0] === 'admin') return go('#/dashboard');
-    return await renderClient(parts[0], parts[1]);
+    return await renderClient(parts[0], parts[1], parts[2]);
   } catch (ex) {
     $app.innerHTML = `<div class="boot">${esc(ex.message)}</div>`;
   }
@@ -318,9 +318,14 @@ function renderPassword() {
 
 const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/order', 'New order'], ['#/billing', 'Billing']];
 
-async function renderClient(page, arg) {
+async function renderClient(page, arg, sub) {
   state.dash = await api('GET', '/api/dashboard');
-  if (page === 'invoice' && arg) return renderInvoiceView(await api('GET', `/api/invoices/${encodeURIComponent(arg)}`), false);
+  if (page === 'invoice' && arg) {
+    renderInvoiceView(await api('GET', `/api/invoices/${encodeURIComponent(arg)}`), false);
+    // "⬇ PDF": open the print dialog, where the client saves it as a PDF.
+    if (sub === 'pdf') { history.replaceState(null, '', `#/invoice/${arg}`); setTimeout(() => window.print(), 300); }
+    return;
+  }
   if (page === 'order') return renderOrder();
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
@@ -509,10 +514,10 @@ function renderBilling() {
       <div class="card">
         <div class="card-head"><h2>Invoices</h2></div>
         ${invoices.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Invoice</th><th>Description</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
+          <thead><tr><th>Invoice</th><th>Description</th><th>Date</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
           <tbody>${invoices.map((i) => {
             const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
-            return `<tr><td><a href="#/invoice/${i.id}">#${i.id}</a></td><td>${esc(i.description)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}${i.paid_at ? `<div class="muted small">${fmtDate(i.paid_at)}</div>` : ''}</td><td class="num">${money(i.amount)}</td><td><a class="btn btn-sm" href="#/invoice/${i.id}">View</a></td></tr>`;
+            return `<tr><td><a href="#/invoice/${i.id}">#${i.id}</a></td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}${i.status === 'unpaid' ? `<div class="muted small">Due ${fmtDate(i.due_date)}</div>` : ''}</td><td>${badge(s)}${i.paid_at ? `<div class="muted small">${fmtDate(i.paid_at)}</div>` : ''}</td><td class="num">${money(i.amount)}</td><td><div class="row" style="flex-wrap:nowrap"><a class="btn btn-sm" href="#/invoice/${i.id}">View</a><a class="btn btn-sm" href="#/invoice/${i.id}/pdf" title="Download as PDF">⬇ PDF</a></div></td></tr>`;
           }).join('')}</tbody>
         </table></div>` : '<div class="empty">No invoices yet.</div>'}
       </div>
@@ -889,6 +894,7 @@ function adminOrders(focusId) {
             <div class="row" style="justify-content:space-between">
               <button class="btn btn-primary" type="submit">Save</button>
               <div class="row">
+                ${o.status === 'active' ? `<button type="button" class="btn" data-history="${o.id}">Add past invoices</button>` : ''}
                 ${o.status !== 'cancelled' ? `<button type="button" class="btn btn-danger" data-cancel-sub="${o.id}">Cancel subscription</button>` : ''}
                 <button type="button" class="btn btn-ghost" data-delete-batch="${o.id}">Delete batch</button>
               </div>
@@ -921,6 +927,20 @@ function adminOrders(focusId) {
       toast(r.invoiceId ? `Order #${form.dataset.id} completed. Invoice #${r.invoiceId} created.` : `Order #${form.dataset.id} saved`);
       reloadAdmin();
     });
+  });
+  document.querySelectorAll('[data-history]').forEach((b) => {
+    b.onclick = async () => {
+      const o = orders.find((x) => String(x.id) === b.dataset.history);
+      const since = prompt(`Add the missing invoices for ${batchTitle(o)}, one per billing period, marked paid, so the client's portal shows their full history.\n\n` +
+        'Since which date did this client start? (YYYY-MM-DD)', String(o.activated_at || o.created_at).slice(0, 10));
+      if (since === null) return;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(since.trim())) return toast('Enter the date as YYYY-MM-DD');
+      try {
+        const r = await api('POST', `${API()}/orders/${o.id}/history`, { from: since.trim() });
+        toast(r.created ? `${r.created} past invoice${r.created === 1 ? '' : 's'} added (marked paid)` : 'Nothing missing: every past period already has an invoice');
+        reloadAdmin();
+      } catch (ex) { toast(ex.message); }
+    };
   });
   document.querySelectorAll('[data-cancel-sub]').forEach((b) => {
     b.onclick = async () => {
@@ -1061,9 +1081,13 @@ function openBatchDialog(userId) {
         <div class="billing-only">${cycleFields(1)}</div>
       </div>
       <div class="note note-info billing-only" style="margin:-4px 0 16px"><span class="note-icon">📅</span><div id="renew-preview"></div></div>
-      <div class="field billing-only"><label>Current billing period</label><select name="current_period">
-        <option value="paid">Record it as paid (already collected)</option><option value="unpaid">Record it as unpaid (still owed)</option><option value="none">Don't create an invoice</option></select>
-        <div class="hint">Creates the invoice for the current period, the one running up to the next renewal. Add older invoices under Invoices if you want the full history.</div></div>
+      <div class="field billing-only"><label>Invoices to create</label><select name="current_period">
+        <option value="all_paid">Every period since the start date, all paid</option>
+        <option value="all_paid_current_unpaid">Every period since the start date, the current one unpaid</option>
+        <option value="paid">Only the current period, paid</option>
+        <option value="unpaid">Only the current period, unpaid</option>
+        <option value="none">Don't create invoices</option></select>
+        <div class="hint" id="history-hint">For a client who's been with you for months: one invoice per billing period, so their full history is in their portal to view and download.</div></div>
       <div class="grid-2">
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
@@ -1088,14 +1112,17 @@ function openBatchDialog(userId) {
     let next = addMonths(start, day, months);
     while (next <= today) next = addMonths(next, day, months);
     const qty = Number(f.quantity.value) || 0; const price = Number(f.price_per_mailbox.value) || 0;
-    dlg.querySelector('#renew-preview').innerHTML = `Renews on day <strong>${day}</strong> ${cycleName(months).toLowerCase()}. Next renewal: <strong>${fmtDate(next)}</strong>${qty && price ? ` · ${money(qty * price * months)} per ${perCycle(months)}` : ''}`;
+    let periods = 0;
+    for (let p = start; p < next && periods < 120; p = addMonths(p, day, months)) periods += 1;
+    dlg.querySelector('#renew-preview').innerHTML = `Renews on day <strong>${day}</strong> ${cycleName(months).toLowerCase()}. Next renewal: <strong>${fmtDate(next)}</strong>${qty && price ? ` · ${money(qty * price * months)} per ${perCycle(months)}` : ''}` +
+      `<div class="muted small">${periods} billing period${periods === 1 ? '' : 's'} since the start date${periods > 1 ? `: from ${fmtDate(start)} to ${fmtDate(addMonths(next, day, -months))}` : ''}.</div>`;
   };
   ['input', 'change'].forEach((ev) => f.addEventListener(ev, preview));
   preview();
   onSubmit(f, async (d) => {
     const r = await api('POST', `${API()}/orders`, d);
     dlg.close();
-    toast(`Batch #${r.id} added${r.invoiceId ? ` with invoice #${r.invoiceId}` : ''}`);
+    toast(`Batch #${r.id} added${r.invoices ? ` with ${r.invoices} invoice${r.invoices === 1 ? '' : 's'}` : ''}`);
     reloadAdmin();
   });
   dlg.showModal();

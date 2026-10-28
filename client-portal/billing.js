@@ -37,6 +37,22 @@ function nextBillingDate(d, billingDay, months = 1) {
   return fmt(ny, nm, Math.min(billingDay, daysInMonth));
 }
 
+// Start dates of a batch's billing periods so far, oldest first: walking back
+// one cycle at a time from the next renewal to the start date (give or take
+// `slackDays`, for activation times stored in UTC).
+function periodsSince(order, startDate, slackDays = 0) {
+  const months = Math.max(1, Number(order.billing_months) || 1);
+  const day = order.billing_day || Number(order.next_billing_date.slice(8));
+  const min = slackDays ? new Date(Date.parse(`${startDate}T00:00:00Z`) - slackDays * 86400000).toISOString().slice(0, 10) : startDate;
+  const out = [];
+  let p = nextBillingDate(order.next_billing_date, day, -months);
+  while (p >= min && out.length < 120) {
+    out.unshift(p);
+    p = nextBillingDate(p, day, -months);
+  }
+  return out;
+}
+
 const cycleMonths = (order) => Math.max(1, Number(order.billing_months) || 1);
 const cycleLabel = (months) => (months === 1 ? 'monthly' : months === 12 ? 'yearly' : `every ${months} months`);
 const periodLabel = (months) => (months === 1 ? '1 month' : months === 12 ? '12 months' : `${months} months`);
@@ -232,7 +248,7 @@ const payButtons = (inv, fallbackNote = '') => {
 };
 
 module.exports = {
-  payButtons, whatLabel,
+  payButtons, whatLabel, periodsSince,
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
   cycleMonths, cycleLabel, cycleAmount,
 };

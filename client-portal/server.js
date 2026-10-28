@@ -203,7 +203,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
            WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [uid]),
     query(`SELECT id, order_id, description, amount, issue_date, due_date, status, paid_at, created_at
-           FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY due_date DESC, id DESC`, [uid]),
+           FROM invoices WHERE user_id = $1 AND status <> 'void' ORDER BY COALESCE(issue_date, created_at::date) DESC, id DESC`, [uid]),
     query(`SELECT id, title, body, read_at, created_at FROM notifications
            WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`, [uid]),
     query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type <> 'other' AND p.active ORDER BY p.sort_order`, [uid]),
@@ -855,27 +855,71 @@ shared.post('/orders', audited('added', 'order', (req, body) => (body ? body.id 
      next, `${start}T00:00:00Z`, months, str(b.sold_by, 100)],
   );
 
-  // Optionally record the current billing period (the one ending at the next renewal).
+  // Invoices for the batch's billing periods so far: just the current one (the
+  // one ending at the next renewal), or every period since the start date, so
+  // a client added months later sees their whole history.
   let invoiceId = null;
-  if (status === 'active' && ['paid', 'unpaid'].includes(b.current_period)) {
-    let periodStart = start;
-    while (billing.nextBillingDate(periodStart, day, months) < next) periodStart = billing.nextBillingDate(periodStart, day, months);
-    const inv = await billing.createOrderInvoice({ ...order, label: type.label }, periodStart,
-      `Batch #${order.id}: ${quantity} × ${type.label} mailboxes (from ${billing.prettyDate(periodStart)})`,
-      `Mailboxes from ${billing.prettyDate(periodStart)}`);
-    if (inv) {
-      invoiceId = inv.id;
-      await query('UPDATE invoices SET issue_date = $1 WHERE id = $2', [periodStart, inv.id]);
-      if (b.current_period === 'paid') {
-        await query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [`${periodStart}T12:00:00Z`, inv.id]);
-      }
-    }
+  let created = [];
+  if (status === 'active' && ['paid', 'unpaid', 'all_paid', 'all_paid_current_unpaid'].includes(b.current_period)) {
+    const all = billing.periodsSince(order, start);
+    const periods = b.current_period.startsWith('all') ? all : all.slice(-1);
+    const currentPaid = ['paid', 'all_paid'].includes(b.current_period);
+    created = await recordPeriods({ ...order, label: type.label }, periods, currentPaid);
+    invoiceId = created.length ? created[created.length - 1] : null;
   }
   if (b.notify === true && client.password_set) {
     await billing.notify(client, `New batch added: ${quantity} ${type.label} mailboxes`,
       `Batch #${order.id} has been added to your account.`);
   }
-  res.status(201).json({ id: order.id, invoiceId });
+  res.status(201).json({ id: order.id, invoiceId, invoices: created.length });
+}));
+
+// Issues one invoice per billing period (skipping periods already invoiced),
+// dated to the period. Past periods are recorded as paid; the latest one is
+// paid or unpaid as asked. Returns the new invoice ids.
+async function recordPeriods(order, periods, latestPaid) {
+  const ids = [];
+  for (const [i, start] of periods.entries()) {
+    const inv = await billing.createOrderInvoice(order, start,
+      `Batch #${order.id}: ${order.quantity} × ${order.label} mailboxes (from ${billing.prettyDate(start)})`,
+      `Mailboxes from ${billing.prettyDate(start)}`);
+    if (!inv) continue;
+    ids.push(inv.id);
+    await query('UPDATE invoices SET issue_date = $1 WHERE id = $2', [start, inv.id]);
+    if (i < periods.length - 1 || latestPaid) {
+      await query("UPDATE invoices SET status = 'paid', paid_at = $1 WHERE id = $2", [`${start}T12:00:00Z`, inv.id]);
+    }
+  }
+  return ids;
+}
+
+// Fills in a batch's missing invoices for past billing periods (as paid), from
+// its start date up to the current period. For clients added after months of
+// service, so their invoice history is complete in their portal.
+shared.post('/orders/:id/history', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  await assertOrder(req, id);
+  const { rows: [order] } = await query(
+    'SELECT o.*, p.label FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type WHERE o.id = $1', [id]);
+  if (order.status !== 'active' || !order.next_billing_date || !order.activated_at) {
+    throw new HttpError(400, 'Only active batches have a billing history to fill in');
+  }
+  const from = str(req.body.from, 10) || new Date(order.activated_at).toISOString().slice(0, 10);
+  if (!DATE_RE.test(from)) throw new HttpError(400, 'Start date must be a date');
+  const periods = billing.periodsSince(order, from, 2);
+  const { rows: have } = await query('SELECT period_start FROM invoices WHERE order_id = $1 AND period_start IS NOT NULL', [id]);
+  const existing = new Set(have.map((r) => r.period_start));
+  const missing = periods.filter((p) => !existing.has(p));
+  // Only past periods: the current one keeps whatever invoice it has (or gets one at renewal time).
+  const past = missing.filter((p) => p !== periods[periods.length - 1]);
+  const created = await recordPeriods(order, past, true);
+  if (from < new Date(order.activated_at).toISOString().slice(0, 10)) {
+    await query('UPDATE orders SET activated_at = $1, created_at = LEAST(created_at, $1) WHERE id = $2', [`${from}T00:00:00Z`, id]);
+  }
+  await audit.record(req.user, 'edited', `batch #${id} (invoice history)`,
+    [{ field: 'Past invoices added', from: '', to: created.length ? `${created.length} (marked paid)` : 'none needed' }],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ created: created.length, periods: periods.length });
 }));
 
 admin.delete('/invites/:id', audited('revoked', 'invite', byParam, async (req, res) => {
