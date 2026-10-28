@@ -438,7 +438,7 @@ shared.get('/overview', asyncRoute(async (req, res) => {
   const scope = clientScope(req);
   const reseller = req.user.role === 'reseller';
   const [orders, clients, invites, invoices, pricing, clientPricing] = await Promise.all([
-    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, u.sold_by AS seller, o.user_id, u.email, u.name, u.company, u.reseller_id,
+    query(`SELECT ${ORDER_COLUMNS}, o.admin_notes, o.from_invoice_id, o.cancel_reason, u.sold_by AS seller, o.user_id, u.email, u.name, u.company, u.reseller_id,
              f.row_count AS csv_rows, f.filename AS csv_filename
            FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = o.user_id
            LEFT JOIN order_files f ON f.order_id = o.id
@@ -596,6 +596,91 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
 
 // Removes a batch entirely (e.g. added by mistake). Its unpaid invoices are
 // voided; paid invoices stay as history.
+// ---- cancelling subscriptions, with a reason and an email to the client
+
+const CANCEL_REASONS = { requested: 'Requested by client', no_payment: 'No payment made', other: 'Other' };
+
+// Cancels the given batches (all of one client): they stop renewing and their
+// upcoming unpaid invoices are voided. The client gets one email worded for
+// the reason: a thank-you when they asked for it, or a note that the payment
+// never came after several follow-ups.
+async function cancelBatches(req, ids, { reason, note, notify, voidInvoiceId }) {
+  if (!CANCEL_REASONS[reason]) throw new HttpError(400, 'Choose a reason for the cancellation');
+  if (reason === 'other' && !note) throw new HttpError(400, 'Write the reason for the cancellation');
+  const orders = [];
+  for (const id of [...new Set(ids.map(Number))]) {
+    await assertOrder(req, id);
+    const { rows: [o] } = await query(
+      `SELECT o.*, p.label, u.email, u.name FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+        JOIN users u ON u.id = o.user_id WHERE o.id = $1`, [id]);
+    if (o.status !== 'cancelled') orders.push(o);
+  }
+  if (!orders.length) throw new HttpError(400, 'Those batches are already cancelled');
+  if (new Set(orders.map((o) => o.user_id)).size > 1) throw new HttpError(400, 'Cancel one client\'s batches at a time');
+  const why = reason === 'other' ? note : CANCEL_REASONS[reason];
+  for (const o of orders) {
+    await query(`UPDATE orders SET status = 'cancelled', next_billing_date = NULL, cancelled_at = now(), cancel_reason = $2 WHERE id = $1`,
+      [o.id, why]);
+    await query(
+      `UPDATE invoices SET status = 'void'
+        WHERE order_id = $1 AND status = 'unpaid' AND period_start IS NOT NULL AND period_start >= $2`, [o.id, billing.today()]);
+    await audit.record(req.user, 'cancelled', `batch #${o.id}${o.batch_name ? ` "${o.batch_name}"` : ''} (${o.email})`,
+      [{ field: 'Reason', from: '', to: why }], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  }
+  if (voidInvoiceId) {
+    await assertInvoice(req, voidInvoiceId);
+    await query("UPDATE invoices SET status = 'void' WHERE id = $1 AND status = 'unpaid'", [Number(voidInvoiceId)]);
+  }
+
+  const first = orders[0];
+  const brand = await brands.forClient(first.user_id);
+  const brandName = brand ? brand.name : 'MithMill';
+  const what = orders.map((o) => `• ${o.batch_name ? `${o.batch_name} (batch #${o.id})` : `Batch #${o.id}`}: ${billing.whatLabel(o)}`).join('\n');
+  const plural = orders.length > 1;
+  let title;
+  let body;
+  if (reason === 'no_payment') {
+    title = 'Your subscription has been cancelled';
+    body = `Your subscription has been cancelled, as we didn't receive the payment after multiple follow-ups:\n\n${what}\n\n` +
+      `${plural ? 'They' : 'It'} won't renew. If you'd still like to keep them, reply to this email and we'll help you reactivate your subscription.`;
+  } else {
+    title = 'Your subscription has been cancelled';
+    body = `${reason === 'requested' ? 'As you requested, your' : 'Your'} subscription has been cancelled:\n\n${what}\n\n` +
+      `${reason === 'other' ? `Reason: ${note}\n\n` : ''}${plural ? 'They' : 'It'} won't renew, and you won't be charged for ${plural ? 'them' : 'it'} again.\n\n` +
+      `Thank you for choosing ${brandName}. We hope to see you again soon, and we'd love to help with your next order whenever you need more mailboxes.`;
+  }
+  if (note && reason !== 'other') body += `\n\n${note}`;
+  let emailed = false;
+  if (notify) {
+    await billing.notify({ id: first.user_id, email: first.email, name: first.name }, title, body,
+      { always: true, paymentNote: false, heading: title });
+    emailed = true;
+  }
+  return { cancelled: orders.map((o) => o.id), emailed, to: first.email };
+}
+
+shared.post('/orders/:id/cancel', asyncRoute(async (req, res) => {
+  res.json(await cancelBatches(req, [req.params.id], {
+    reason: str(req.body.reason, 20), note: str(req.body.note, 2000), notify: req.body.notify !== false,
+  }));
+}));
+
+// From an invoice: its batch and the batches made from its recurring lines.
+shared.post('/invoices/:id/cancel', asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  await assertInvoice(req, id);
+  const { rows: [inv] } = await query('SELECT order_id FROM invoices WHERE id = $1', [id]);
+  const { rows: related } = await query(
+    "SELECT id FROM orders WHERE (id = $1 OR from_invoice_id = $2) AND status <> 'cancelled'", [inv.order_id, id]);
+  const allowed = new Set(related.map((r) => r.id));
+  const ids = (Array.isArray(req.body.order_ids) ? req.body.order_ids.map(Number) : [...allowed]).filter((x) => allowed.has(x));
+  if (!ids.length) throw new HttpError(400, 'This invoice has no active subscription to cancel');
+  res.json(await cancelBatches(req, ids, {
+    reason: str(req.body.reason, 20), note: str(req.body.note, 2000), notify: req.body.notify !== false,
+    voidInvoiceId: req.body.void_invoice === true ? id : null,
+  }));
+}));
+
 shared.delete('/orders/:id', audited('deleted', 'order', byParam, async (req, res) => {
   const id = Number(req.params.id);
   await assertOrder(req, id);

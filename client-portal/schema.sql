@@ -251,3 +251,6 @@ CREATE VIEW direct_invoices AS SELECT i.* FROM invoices i JOIN users u ON u.id =
 -- carried it before; their old values are copied over once at boot.)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE invites ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
+
+-- Why a batch was cancelled: requested (by the client), no_payment, or other (free text).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT '';

@@ -65,17 +65,18 @@ const money = (n) => `$${Number(n).toFixed(2)}`;
 // with { always: true } (renewal reminders), which they get without the portal link.
 // emailExtra is added to the email only, not the portal notification.
 // buttons: Pay buttons [{label, url}] for the email; subject, heading and
-// alert ({ title, body } red box) override the email's look.
+// alert ({ title, body } red box) override the email's look; paymentNote:
+// false leaves out the payment notice (e.g. in a cancellation email).
 // A reseller's client gets the reseller's branding when white-label is on
 // (their name, logo, sender and payment details instead of MithMill's).
-async function notify(user, title, body, { always = false, emailExtra = '', buttons = [], subject, heading, alert } = {}) {
+async function notify(user, title, body, { always = false, emailExtra = '', buttons = [], subject, heading, alert, paymentNote = true } = {}) {
   await query('INSERT INTO notifications (user_id, title, body) VALUES ($1, $2, $3)', [user.id, title, body]);
   const { rows: [u] } = await query('SELECT password_set, reseller_id FROM users WHERE id = $1', [user.id]);
   const joined = !u || u.password_set;
   if (!joined && !always) return;
   const portal = joined && APP_URL;
   const brand = u && u.reseller_id ? await brands.forClient(user.id) : null;
-  const note = brand ? brand.paymentNote : PAYMENT_NOTE;
+  const note = !paymentNote ? '' : brand ? brand.paymentNote : PAYMENT_NOTE;
   const name = brand ? brand.name : 'Mithmill';
   const reseller = u && u.reseller_id ? await brands.resellerOf(user.id) : null;
   await sendMail({
@@ -231,7 +232,7 @@ const payButtons = (inv, fallbackNote = '') => {
 };
 
 module.exports = {
-  payButtons,
+  payButtons, whatLabel,
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
   cycleMonths, cycleLabel, cycleAmount,
 };

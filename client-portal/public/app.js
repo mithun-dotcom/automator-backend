@@ -925,12 +925,7 @@ function adminOrders(focusId) {
   document.querySelectorAll('[data-cancel-sub]').forEach((b) => {
     b.onclick = async () => {
       const o = orders.find((x) => String(x.id) === b.dataset.cancelSub);
-      if (!confirm(`Cancel the subscription for ${batchTitle(o)} (${o.company || o.email})?\n\nIt stops renewing, its unpaid upcoming invoices are voided, and it no longer counts in the client's dashboard. The client is notified.`)) return;
-      try {
-        await api('PATCH', `${API()}/orders/${o.id}`, { status: 'cancelled' });
-        toast(`${batchTitle(o)} cancelled`);
-        reloadAdmin();
-      } catch (ex) { toast(ex.message); }
+      openCancelSubDialog({ orders: [o], url: `${API()}/orders/${o.id}/cancel` });
     };
   });
   document.querySelectorAll('[data-delete-batch]').forEach((b) => {
@@ -965,6 +960,60 @@ function adminOrders(focusId) {
       }
     };
   });
+}
+
+
+// Cancel a subscription (one batch, or an invoice's batches) with a reason.
+// The client gets an email worded for it: a thank-you when they asked, or a
+// note that the payment never came after several follow-ups.
+const CANCEL_REASONS = [
+  ['requested', 'Requested by client', 'Thanks them for choosing us and says we hope to see them again soon.'],
+  ['no_payment', 'No payment made', 'Says the subscription was cancelled because the payment didn\'t arrive after multiple follow-ups.'],
+  ['other', 'Other reason', 'Your reason is included in the email.'],
+];
+function openCancelSubDialog({ orders, url, invoice }) {
+  const who = orders[0].company || orders[0].name || orders[0].email;
+  const unpaidInvoice = invoice && invoice.status === 'unpaid';
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal';
+  dlg.innerHTML = `<form id="cx-form">
+    <div class="modal-head"><h2>Cancel subscription</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
+    <p class="muted small" style="margin:-6px 0 14px">${esc(who)} · ${esc(orders[0].email)}</p>
+    ${orders.length > 1 ? `<div class="field"><label>Batches to cancel</label>${orders.map((o) => `<label class="check"><input type="checkbox" name="order_ids" value="${o.id}" checked> ${esc(batchTitle(o))} · ${o.quantity} × ${esc(o.inbox_label)}</label>`).join('')}</div>`
+      : `<div class="note note-info" style="margin-bottom:14px"><div><strong>${esc(batchTitle(orders[0]))}</strong> · ${orders[0].quantity} × ${esc(orders[0].inbox_label)} · ${money(cycleAmount(orders[0]))} per ${perCycle(cycleOf(orders[0]))}</div></div>`}
+    <div class="field"><label>Reason</label>
+      <div class="reason-list">${CANCEL_REASONS.map(([v, l, h], i) => `<label class="reason"><input type="radio" name="reason" value="${v}" ${i === 0 ? 'checked' : ''}><span><strong>${l}</strong><span class="muted small">${h}</span></span></label>`).join('')}</div></div>
+    <div class="field"><label id="cx-note-label">Note for the client (optional)</label><textarea name="note" style="min-height:70px" placeholder="Added to the email"></textarea></div>
+    ${unpaidInvoice ? `<label class="check" style="margin-bottom:10px"><input type="checkbox" name="void_invoice" ${invoice.due_date < state.admin.today ? 'checked' : ''}> Also void invoice #${invoice.id} (${money(invoice.amount)}, unpaid)</label>` : ''}
+    <label class="check" style="margin-bottom:14px"><input type="checkbox" name="notify" checked> Email the client about the cancellation</label>
+    <p class="muted small" style="margin:0 0 14px">The subscription stops renewing, its upcoming unpaid invoices are voided, and it no longer counts on the client's dashboard.</p>
+    <div class="error"></div>
+    <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Keep subscription</button><button class="btn btn-danger-solid" type="submit">Cancel subscription</button></div>
+  </form>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(); });
+  const f = dlg.querySelector('form');
+  const sync = () => {
+    const other = f.reason.value === 'other';
+    dlg.querySelector('#cx-note-label').textContent = other ? 'Reason (shown to the client)' : 'Note for the client (optional)';
+    f.note.required = other;
+    if (f.void_invoice && f.reason.value === 'no_payment') f.void_invoice.checked = true;
+  };
+  f.addEventListener('change', (e) => { if (e.target.name === 'reason') sync(); });
+  sync();
+  onSubmit(f, async () => {
+    const ids = [...f.querySelectorAll('input[name=order_ids]:checked')].map((x) => Number(x.value));
+    if (orders.length > 1 && !ids.length) throw new Error('Choose at least one batch');
+    const r = await api('POST', url, {
+      reason: f.reason.value, note: f.note.value, notify: f.notify.checked,
+      ...(orders.length > 1 ? { order_ids: ids } : {}), ...(f.void_invoice ? { void_invoice: f.void_invoice.checked } : {}),
+    });
+    dlg.close();
+    toast(`Subscription cancelled${r.emailed ? ` · email sent to ${r.to}` : ''}`);
+    reloadAdmin();
+  });
+  dlg.showModal();
 }
 
 // Add a batch on a client's behalf: an existing purchase with its billing
@@ -1339,11 +1388,18 @@ function adminInvoices() {
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
             ${i.status !== 'paid' ? `<button class="btn btn-sm" data-inv="${i.id}" data-status="paid">Mark paid</button>` : `<button class="btn btn-sm" data-inv="${i.id}" data-status="unpaid">Mark unpaid</button>`}
             ${i.status !== 'void' ? `<button class="btn btn-sm btn-ghost" data-inv="${i.id}" data-status="void" data-order="${i.order_id || ''}">Void</button>` : ''}
+            ${subOrders(i).length ? `<button class="btn btn-sm btn-danger" data-cancel-inv="${i.id}">Cancel sub</button>` : ''}
           </div></td></tr>`;
         }).join('')}</tbody></table></div>` : '<div class="empty">No invoices yet. <a href="#/admin/invoice/new">Create one</a>.</div>'}
     </div>`);
 
   wireFilterBar('invoices');
+  document.querySelectorAll('[data-cancel-inv]').forEach((b) => {
+    b.onclick = () => {
+      const inv = invoices.find((i) => String(i.id) === b.dataset.cancelInv);
+      openCancelSubDialog({ orders: subOrders(inv), url: `${API()}/invoices/${inv.id}/cancel`, invoice: inv });
+    };
+  });
   document.querySelectorAll('[data-inv]').forEach((b) => {
     b.onclick = async () => {
       try { if (await setInvoiceStatus(b.dataset.inv, b.dataset.status, b.dataset.order)) reloadAdmin(); } catch (ex) { toast(ex.message); }
@@ -1548,6 +1604,11 @@ function invoiceEditor(inv) {
 
 // ---- invoice page (admin + client), printable
 
+// The active subscriptions an invoice belongs to: its batch, plus batches
+// made from its recurring lines.
+const subOrders = (inv) => ((state.admin && state.admin.orders) || [])
+  .filter((o) => o.status !== 'cancelled' && (o.id === inv.order_id || o.from_invoice_id === inv.id));
+
 function renderInvoiceView(inv, isAdmin) {
   const today = isAdmin ? state.admin.today : state.dash.today;
   const status = inv.status === 'unpaid' && inv.due_date < today ? 'overdue' : inv.status;
@@ -1564,6 +1625,7 @@ function renderInvoiceView(inv, isAdmin) {
           ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
         ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-danger" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">⚠ Urgent reminder</button>` : ''}
         ${isAdmin && inv.status !== 'void' ? `<button class="btn" id="send-inv" title="${inv.sent_at ? `Last sent ${esc(fmtDate(inv.sent_at))}` : 'Not sent yet'}">${inv.sent_at ? 'Send again' : 'Send invoice'}</button>` : ''}
+        ${isAdmin && subOrders(inv).length ? '<button class="btn btn-danger" id="cancel-sub">Cancel subscription</button>' : ''}
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
       </div>
     </div>
@@ -1609,6 +1671,8 @@ function renderInvoiceView(inv, isAdmin) {
     </article>`);
 
   document.getElementById('print').onclick = () => window.print();
+  const cx = document.getElementById('cancel-sub');
+  if (cx) cx.onclick = () => openCancelSubDialog({ orders: subOrders(inv), url: `${API()}/invoices/${inv.id}/cancel`, invoice: inv });
   const send = document.getElementById('send-inv');
   if (send) {
     send.onclick = async () => {
