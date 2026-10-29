@@ -1602,10 +1602,13 @@ function invoiceEditor(inv) {
           <div class="hint" style="margin:4px 0 10px 24px">Use this when the invoice is for mailboxes the client doesn't have as a batch yet. They renew from the issue date. Untick for one-off charges, or link an existing batch above instead.</div>
           <div style="margin-left:24px;max-width:420px">${cycleFields(1)}</div>
         </div>` : ''}
-        <label class="check"><input type="checkbox" id="e-notify" ${isNew ? 'checked' : ''}> ${isNew ? 'Notify the client (portal notification and email)' : 'Notify the client about this change'}</label>
       </div>
 
-      <div class="row" style="justify-content:flex-end"><button class="btn btn-primary" type="submit">${isNew ? 'Create invoice' : 'Save changes'}</button></div>
+      <div class="row" style="justify-content:flex-end;align-items:center">
+        <span class="muted small">Save keeps it in the portal only. Save &amp; send also emails the invoice to the client.</span>
+        <button class="btn" type="submit" value="save">${isNew ? 'Save invoice' : 'Save changes'}</button>
+        <button class="btn btn-primary" type="submit" value="send">Save &amp; send to client</button>
+      </div>
       <div class="error" id="e-error"></div>
     </form>`);
 
@@ -1700,11 +1703,14 @@ function invoiceEditor(inv) {
 
   $('inv-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const btn = e.target.querySelector('[type=submit]');
-    btn.disabled = true; $('e-error').textContent = '';
+    // Which button: "Save" or "Save & send to client".
+    const sendIt = e.submitter && e.submitter.value === 'send';
+    const btns = [...e.target.querySelectorAll('[type=submit]')];
+    btns.forEach((b) => { b.disabled = true; });
+    $('e-error').textContent = '';
     const body = {
       user_id: ed.user_id, order_id: ed.order_id || null, issue_date: ed.issue_date, due_date: ed.due_date,
-      discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: $('e-notify').checked,
+      discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: false,
       status: $('e-status').value, paid_date: $('e-paid').value, thank: $('e-thank') ? $('e-thank').checked : false,
       ...(isNew && !ed.order_id && $('e-batches').checked ? {
         create_batches: true,
@@ -1716,11 +1722,20 @@ function invoiceEditor(inv) {
       const r = isNew ? await api('POST', `${API()}/invoices`, body) : await api('PUT', `${API()}/invoices/${inv.id}`, body);
       if (isNew) clearFilters('invoices');
       const id = isNew ? r.id : inv.id;
-      toast(isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved${r.thanked ? ` · thank-you email sent to ${r.thanked}` : ''}`);
+      let msg = isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved${r.thanked ? ` · thank-you email sent to ${r.thanked}` : ''}`;
+      if (sendIt) {
+        try {
+          const sent = await api('POST', `${API()}/invoices/${id}/send`);
+          msg += ` · emailed to ${sent.to}`;
+        } catch (ex) {
+          msg += ` · but the email failed: ${ex.message}`;
+        }
+      }
+      toast(msg);
       go(`#/admin/invoice/${id}`);
     } catch (ex) {
       $('e-error').textContent = ex.message;
-      btn.disabled = false;
+      btns.forEach((b) => { b.disabled = false; });
     }
   });
 }
