@@ -907,11 +907,23 @@ shared.post('/orders', audited('added', 'order', (req, body) => (body ? body.id 
     created = await recordPeriods({ ...order, label: type.label }, periods, currentPaid);
     invoiceId = created.length ? created[created.length - 1] : null;
   }
+  // "Email the invoice to the client now": the current, unpaid one.
+  let emailed = null;
+  if (b.send_invoice === true && invoiceId && mailEnabled()) {
+    const { rows: [inv] } = await query('SELECT status FROM invoices WHERE id = $1', [invoiceId]);
+    if (inv.status === 'unpaid') {
+      try {
+        emailed = (await emailInvoice(req, invoiceId)).to;
+      } catch (err) {
+        console.error(`Batch #${order.id}: invoice email failed: ${err.message}`);
+      }
+    }
+  }
   if (b.notify === true && client.password_set) {
     await billing.notify(client, `New batch added: ${quantity} ${type.label} mailboxes`,
       `Batch #${order.id} has been added to your account.`);
   }
-  res.status(201).json({ id: order.id, invoiceId, invoices: created.length });
+  res.status(201).json({ id: order.id, invoiceId, invoices: created.length, emailed });
 }));
 
 // Issues one invoice per billing period (skipping periods already invoiced),
@@ -1231,13 +1243,19 @@ shared.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, re
 // With { urgent: true, hours } it's a critical alert instead: the mailboxes
 // will be deactivated in that many hours unless the invoice is paid now.
 shared.post('/invoices/:id/send', asyncRoute(async (req, res) => {
-  if (!mailEnabled()) throw new HttpError(503, 'Email is not set up, so the invoice can\'t be sent');
   await assertInvoice(req, req.params.id);
-  const inv = await invoiceWithItems(Number(req.params.id));
+  res.json(await emailInvoice(req, Number(req.params.id), {
+    urgent: req.body && req.body.urgent === true, hours: req.body && req.body.hours,
+  }));
+}));
+
+async function emailInvoice(req, invoiceId, opts = {}) {
+  if (!mailEnabled()) throw new HttpError(503, 'Email is not set up, so the invoice can\'t be sent');
+  const inv = await invoiceWithItems(invoiceId);
   if (inv.status === 'void') throw new HttpError(400, 'This invoice is void');
-  const urgent = req.body && req.body.urgent === true;
+  const urgent = opts.urgent === true;
   if (urgent && inv.status === 'paid') throw new HttpError(400, 'This invoice is already paid');
-  const hours = Math.min(72, Math.max(1, Math.round(Number(req.body && req.body.hours) || 3)));
+  const hours = Math.min(72, Math.max(1, Math.round(Number(opts.hours) || 3)));
   const hrs = `${hours} hour${hours === 1 ? '' : 's'}`;
   const { rows: [client] } = await query('SELECT password_set, reseller_id FROM users WHERE id = $1', [inv.user_id]);
   const brand = await brands.forClient(inv.user_id);
@@ -1328,8 +1346,8 @@ shared.post('/invoices/:id/send', asyncRoute(async (req, res) => {
   } catch (err) {
     console.error('Activity log failed:', err);
   }
-  res.json({ ok: true, to: inv.email, sentAt: upd.sent_at });
-}));
+  return { ok: true, to: inv.email, sentAt: upd.sent_at };
+}
 
 shared.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
   await assertInvoice(req, req.params.id);

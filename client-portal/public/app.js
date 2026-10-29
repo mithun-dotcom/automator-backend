@@ -1103,13 +1103,14 @@ function openBatchDialog(userId) {
         <div class="billing-only">${cycleFields(1)}</div>
       </div>
       <div class="note note-info billing-only" style="margin:-4px 0 16px"><span class="note-icon">📅</span><div id="renew-preview"></div></div>
-      <div class="field billing-only"><label>Invoices to create</label><select name="current_period">
-        <option value="all_paid">Every period since the start date, all paid</option>
-        <option value="all_paid_current_unpaid">Every period since the start date, the current one unpaid</option>
-        <option value="paid">Only the current period, paid</option>
+      <div class="field billing-only"><label>Invoices</label><select name="current_period">
+        <option value="all_paid_current_unpaid" selected>Current period unpaid (still to be paid), earlier periods paid</option>
+        <option value="all_paid">Everything already paid, including the current period</option>
         <option value="unpaid">Only the current period, unpaid</option>
+        <option value="paid">Only the current period, paid</option>
         <option value="none">Don't create invoices</option></select>
-        <div class="hint" id="history-hint">For a client who's been with you for months: one invoice per billing period, so their full history is in their portal to view and download.</div></div>
+        <div class="note note-info" style="margin-top:8px"><span class="note-icon">🧾</span><div id="inv-preview"></div></div>
+        <label class="check" id="send-wrap" style="margin-top:8px"><input type="checkbox" name="send_invoice" checked> Email the unpaid invoice to the client now</label></div>
       <div class="grid-2">
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
@@ -1138,13 +1139,24 @@ function openBatchDialog(userId) {
     for (let p = start; p < next && periods < 120; p = addMonths(p, day, months)) periods += 1;
     dlg.querySelector('#renew-preview').innerHTML = `Renews on day <strong>${day}</strong> ${cycleName(months).toLowerCase()}. Next renewal: <strong>${fmtDate(next)}</strong>${qty && price ? ` · ${money(qty * price * months)} per ${perCycle(months)}` : ''}` +
       `<div class="muted small">${periods} billing period${periods === 1 ? '' : 's'} since the start date${periods > 1 ? `: from ${fmtDate(start)} to ${fmtDate(addMonths(next, day, -months))}` : ''}.</div>`;
+    // What the Invoices choice will create.
+    const mode = f.current_period.value;
+    const per = qty && price ? money(qty * price * months) : 'the batch price';
+    const current = addMonths(next, day, -months);
+    const count = mode.startsWith('all') ? periods : mode === 'none' ? 0 : 1;
+    const unpaid = ['all_paid_current_unpaid', 'unpaid'].includes(mode);
+    dlg.querySelector('#inv-preview').innerHTML = count === 0 ? 'No invoices: the client won\'t be billed until the next renewal.'
+      : `Creates <strong>${count} invoice${count === 1 ? '' : 's'}</strong>${count > 1 ? ` (one per period, ${count - (unpaid ? 1 : 0)} marked paid)` : ''}. ` +
+        `The current period, from ${fmtDate(current)}, is <strong>${unpaid ? `unpaid: the client owes ${per}` : 'marked paid'}</strong>.`;
+    dlg.querySelector('#send-wrap').hidden = !unpaid;
   };
   ['input', 'change'].forEach((ev) => f.addEventListener(ev, preview));
   preview();
   onSubmit(f, async (d) => {
+    d.send_invoice = f.send_invoice.checked && !dlg.querySelector('#send-wrap').hidden && f.status.value === 'active';
     const r = await api('POST', `${API()}/orders`, d);
     dlg.close();
-    toast(`Batch #${r.id} added${r.invoices ? ` with ${r.invoices} invoice${r.invoices === 1 ? '' : 's'}` : ''}`);
+    toast(`Batch #${r.id} added${r.invoices ? ` with ${r.invoices} invoice${r.invoices === 1 ? '' : 's'}` : ''}${r.emailed ? ` · invoice emailed to ${r.emailed}` : ''}`);
     reloadAdmin();
   });
   dlg.showModal();
