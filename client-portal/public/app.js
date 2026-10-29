@@ -1192,8 +1192,8 @@ function openClientDialog(c) {
 
 // ---- search + filters for list tables
 // Rows carry data-search (lowercase text) and data-<filter> attributes (one or
-// more space-separated values); rows that don't match are hidden. Choices are
-// remembered for the session, per page.
+// more space-separated values); rows that don't match are hidden. Every visit
+// to the page starts unfiltered, so nothing stays hidden by an old filter.
 
 function filterBar(key, filters) {
   return `<div class="filter-bar" data-fb="${key}">
@@ -1212,10 +1212,6 @@ function wireFilterBar(key) {
   const q = bar.querySelector('.fb-q');
   const selects = [...bar.querySelectorAll('select[data-f]')];
   const clear = bar.querySelector('.fb-clear');
-  let saved = {};
-  try { saved = JSON.parse(sessionStorage.getItem(`fb:${key}`) || '{}'); } catch { saved = {}; }
-  q.value = saved.q || '';
-  selects.forEach((sel) => { if ([...sel.options].some((o) => o.value === saved[sel.dataset.f])) sel.value = saved[sel.dataset.f]; });
   const apply = () => {
     const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const rows = table ? [...table.querySelectorAll('tbody tr[data-search]')] : [];
@@ -1244,9 +1240,6 @@ function wireFilterBar(key) {
     if (empty) empty.hidden = !(active && shown === 0);
     const sum = rows.some((tr) => tr.dataset.amount !== undefined) ? ` · ${money(total)}` : '';
     bar.querySelector('.fb-count').textContent = active ? `${shown} of ${rows.length}${sum}` : '';
-    const state = { q: q.value };
-    selects.forEach((sel) => { state[sel.dataset.f] = sel.value; });
-    try { sessionStorage.setItem(`fb:${key}`, JSON.stringify(state)); } catch { /* private mode */ }
   };
   q.addEventListener('input', apply);
   selects.forEach((sel) => sel.addEventListener('change', apply));
@@ -1456,7 +1449,7 @@ function adminInvoices() {
           const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
           const in7 = i.status === 'unpaid' && i.due_date >= today && i.due_date <= week;
           return `<tr data-id="${i.id}" data-search="${searchText(`#${i.id}`, i.id, i.company, i.name, i.email, i.description, i.seller)}"
-            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}"><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.email)}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
+            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}"><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.name || i.email)}${(i.company || i.name) ? `<div class="muted small">${esc(i.email)}</div>` : ''}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
           <td><div class="row" style="flex-wrap:nowrap">
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>

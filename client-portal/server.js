@@ -494,7 +494,7 @@ shared.get('/overview', asyncRoute(async (req, res) => {
            WHERE u.role = 'client' AND ${scope} GROUP BY u.id ORDER BY u.created_at DESC`),
     reseller ? { rows: [] } : query(`SELECT id, email, name, company, expires_at, created_at FROM invites
            WHERE accepted_at IS NULL AND expires_at > now() AND role = 'client' ORDER BY created_at DESC`),
-    query(`SELECT i.*, u.email, u.company, u.reseller_id, u.sold_by AS seller FROM invoices i JOIN users u ON u.id = i.user_id
+    query(`SELECT i.*, u.email, u.name, u.company, u.reseller_id, u.sold_by AS seller FROM invoices i JOIN users u ON u.id = i.user_id
            WHERE ${scope}
            ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`),
     query("SELECT * FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order"),
