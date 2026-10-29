@@ -1204,7 +1204,7 @@ shared.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body
 shared.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, res) => {
   const id = Number(req.params.id);
   await assertInvoice(req, id);
-  const { rows: [existing] } = await query('SELECT id FROM invoices WHERE id = $1', [id]);
+  const { rows: [existing] } = await query('SELECT id, status FROM invoices WHERE id = $1', [id]);
   if (!existing) throw new HttpError(404, 'Invoice not found');
   const v = await parseInvoice(req);
   await inTransaction(async (client) => {
@@ -1218,13 +1218,31 @@ shared.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, re
     if (v.status === 'unpaid') await client.query("UPDATE invoices SET status = 'unpaid', paid_at = NULL WHERE id = $1", [id]);
   });
   const batchIds = await syncRecurringOtherLines(id);
-  if (req.body.notify === true) {
+  let thanked = null;
+  if (v.status === 'paid' && existing.status !== 'paid' && req.body.thank !== false) {
+    const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [id]);
+    thanked = await sendPaymentThanks(inv);
+  } else if (req.body.notify === true) {
     await billing.notify(v.user, `Invoice #${id} updated: ${billing.money(v.amount)}`,
       `Invoice #${id} has been updated. Total ${billing.money(v.amount)}, due on ${billing.prettyDate(v.dueDate)}.`,
       { buttons: v.status === 'paid' ? [] : billing.payButtons({ notes: v.notes, amount: v.amount }) });
   }
-  res.json({ ok: true, batchIds });
+  res.json({ ok: true, batchIds, thanked });
 }));
+
+// "Payment received, thank you" email when an invoice is marked paid. Sent to
+// clients who haven't joined the portal yet too; branded for resellers' clients.
+async function sendPaymentThanks(inv) {
+  const { rows: [user] } = await query('SELECT id, email, name FROM users WHERE id = $1', [inv.user_id]);
+  const brand = await brands.forClient(inv.user_id);
+  const money = billing.money(inv.amount);
+  await billing.notify(user, `Payment received: ${money}`,
+    `We've received your payment of ${money} for invoice #${inv.id} (${inv.description}). Thank you for your purchase!\n\n` +
+    `${inv.order_id ? 'Your mailboxes stay active, and we\'ll remind you before your next renewal.\n\n' : ''}` +
+    `We appreciate your business and look forward to working with you. Thanks for choosing ${brand ? brand.name : 'MithMill'}!`,
+    { always: true, paymentNote: false, subject: `Payment received for invoice #${inv.id}. Thank you!`, heading: 'Payment received. Thank you!' });
+  return user.email;
+}
 
 // Emails the invoice to the client: every line, the total and due date, the
 // notes (payment details) and a link to it in the portal once they've joined.
@@ -1341,17 +1359,15 @@ shared.patch('/invoices/:id', audited('edited', 'invoice', byParam, async (req, 
   await assertInvoice(req, req.params.id);
   const status = req.body.status;
   if (!['unpaid', 'paid', 'void'].includes(status)) throw new HttpError(400, 'Bad status');
+  const { rows: [before] } = await query('SELECT status FROM invoices WHERE id = $1', [Number(req.params.id)]);
   const { rows: [inv] } = await query(
     `UPDATE invoices SET status = $1, paid_at = CASE WHEN $1 = 'paid' THEN now() ELSE NULL END
      WHERE id = $2 RETURNING *`, [status, Number(req.params.id)],
   );
   if (!inv) throw new HttpError(404, 'Invoice not found');
-  if (status === 'paid') {
-    const { rows: [user] } = await query('SELECT id, email, name FROM users WHERE id = $1', [inv.user_id]);
-    await billing.notify(user, `Payment received: ${billing.money(inv.amount)}`,
-      `Thank you! We've received your payment for invoice #${inv.id} (${inv.description}).`);
-  }
-  res.json({ ok: true });
+  let thanked = null;
+  if (status === 'paid' && before.status !== 'paid' && req.body.notify !== false) thanked = await sendPaymentThanks(inv);
+  res.json({ ok: true, thanked });
 }));
 
 admin.get('/orders/:id/onboarding.csv', asyncRoute(async (req, res) => {

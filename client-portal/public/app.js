@@ -1417,8 +1417,9 @@ function typeLabel(type, pricing) {
 
 async function setInvoiceStatus(id, status, orderId) {
   if (status === 'void' && !confirm(`Void invoice #${id}?`)) return false;
-  await api('PATCH', `${API()}/invoices/${id}`, { status });
-  toast(`Invoice #${id} updated`);
+  if (status === 'paid' && !confirm(`Mark invoice #${id} as paid?\n\nThe client gets a "Payment received, thank you for your purchase" email.`)) return false;
+  const r = await api('PATCH', `${API()}/invoices/${id}`, { status });
+  toast(r.thanked ? `Invoice #${id} marked paid · thank-you email sent to ${r.thanked}` : `Invoice #${id} updated`);
   // Voiding a bill doesn't end the subscription behind it; offer to do that too.
   const order = status === 'void' && orderId && state.admin.orders.find((o) => String(o.id) === String(orderId));
   if (order && order.status !== 'cancelled'
@@ -1545,6 +1546,7 @@ function invoiceEditor(inv) {
             <div class="hint">Use Paid to record an invoice that's already been collected, e.g. past billing.</div></div>
           <div class="field" id="e-paid-wrap" ${ed.status === 'paid' ? '' : 'hidden'}><label for="e-paid">Paid on</label><input id="e-paid" type="date" value="${esc(ed.paid_date)}"></div>
         </div>
+        ${!isNew && inv.status !== 'paid' ? `<label class="check" id="e-thank-wrap" hidden><input type="checkbox" id="e-thank" checked> Email the client a "Payment received, thank you" note</label>` : ''}
         ${isNew ? `<div class="batch-opt" id="e-batch-box">
           <label class="check"><input type="checkbox" id="e-batches" checked> <strong>Add the mailbox lines (and Other lines ticked Recurring) to the client's dashboard as active batches</strong></label>
           <div class="hint" style="margin:4px 0 10px 24px">Use this when the invoice is for mailboxes the client doesn't have as a batch yet. They renew from the issue date. Untick for one-off charges, or link an existing batch above instead.</div>
@@ -1634,7 +1636,10 @@ function invoiceEditor(inv) {
   $('e-due').oninput = (e) => { ed.due_date = e.target.value; };
   $('e-discount').oninput = (e) => { ed.discount = e.target.value; recalc(); };
   $('e-notes').oninput = (e) => { ed.notes = e.target.value; };
-  $('e-status').onchange = (e) => { $('e-paid-wrap').hidden = e.target.value !== 'paid'; };
+  $('e-status').onchange = (e) => {
+    $('e-paid-wrap').hidden = e.target.value !== 'paid';
+    if ($('e-thank-wrap')) $('e-thank-wrap').hidden = e.target.value !== 'paid';
+  };
   if (isNew) {
     wireCycleFields($('e-batch-box'));
     const syncBatchBox = () => { $('e-batch-box').hidden = Boolean(ed.order_id); };
@@ -1650,7 +1655,7 @@ function invoiceEditor(inv) {
     const body = {
       user_id: ed.user_id, order_id: ed.order_id || null, issue_date: ed.issue_date, due_date: ed.due_date,
       discount: ed.discount || 0, notes: ed.notes, items: ed.items, notify: $('e-notify').checked,
-      status: $('e-status').value, paid_date: $('e-paid').value,
+      status: $('e-status').value, paid_date: $('e-paid').value, thank: $('e-thank') ? $('e-thank').checked : false,
       ...(isNew && !ed.order_id && $('e-batches').checked ? {
         create_batches: true,
         billing_cycle: $('e-batch-box').querySelector('[name=billing_cycle]').value,
@@ -1661,7 +1666,7 @@ function invoiceEditor(inv) {
       const r = isNew ? await api('POST', `${API()}/invoices`, body) : await api('PUT', `${API()}/invoices/${inv.id}`, body);
       if (isNew) clearFilters('invoices');
       const id = isNew ? r.id : inv.id;
-      toast(isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved`);
+      toast(isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved${r.thanked ? ` · thank-you email sent to ${r.thanked}` : ''}`);
       go(`#/admin/invoice/${id}`);
     } catch (ex) {
       $('e-error').textContent = ex.message;
