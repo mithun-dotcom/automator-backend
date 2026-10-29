@@ -26,6 +26,10 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Forgot password
+
+The login page has **Forgot password?**. Anyone with a working login (clients, team members, resellers) enters their email and gets a link to set a new password. The link works for 1 hour and only once. The page gives the same answer whether or not the email has an account, so it can't be used to find out who's a client. Each address gets at most one reset email every 2 minutes. Clients who haven't accepted their invite yet need a new invite instead (Clients & invites → Resend invite).
+
 ## Resellers
 
 The owner invites resellers under **Resellers** (owner only). A reseller logs in to the same portal and gets a reseller panel (Batches, Clients, Invoices, Settings) that shows only their own clients. There they add clients, batches and invoices, and send invoices and urgent reminders. Their clients don't log in; they get invoices and the 7/3/1-day renewal reminders by email.

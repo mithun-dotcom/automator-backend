@@ -127,6 +127,46 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   res.json({ ok: true, role: user.role });
 }));
 
+// "Forgot password?": emails a reset link (valid for 1 hour) to anyone with a
+// working login. The answer is the same whether or not the email has an
+// account, so it can't be used to find out who's a client.
+const RESET_MINUTES = 60;
+const lastReset = new Map();
+app.post('/api/auth/forgot', asyncRoute(async (req, res) => {
+  const email = str(req.body.email, 200).toLowerCase();
+  if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
+  checkLoginRate(`forgot|${req.ip}`);
+  const done = () => res.json({ ok: true });
+  // At most one reset email per address every 2 minutes.
+  if (Date.now() - (lastReset.get(email) || 0) < 2 * 60000) return done();
+  const { rows: [user] } = await query('SELECT id, email, name, role, password_set FROM users WHERE email = $1', [email]);
+  // Not-yet-joined clients (and resellers' clients, who don't log in) need an invite, not a reset.
+  if (!user || !user.password_set) return done();
+  if (user.role === 'reseller') {
+    const { rows: [r] } = await query('SELECT active FROM resellers WHERE user_id = $1', [user.id]);
+    if (!r || !r.active) return done();
+  }
+  lastReset.set(email, Date.now());
+  const token = crypto.randomBytes(24).toString('base64url');
+  await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [email]);
+  await query(
+    `INSERT INTO invites (email, name, company, token, expires_at, role)
+     VALUES ($1, $2, '', $3, now() + interval '${RESET_MINUTES} minutes', $4)`,
+    [email, user.name || '', token, user.role]);
+  const link = `${baseUrl(req)}/#/invite/${token}`;
+  await sendMail({
+    to: email,
+    subject: 'Reset your MithMill portal password',
+    text: `Hi ${user.name || 'there'},\n\nWe received a request to reset the password for your MithMill portal account.\n\n` +
+      `Set a new password here (the link works for ${RESET_MINUTES} minutes):\n\n${link}\n\n` +
+      'If you didn\'t ask for this, you can ignore this email. Your password stays the same.\n\nMithmill',
+    heading: 'Reset your password',
+    cta: { label: 'Set a new password', url: link },
+    reason: 'You receive this because someone asked to reset the password for this email on the MithMill portal.',
+  });
+  done();
+}));
+
 app.post('/api/auth/logout', (req, res) => {
   res.clearCookie('session');
   res.json({ ok: true });
@@ -152,7 +192,7 @@ async function findInvite(token) {
     'SELECT * FROM invites WHERE token = $1 AND accepted_at IS NULL AND expires_at > now()',
     [str(token, 100)],
   );
-  if (!invite) throw new HttpError(404, 'This invite link is invalid or has expired. Ask Mithmill for a new one.');
+  if (!invite) throw new HttpError(404, 'This link is invalid or has expired. Use "Forgot password?" on the login page to get a new one, or ask Mithmill.');
   return invite;
 }
 

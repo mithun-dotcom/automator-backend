@@ -152,6 +152,7 @@ async function route() {
   const parts = hash.replace(/^#\/?/, '').split('/');
 
   if (parts[0] === 'invite' && parts[1]) return renderInvite(parts[1]);
+  if (parts[0] === 'forgot') return renderForgot();
 
   if (state.me === undefined) {
     try { state.me = await api('GET', '/api/me'); } catch { state.me = null; }
@@ -260,15 +261,36 @@ function renderLogin() {
     <p class="muted">Log in to see your mailboxes, billing and orders.</p>
     <form id="f">
       <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" required></div>
-      <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+      <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+        <div class="hint" style="text-align:right"><a href="#/forgot">Forgot password?</a></div></div>
       <button class="btn btn-primary" style="width:100%" type="submit">Log in</button>
       <div class="error"></div>
     </form>
-    <p class="muted small" style="margin:16px 0 0">Access is by invitation only. Need an account or forgot your password? Contact your Mithmill account manager.</p>`);
+    <p class="muted small" style="margin:16px 0 0">Access is by invitation only. Need an account? Contact your Mithmill account manager.</p>`);
   onSubmit(document.getElementById('f'), async (d) => {
     const r = await api('POST', '/api/auth/login', d);
     state.me = await api('GET', '/api/me');
     go(isAdminRole(r.role) ? '#/admin' : '#/dashboard');
+  });
+}
+
+function renderForgot() {
+  authCard(`
+    <h1>Forgot your password?</h1>
+    <p class="muted">Enter the email you log in with and we'll send you a link to set a new password.</p>
+    <form id="f">
+      <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" required></div>
+      <button class="btn btn-primary" style="width:100%" type="submit">Send reset link</button>
+      <div class="error"></div>
+    </form>
+    <p class="muted small" style="margin:16px 0 0"><a href="#/login">← Back to login</a></p>`);
+  onSubmit(document.getElementById('f'), async (d) => {
+    await api('POST', '/api/auth/forgot', d);
+    authCard(`
+      <h1>Check your email</h1>
+      <p class="muted">If <strong>${esc(d.email)}</strong> has an account, we've sent it a link to set a new password. The link works for 1 hour.</p>
+      <p class="muted small">Nothing arrived after a few minutes? Check your spam folder, or contact your Mithmill account manager.</p>
+      <a class="btn" href="#/login">Back to login</a>`);
   });
 }
 
