@@ -589,12 +589,15 @@ function renderOrder() {
     const v = (k) => esc(data[k] || '');
     const sel = (k, val) => (data[k] === val ? 'selected' : '');
     const support = state.dash.supportEmail || 'support@mithmill.com';
+    // Pre-warmed types come on our own domains: nothing to ask about domains.
+    const own = price.needs_domains !== false;
     body = `
       <form class="card card-pad" id="f2">
         <h2>${esc(price.label)} details</h2>
         <p class="muted small" style="margin:4px 0 16px">${money(price.price_per_mailbox)} per mailbox / month</p>
 
-        <div class="csv-box">
+        ${own ? '' : `<div class="note note-info" style="margin-bottom:16px"><span class="note-icon">🔥</span><div><strong>${esc(price.label)} come ready on our own warmed-up domains.</strong> You don't need to give us any domains or DNS access. Just tell us how many mailboxes you need and invite us to your sequencer below.</div></div>`}
+        <div class="csv-box" ${own ? '' : 'hidden'}>
           <div class="csv-head">
             <div><h3>Onboarding sheet (CSV)</h3>
               <div class="muted small">One row per mailbox user: domain, full name, username, passwords, domain and sequencer access, profile picture link and domain forward.
@@ -613,6 +616,7 @@ function renderOrder() {
           <div class="field"><label>Estimated monthly cost</label><input id="est" disabled value="${money((Number(data.quantity) || 0) * price.price_per_mailbox)}"></div>
         </div>
 
+        <div id="domain-part" ${own ? '' : 'hidden'}>
         <div class="grid-2">
           <div class="field"><label for="domains">Domain names</label><textarea id="domains" name="domains" placeholder="acme-mail.com&#10;getacme.co">${v('domains')}</textarea><div class="hint">One domain per line.${data.onboarding_csv ? ' Filled in from your CSV.' : ''}</div></div>
           <div class="field"><label for="usernames">Usernames</label><textarea id="usernames" name="usernames" placeholder="John Smith - john&#10;Jane Doe - jane.doe">${v('usernames')}</textarea><div class="hint">One per line: full name and the part before the @.</div></div>
@@ -627,7 +631,7 @@ function renderOrder() {
         <div id="domain-invited-msg" class="muted small" ${data.domain_invited ? '' : 'hidden'} style="margin:-6px 0 14px">Great, we'll accept it and set up the domains and usernames you listed above.</div>
         <div id="domain-manual" ${data.domain_invited ? 'hidden' : ''}>
         <div class="field"><label for="domain_access_method">Not invited us? How will we get access to your domains?</label>
-          <select id="domain_access_method" name="domain_access_method" ${data.domain_invited ? '' : 'required'}>
+          <select id="domain_access_method" name="domain_access_method" ${data.domain_invited || !own ? '' : 'required'}>
             <option value="">Choose…</option>
             ${Object.entries(ACCESS_LABEL).map(([k, l]) => `<option value="${k}" ${sel('domain_access_method', k)}>${esc(l)}</option>`).join('')}
           </select></div>
@@ -637,6 +641,7 @@ function renderOrder() {
         </div>
         <div class="field"><label for="domain_access_notes">Domain access notes</label><textarea id="domain_access_notes" name="domain_access_notes" style="min-height:64px">${v('domain_access_notes')}</textarea>
           <div class="hint">Please don't paste passwords here. If you're sharing a login, we'll contact you to collect it securely.</div></div>
+        </div>
         </div>
 
         <h3 class="section-title">Sequencer access</h3>
@@ -674,7 +679,8 @@ function renderOrder() {
             ${row('Onboarding CSV', data.onboarding_filename ? `${data.onboarding_filename} (${data.csv_users} users)` : '')}
             ${row('Domains', lines(data.domains).join('\n'))}
             ${row('Usernames', lines(data.usernames).join('\n'))}
-            ${row('Domain access', data.domain_invited ? `Invited ${state.dash.supportEmail || 'support@mithmill.com'} to manage DNS` : ACCESS_LABEL[data.domain_access_method])}
+            ${price.needs_domains === false ? row('Domains', 'Our own pre-warmed domains (nothing needed from you)') : ''}
+            ${price.needs_domains === false ? '' : row('Domain access', data.domain_invited ? `Invited ${state.dash.supportEmail || 'support@mithmill.com'} to manage DNS` : ACCESS_LABEL[data.domain_access_method])}
             ${row('Registrar', data.registrar)}
             ${row('Registrar email', data.registrar_email)}
             ${row('Domain access notes', data.domain_access_notes)}
@@ -714,7 +720,7 @@ function renderOrder() {
       const dom = form.domain_invited.checked;
       document.getElementById('domain-manual').hidden = dom;
       document.getElementById('domain-invited-msg').hidden = !dom;
-      form.domain_access_method.required = !dom;
+      form.domain_access_method.required = !dom && price.needs_domains !== false;
       const seq = form.sequencer_invited.checked;
       document.getElementById('seq-manual').hidden = seq;
       form.sequencer_workspace.required = seq;
@@ -761,6 +767,15 @@ function renderOrder() {
     onSubmit(form, async (d) => {
       Object.assign(data, d, { domain_invited: form.domain_invited.checked, sequencer_invited: form.sequencer_invited.checked });
       if (data.domain_invited) delete data.domain_access_method;
+      if (price.needs_domains === false) {
+        ['domains', 'usernames', 'domain_access_method', 'registrar', 'registrar_email', 'domain_access_notes',
+          'onboarding_csv', 'onboarding_filename', 'csv_users', 'csv_domains'].forEach((k) => delete data[k]);
+        data.domain_invited = false;
+        state.order.step = 3;
+        renderOrder();
+        window.scrollTo(0, 0);
+        return;
+      }
       const min = state.dash.csvRequiredMin;
       if (min > 0 && Number(d.quantity) >= min && !data.onboarding_csv) {
         throw new Error(`Orders of ${min} or more mailboxes need the onboarding CSV. Download the sample, fill it in and upload it above.`);
@@ -1940,19 +1955,20 @@ function adminSettings() {
         <div class="card-head"><div><h2>Mailbox types &amp; standard prices</h2>
           <div class="muted small">Price per mailbox per month (USD), used for every client without custom pricing (Clients &amp; invites → Edit pricing). Existing batches keep the price they were ordered at.</div></div></div>
         <div class="table-wrap"><table class="types-table">
-          <thead><tr><th style="min-width:200px">Name</th><th style="min-width:260px">Description (shown to clients when ordering)</th><th class="num" style="width:130px">Price ($)</th><th style="width:130px">Offer to clients</th><th style="width:70px"></th></tr></thead>
+          <thead><tr><th style="min-width:200px">Name</th><th style="min-width:260px">Description (shown to clients when ordering)</th><th class="num" style="width:130px">Price ($)</th><th style="width:130px">Offer to clients</th><th style="width:150px">Client gives domains</th><th style="width:70px"></th></tr></thead>
           <tbody>${pricing.map((p) => `<tr data-type="${esc(p.inbox_type)}">
             <td><input data-f="label" value="${esc(p.label)}" required></td>
             <td><input data-f="description" value="${esc(p.description || '')}" placeholder="Optional"></td>
             <td><input data-f="price_per_mailbox" type="number" step="0.01" min="0" required value="${p.price_per_mailbox}" class="num"></td>
             <td><label class="check"><input type="checkbox" data-f="active" ${p.active !== false ? 'checked' : ''}> ${p.active !== false ? 'Yes' : 'Hidden'}</label></td>
+            <td><label class="check" title="Untick for pre-warmed mailboxes on your own domains: clients then aren't asked for domains, usernames, domain access or the CSV"><input type="checkbox" data-f="needs_domains" ${p.needs_domains !== false ? 'checked' : ''}> ${p.needs_domains !== false ? 'Yes' : 'No (pre-warmed)'}</label></td>
             <td><button type="button" class="btn btn-sm btn-ghost" data-del-type="${esc(p.inbox_type)}" title="Delete (only if never used)" aria-label="Delete">✕</button></td>
           </tr>`).join('')}
           <tr class="add-type-row">
             <td><input id="nt-label" placeholder="New type, e.g. Zoho Mail"></td>
             <td><input id="nt-desc" placeholder="Optional description"></td>
             <td><input id="nt-price" type="number" step="0.01" min="0" placeholder="0.00" class="num"></td>
-            <td colspan="2"><button type="button" class="btn btn-sm" id="add-type">+ Add mailbox type</button></td>
+            <td colspan="3"><button type="button" class="btn btn-sm" id="add-type">+ Add mailbox type</button></td>
           </tr></tbody>
         </table></div>
         <div class="card-pad" style="padding-top:12px"><button class="btn btn-primary" type="submit">Save changes</button> <span class="muted small">Hidden types disappear from the client's New order page but existing batches keep working.</span>
@@ -1982,6 +1998,7 @@ function adminSettings() {
       description: tr.querySelector('[data-f=description]').value,
       price_per_mailbox: tr.querySelector('[data-f=price_per_mailbox]').value,
       active: tr.querySelector('[data-f=active]').checked,
+      needs_domains: tr.querySelector('[data-f=needs_domains]').checked,
     }));
     await api('PUT', `${API()}/pricing`, { prices });
     toast('Mailbox types saved');

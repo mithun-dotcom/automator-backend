@@ -226,7 +226,7 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
 
 // Standard prices with this client's overrides applied.
 const CLIENT_PRICING_SQL = `
-  SELECT p.inbox_type, p.label, p.description, p.active, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
+  SELECT p.inbox_type, p.label, p.description, p.active, p.needs_domains, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
     FROM pricing p
     LEFT JOIN client_pricing cp ON cp.inbox_type = p.inbox_type AND cp.user_id = $1`;
 
@@ -324,8 +324,10 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   // Onboarding sheet: optional, required for big orders, and the source of
   // domains/usernames when those fields are left empty.
   const settings = await getSettings();
+  // Pre-warmed types come on our own domains: no domains, usernames, CSV or domain access to ask for.
+  const ownDomains = price.needs_domains !== false;
   let sheet = null;
-  if (b.onboarding_csv) {
+  if (ownDomains && b.onboarding_csv) {
     try {
       sheet = onboarding.validate(b.onboarding_csv);
     } catch (err) {
@@ -340,20 +342,20 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
     throw new HttpError(400, `Your CSV has ${sheet.users} users but the order is for ${quantity} mailboxes. Make them match (one CSV row per mailbox).`);
   }
   const csvMin = Number(settings.csv_required_min);
-  if (csvMin > 0 && quantity >= csvMin && !sheet) {
+  if (ownDomains && csvMin > 0 && quantity >= csvMin && !sheet) {
     throw new HttpError(400, `Orders of ${csvMin} or more mailboxes need the onboarding CSV. Download the sample, fill it in and upload it.`);
   }
   const domains = str(b.domains, 20000) || (sheet ? sheet.domains.join('\n') : '');
   const usernames = str(b.usernames, 20000) ||
     (sheet ? sheet.rows.map((r) => `${r['Full name']} - ${r.Username}@${r['Domain name']}`).join('\n').slice(0, 20000) : '');
-  if (!domains) throw new HttpError(400, 'Add at least one domain');
-  if (!usernames) throw new HttpError(400, 'Add at least one username');
+  if (ownDomains && !domains) throw new HttpError(400, 'Add at least one domain');
+  if (ownDomains && !usernames) throw new HttpError(400, 'Add at least one username');
   // "I've sent the invitation": the client invited our support address to
   // their DNS and/or sequencer, so the access details aren't needed.
   const domainInvited = b.domain_invited === true;
   const sequencerInvited = b.sequencer_invited === true;
-  const accessMethod = domainInvited ? 'delegate' : str(b.domain_access_method, 50);
-  if (!ACCESS_METHODS.includes(accessMethod)) throw new HttpError(400, 'Choose how we get domain access');
+  const accessMethod = !ownDomains ? '' : domainInvited ? 'delegate' : str(b.domain_access_method, 50);
+  if (ownDomains && !ACCESS_METHODS.includes(accessMethod)) throw new HttpError(400, 'Choose how we get domain access');
   const sequencer = str(b.sequencer, 50);
   if (!SEQUENCERS.includes(sequencer)) throw new HttpError(400, 'Choose your sequencer');
   const sequencerOther = str(b.sequencer_other, 100);
@@ -393,7 +395,7 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
       text: `${req.user.name} <${req.user.email}> placed order #${order.id}.\n\n` +
         `Type: ${price.label}\nMailboxes: ${quantity}\nMonthly: ${total}\n` +
         `Onboarding CSV: ${sheet ? `uploaded (${sheet.users} rows) - download it from the order in the admin panel` : 'not uploaded'}\n\n` +
-        `DNS invitation to ${settings.support_email}: ${domainInvited ? 'sent' : 'not sent (see domain access)'}\n` +
+        `${ownDomains ? `DNS invitation to ${settings.support_email}: ${domainInvited ? 'sent' : 'not sent (see domain access)'}` : 'Pre-warmed: no client domains (we provide them)'}\n` +
         `Sequencer invitation: ${sequencerInvited ? `sent (${sequencer === 'Other' ? sequencerOther : sequencer}, workspace "${str(b.sequencer_workspace, 200)}")` : 'not sent'}\n\n` +
         `Domains:\n${domains}\n\nOpen the admin panel: ${baseUrl(req)}/#/admin/orders/${order.id}`,
       heading: `New order #${order.id} from ${req.user.company || req.user.name || req.user.email}`,
@@ -1442,9 +1444,10 @@ admin.put('/pricing', ownerOnly, audited('edited', 'standardPricing', () => 'all
     if (label === '') throw new HttpError(400, 'Every mailbox type needs a name');
     await query(
       `UPDATE pricing SET price_per_mailbox = $1, label = COALESCE($2, label),
-         description = COALESCE($3, description), active = COALESCE($4, active) WHERE inbox_type = $5`,
+         description = COALESCE($3, description), active = COALESCE($4, active),
+         needs_domains = COALESCE($6, needs_domains) WHERE inbox_type = $5`,
       [price, label, p.description === undefined ? null : str(p.description, 300),
-       p.active === undefined ? null : Boolean(p.active), type],
+       p.active === undefined ? null : Boolean(p.active), type, p.needs_domains === undefined ? null : Boolean(p.needs_domains)],
     );
   }
   res.json({ ok: true });
@@ -2004,6 +2007,10 @@ async function scheduledBilling() {
   await linkStandaloneInvoices();
   await syncExistingOtherLines();
   await moveSoldByToClients();
+  // One-time: pre-warmed types don't need the client's domains.
+  await query(`INSERT INTO settings (key, value) VALUES ('prewarmed_no_domains_v1', now()::text) ON CONFLICT (key) DO NOTHING`).then(async (r) => {
+    if (r.rowCount) await query("UPDATE pricing SET needs_domains = false WHERE label ~* 'pre.?warm' OR inbox_type ~* 'pre_?warm'");
+  });
   await syncEmailBrand();
   // One-time switch requested by Mithmill: cancellation requests go to support@.
   await query(

@@ -259,3 +259,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT 
 -- to manage their domains' DNS and to their sequencer.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS domain_invited BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sequencer_invited BOOLEAN NOT NULL DEFAULT false;
+
+-- Whether clients ordering this type give us their domains (and domain
+-- access). Pre-warmed mailboxes come on our own domains, so they don't.
+ALTER TABLE pricing ADD COLUMN IF NOT EXISTS needs_domains BOOLEAN NOT NULL DEFAULT true;
