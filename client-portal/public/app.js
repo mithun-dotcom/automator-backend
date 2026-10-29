@@ -1152,6 +1152,7 @@ function openBatchDialog(userId) {
   preview();
   onSubmit(f, async (d) => {
     const r = await api('POST', `${API()}/orders`, d);
+    clearFilters('invoices'); // so the new invoice shows on the Invoices page
     dlg.close();
     toast(`Batch #${r.id} added${r.invoiceId ? `. Invoice #${r.invoiceId} is ready under Invoices to edit and send.` : ''}`);
     reloadAdmin();
@@ -1230,6 +1231,17 @@ function wireFilterBar(key) {
     });
     const active = words.length || selects.some((sel) => sel.value);
     clear.hidden = !active;
+    bar.classList.toggle('fb-active', Boolean(active));
+    // Never a silently empty list: say the filters are hiding everything.
+    let empty = bar.parentElement.querySelector('.fb-empty');
+    if (!empty && table) {
+      empty = document.createElement('div');
+      empty.className = 'empty fb-empty';
+      empty.innerHTML = 'Nothing matches your search and filters. <button type="button" class="btn btn-sm">Clear filters</button>';
+      empty.querySelector('button').onclick = () => clear.click();
+      table.closest('.table-wrap').after(empty);
+    }
+    if (empty) empty.hidden = !(active && shown === 0);
     const sum = rows.some((tr) => tr.dataset.amount !== undefined) ? ` · ${money(total)}` : '';
     bar.querySelector('.fb-count').textContent = active ? `${shown} of ${rows.length}${sum}` : '';
     const state = { q: q.value };
@@ -1240,6 +1252,10 @@ function wireFilterBar(key) {
   selects.forEach((sel) => sel.addEventListener('change', apply));
   clear.onclick = () => { q.value = ''; selects.forEach((sel) => { sel.value = ''; }); apply(); q.focus(); };
   apply();
+}
+
+function clearFilters(key) {
+  try { sessionStorage.removeItem(`fb:${key}`); } catch { /* private mode */ }
 }
 
 // "Sold by" choices: team members plus anyone already set on a client.
@@ -1650,6 +1666,7 @@ function invoiceEditor(inv) {
     };
     try {
       const r = isNew ? await api('POST', `${API()}/invoices`, body) : await api('PUT', `${API()}/invoices/${inv.id}`, body);
+      if (isNew) clearFilters('invoices');
       const id = isNew ? r.id : inv.id;
       toast(isNew ? `Invoice #${id} created${r.batchIds && r.batchIds.length ? ` and ${r.batchIds.length} batch${r.batchIds.length === 1 ? '' : 'es'} added to the dashboard` : ''}` : `Invoice #${id} saved`);
       go(`#/admin/invoice/${id}`);
