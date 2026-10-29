@@ -254,3 +254,8 @@ ALTER TABLE invites ADD COLUMN IF NOT EXISTS sold_by TEXT NOT NULL DEFAULT '';
 
 -- Why a batch was cancelled: requested (by the client), no_payment, or other (free text).
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT '';
+
+-- New orders: the client confirms they've invited Mithmill's support address
+-- to manage their domains' DNS and to their sequencer.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS domain_invited BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sequencer_invited BOOLEAN NOT NULL DEFAULT false;

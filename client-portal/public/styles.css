@@ -463,3 +463,5 @@ table.activity td { vertical-align: top; }
 .filter-bar.fb-active { background: var(--gold-50); }
 .filter-bar.fb-active .fb-count { color: var(--text-2); font-weight: 600; }
 .fb-empty .btn { margin-left: 8px; }
+.invite-note { margin-bottom: 14px; }
+.invite-check { margin-top: 10px; font-weight: 600; color: var(--text); }

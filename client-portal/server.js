@@ -233,7 +233,7 @@ const CLIENT_PRICING_SQL = `
 const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o.price_per_mailbox,
   o.domains, o.usernames, o.domain_access_method, o.registrar, o.registrar_email, o.domain_access_notes,
   o.sequencer, o.sequencer_workspace, o.sequencer_email, o.sequencer_notes, o.notes, o.status,
-  o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months`;
+  o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months, o.domain_invited, o.sequencer_invited`;
 
 app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const uid = req.user.id;
@@ -348,10 +348,18 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
     (sheet ? sheet.rows.map((r) => `${r['Full name']} - ${r.Username}@${r['Domain name']}`).join('\n').slice(0, 20000) : '');
   if (!domains) throw new HttpError(400, 'Add at least one domain');
   if (!usernames) throw new HttpError(400, 'Add at least one username');
-  const accessMethod = str(b.domain_access_method, 50);
+  // "I've sent the invitation": the client invited our support address to
+  // their DNS and/or sequencer, so the access details aren't needed.
+  const domainInvited = b.domain_invited === true;
+  const sequencerInvited = b.sequencer_invited === true;
+  const accessMethod = domainInvited ? 'delegate' : str(b.domain_access_method, 50);
   if (!ACCESS_METHODS.includes(accessMethod)) throw new HttpError(400, 'Choose how we get domain access');
   const sequencer = str(b.sequencer, 50);
   if (!SEQUENCERS.includes(sequencer)) throw new HttpError(400, 'Choose your sequencer');
+  const sequencerOther = str(b.sequencer_other, 100);
+  if (sequencer === 'Other' && !sequencerOther) throw new HttpError(400, 'Tell us which sequencer you use');
+  if (sequencerInvited && !str(b.sequencer_workspace, 200)) throw new HttpError(400, 'Add your sequencer workspace name');
+  const sequencerNotes = [sequencer === 'Other' ? `Sequencer: ${sequencerOther}` : '', str(b.sequencer_notes)].filter(Boolean).join('\n');
   const registrarEmail = str(b.registrar_email, 200);
   const sequencerEmail = str(b.sequencer_email, 200);
   if (registrarEmail && !isEmail(registrarEmail)) throw new HttpError(400, 'Registrar login email looks invalid');
@@ -360,11 +368,11 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   const { rows: [order] } = await query(
     `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames,
        domain_access_method, registrar, registrar_email, domain_access_notes,
-       sequencer, sequencer_workspace, sequencer_email, sequencer_notes, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+       sequencer, sequencer_workspace, sequencer_email, sequencer_notes, notes, domain_invited, sequencer_invited)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
     [req.user.id, price.inbox_type, quantity, price.price_per_mailbox, domains, usernames,
      accessMethod, str(b.registrar, 200), registrarEmail, str(b.domain_access_notes),
-     sequencer, str(b.sequencer_workspace, 200), sequencerEmail, str(b.sequencer_notes), str(b.notes)],
+     sequencer, str(b.sequencer_workspace, 200), sequencerEmail, sequencerNotes, str(b.notes), domainInvited, sequencerInvited],
   );
   if (sheet) {
     // Stored re-serialized in the template's column order, so the admin's download is clean.
@@ -385,6 +393,8 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
       text: `${req.user.name} <${req.user.email}> placed order #${order.id}.\n\n` +
         `Type: ${price.label}\nMailboxes: ${quantity}\nMonthly: ${total}\n` +
         `Onboarding CSV: ${sheet ? `uploaded (${sheet.users} rows) - download it from the order in the admin panel` : 'not uploaded'}\n\n` +
+        `DNS invitation to ${settings.support_email}: ${domainInvited ? 'sent' : 'not sent (see domain access)'}\n` +
+        `Sequencer invitation: ${sequencerInvited ? `sent (${sequencer === 'Other' ? sequencerOther : sequencer}, workspace "${str(b.sequencer_workspace, 200)}")` : 'not sent'}\n\n` +
         `Domains:\n${domains}\n\nOpen the admin panel: ${baseUrl(req)}/#/admin/orders/${order.id}`,
       heading: `New order #${order.id} from ${req.user.company || req.user.name || req.user.email}`,
       cta: { label: 'Open the order', url: `${baseUrl(req)}/#/admin/orders/${order.id}` },

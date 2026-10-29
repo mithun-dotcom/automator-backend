@@ -588,6 +588,7 @@ function renderOrder() {
   } else if (step === 2) {
     const v = (k) => esc(data[k] || '');
     const sel = (k, val) => (data[k] === val ? 'selected' : '');
+    const support = state.dash.supportEmail || 'support@mithmill.com';
     body = `
       <form class="card card-pad" id="f2">
         <h2>${esc(price.label)} details</h2>
@@ -618,8 +619,15 @@ function renderOrder() {
         </div>
 
         <h3 class="section-title">Domain access</h3>
-        <div class="field"><label for="domain_access_method">How will we get access to your domains?</label>
-          <select id="domain_access_method" name="domain_access_method" required>
+        <div class="note note-info invite-note"><span class="note-icon">🌐</span><div>
+          <strong>Invite us to manage your domains' DNS:</strong> at your domain registrar or DNS provider (GoDaddy, Namecheap, Cloudflare…), add
+          <strong>${esc(support)}</strong> as a user / delegate with DNS access.
+          <label class="check invite-check"><input type="checkbox" name="domain_invited" id="domain_invited" ${data.domain_invited ? 'checked' : ''}> I've sent the invitation to ${esc(support)}</label>
+        </div></div>
+        <div id="domain-invited-msg" class="muted small" ${data.domain_invited ? '' : 'hidden'} style="margin:-6px 0 14px">Great, we'll accept it and set up the domains and usernames you listed above.</div>
+        <div id="domain-manual" ${data.domain_invited ? 'hidden' : ''}>
+        <div class="field"><label for="domain_access_method">Not invited us? How will we get access to your domains?</label>
+          <select id="domain_access_method" name="domain_access_method" ${data.domain_invited ? '' : 'required'}>
             <option value="">Choose…</option>
             ${Object.entries(ACCESS_LABEL).map(([k, l]) => `<option value="${k}" ${sel('domain_access_method', k)}>${esc(l)}</option>`).join('')}
           </select></div>
@@ -629,17 +637,23 @@ function renderOrder() {
         </div>
         <div class="field"><label for="domain_access_notes">Domain access notes</label><textarea id="domain_access_notes" name="domain_access_notes" style="min-height:64px">${v('domain_access_notes')}</textarea>
           <div class="hint">Please don't paste passwords here. If you're sharing a login, we'll contact you to collect it securely.</div></div>
+        </div>
 
         <h3 class="section-title">Sequencer access</h3>
+        <div class="note note-info invite-note"><span class="note-icon">📨</span><div>
+          <strong>Invite us to your sequencer so we can connect the mailboxes:</strong> add <strong>${esc(support)}</strong> as a team member in your sequencer workspace.
+          <label class="check invite-check"><input type="checkbox" name="sequencer_invited" id="sequencer_invited" ${data.sequencer_invited ? 'checked' : ''}> I've sent the invitation to ${esc(support)}</label>
+        </div></div>
         <div class="grid-2">
-          <div class="field"><label for="sequencer">Sequencer</label>
+          <div class="field"><label for="sequencer">Which sequencer?</label>
             <select id="sequencer" name="sequencer" required>
               <option value="">Choose…</option>
               ${SEQUENCERS.map((s) => `<option ${sel('sequencer', s)}>${s}</option>`).join('')}
             </select></div>
-          <div class="field"><label for="sequencer_workspace">Workspace name</label><input id="sequencer_workspace" name="sequencer_workspace" value="${v('sequencer_workspace')}"></div>
+          <div class="field"><label for="sequencer_workspace">Workspace name</label><input id="sequencer_workspace" name="sequencer_workspace" value="${v('sequencer_workspace')}" ${data.sequencer_invited ? 'required' : ''}></div>
         </div>
-        <div class="grid-2">
+        <div class="field" id="seq-other" ${data.sequencer === 'Other' ? '' : 'hidden'}><label for="sequencer_other">Sequencer name</label><input id="sequencer_other" name="sequencer_other" value="${v('sequencer_other')}" placeholder="e.g. Saleshandy" ${data.sequencer === 'Other' ? 'required' : ''}></div>
+        <div class="grid-2" id="seq-manual" ${data.sequencer_invited ? 'hidden' : ''}>
           <div class="field"><label for="sequencer_email">Sequencer login email</label><input id="sequencer_email" name="sequencer_email" type="email" value="${v('sequencer_email')}"></div>
           <div class="field"><label for="sequencer_notes">Sequencer access notes</label><input id="sequencer_notes" name="sequencer_notes" placeholder="e.g. invite us as a team member" value="${v('sequencer_notes')}"></div>
         </div>
@@ -660,11 +674,12 @@ function renderOrder() {
             ${row('Onboarding CSV', data.onboarding_filename ? `${data.onboarding_filename} (${data.csv_users} users)` : '')}
             ${row('Domains', lines(data.domains).join('\n'))}
             ${row('Usernames', lines(data.usernames).join('\n'))}
-            ${row('Domain access', ACCESS_LABEL[data.domain_access_method])}
+            ${row('Domain access', data.domain_invited ? `Invited ${state.dash.supportEmail || 'support@mithmill.com'} to manage DNS` : ACCESS_LABEL[data.domain_access_method])}
             ${row('Registrar', data.registrar)}
             ${row('Registrar email', data.registrar_email)}
             ${row('Domain access notes', data.domain_access_notes)}
-            ${row('Sequencer', data.sequencer)}
+            ${row('Sequencer', data.sequencer === 'Other' ? data.sequencer_other : data.sequencer)}
+            ${row('Sequencer access', data.sequencer_invited ? `Invited ${state.dash.supportEmail || 'support@mithmill.com'}` : '')}
             ${row('Workspace', data.sequencer_workspace)}
             ${row('Sequencer email', data.sequencer_email)}
             ${row('Sequencer notes', data.sequencer_notes)}
@@ -690,7 +705,24 @@ function renderOrder() {
     document.getElementById('next1').onclick = () => { state.order.step = 2; renderOrder(); };
   } else if (step === 2) {
     const form = document.getElementById('f2');
-    const save = () => Object.assign(data, formData(form));
+    // Checkboxes as true/false (FormData leaves unticked ones out).
+    const save = () => Object.assign(data, formData(form), {
+      domain_invited: form.domain_invited.checked, sequencer_invited: form.sequencer_invited.checked,
+    });
+    // "I've sent the invitation" hides the access details we no longer need.
+    const syncInvites = () => {
+      const dom = form.domain_invited.checked;
+      document.getElementById('domain-manual').hidden = dom;
+      document.getElementById('domain-invited-msg').hidden = !dom;
+      form.domain_access_method.required = !dom;
+      const seq = form.sequencer_invited.checked;
+      document.getElementById('seq-manual').hidden = seq;
+      form.sequencer_workspace.required = seq;
+      const other = form.sequencer.value === 'Other';
+      document.getElementById('seq-other').hidden = !other;
+      form.sequencer_other.required = other;
+    };
+    ['domain_invited', 'sequencer_invited', 'sequencer'].forEach((n) => form[n].addEventListener('change', syncInvites));
     form.querySelector('#quantity').oninput = (e) => {
       form.querySelector('#est').value = money((Number(e.target.value) || 0) * price.price_per_mailbox);
     };
@@ -727,7 +759,8 @@ function renderOrder() {
       };
     }
     onSubmit(form, async (d) => {
-      Object.assign(data, d);
+      Object.assign(data, d, { domain_invited: form.domain_invited.checked, sequencer_invited: form.sequencer_invited.checked });
+      if (data.domain_invited) delete data.domain_access_method;
       const min = state.dash.csvRequiredMin;
       if (min > 0 && Number(d.quantity) >= min && !data.onboarding_csv) {
         throw new Error(`Orders of ${min} or more mailboxes need the onboarding CSV. Download the sample, fill it in and upload it above.`);
@@ -880,7 +913,9 @@ function adminOrders(focusId) {
               ${kv('Mailboxes', String(o.quantity))}
               ${kv('Price', `${money(o.price_per_mailbox)} / mailbox / month → ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`)}
               ${kv('Billing', `${cycleName(cycleOf(o))}${o.status === 'active' && o.next_billing_date ? `, next renewal ${fmtDate(o.next_billing_date)}` : ''}`)}
-              ${kv('Domain access', ACCESS_LABEL[o.domain_access_method] || o.domain_access_method)}
+              ${o.domain_invited ? kv('DNS invitation', 'Client says they invited our support email ✓') : ''}
+              ${o.sequencer_invited ? kv('Sequencer invitation', 'Client says they invited our support email ✓') : ''}
+              ${o.domain_invited ? '' : kv('Domain access', ACCESS_LABEL[o.domain_access_method] || o.domain_access_method)}
               ${kv('Registrar', o.registrar)}
               ${kv('Registrar email', o.registrar_email)}
               ${kv('Access notes', o.domain_access_notes)}
