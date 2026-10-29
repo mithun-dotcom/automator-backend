@@ -907,23 +907,11 @@ shared.post('/orders', audited('added', 'order', (req, body) => (body ? body.id 
     created = await recordPeriods({ ...order, label: type.label }, periods, currentPaid);
     invoiceId = created.length ? created[created.length - 1] : null;
   }
-  // "Email the invoice to the client now": the current, unpaid one.
-  let emailed = null;
-  if (b.send_invoice === true && invoiceId && mailEnabled()) {
-    const { rows: [inv] } = await query('SELECT status FROM invoices WHERE id = $1', [invoiceId]);
-    if (inv.status === 'unpaid') {
-      try {
-        emailed = (await emailInvoice(req, invoiceId)).to;
-      } catch (err) {
-        console.error(`Batch #${order.id}: invoice email failed: ${err.message}`);
-      }
-    }
-  }
   if (b.notify === true && client.password_set) {
     await billing.notify(client, `New batch added: ${quantity} ${type.label} mailboxes`,
       `Batch #${order.id} has been added to your account.`);
   }
-  res.status(201).json({ id: order.id, invoiceId, invoices: created.length, emailed });
+  res.status(201).json({ id: order.id, invoiceId, invoices: created.length });
 }));
 
 // Issues one invoice per billing period (skipping periods already invoiced),

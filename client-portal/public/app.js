@@ -1109,8 +1109,7 @@ function openBatchDialog(userId) {
         <option value="unpaid">Only the current period, unpaid</option>
         <option value="paid">Only the current period, paid</option>
         <option value="none">Don't create invoices</option></select>
-        <div class="note note-info" style="margin-top:8px"><span class="note-icon">🧾</span><div id="inv-preview"></div></div>
-        <label class="check" id="send-wrap" style="margin-top:8px"><input type="checkbox" name="send_invoice" checked> Email the unpaid invoice to the client now</label></div>
+        <div class="note note-info" style="margin-top:8px"><span class="note-icon">🧾</span><div id="inv-preview"></div></div></div>
       <div class="grid-2">
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
@@ -1148,15 +1147,13 @@ function openBatchDialog(userId) {
     dlg.querySelector('#inv-preview').innerHTML = count === 0 ? 'No invoices: the client won\'t be billed until the next renewal.'
       : `Creates <strong>${count} invoice${count === 1 ? '' : 's'}</strong>${count > 1 ? ` (one per period, ${count - (unpaid ? 1 : 0)} marked paid)` : ''}. ` +
         `The current period, from ${fmtDate(current)}, is <strong>${unpaid ? `unpaid: the client owes ${per}` : 'marked paid'}</strong>.`;
-    dlg.querySelector('#send-wrap').hidden = !unpaid;
   };
   ['input', 'change'].forEach((ev) => f.addEventListener(ev, preview));
   preview();
   onSubmit(f, async (d) => {
-    d.send_invoice = f.send_invoice.checked && !dlg.querySelector('#send-wrap').hidden && f.status.value === 'active';
     const r = await api('POST', `${API()}/orders`, d);
     dlg.close();
-    toast(`Batch #${r.id} added${r.invoices ? ` with ${r.invoices} invoice${r.invoices === 1 ? '' : 's'}` : ''}${r.emailed ? ` · invoice emailed to ${r.emailed}` : ''}`);
+    toast(`Batch #${r.id} added${r.invoiceId ? `. Invoice #${r.invoiceId} is ready under Invoices to edit and send.` : ''}`);
     reloadAdmin();
   });
   dlg.showModal();
