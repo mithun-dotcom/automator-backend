@@ -857,8 +857,9 @@ async function renderAdmin(page, arg, sub) {
   const raw = await api('GET', `${API()}/overview`);
   // The owner's main pages leave out resellers' clients; they're on the Resellers page.
   const direct = (rows) => rows.filter((r) => !r.reseller_id);
+  // Invoices: the owner also sees resellers' invoices there, tagged (team members never get them).
   state.admin = isOwner() && page !== 'invoice'
-    ? { ...raw, orders: direct(raw.orders), clients: direct(raw.clients), invoices: direct(raw.invoices) } : raw;
+    ? { ...raw, orders: direct(raw.orders), clients: direct(raw.clients), invoices: page === 'invoices' ? raw.invoices : direct(raw.invoices) } : raw;
   if (isReseller()) {
     if (page === 'settings') return resellerSettings(await api('GET', '/api/reseller/settings'));
     if (page === 'payouts') return resellerPayouts(await api('GET', '/api/reseller/payouts'));
@@ -1529,6 +1530,8 @@ function adminInvoices() {
       ${invoices.length ? filterBar('invoices', [
         { name: 'status', label: 'Status: any', options: [['unpaid', 'Unpaid (incl. overdue)'], ['overdue', 'Overdue'], ['due7', 'Due in the next 7 days'], ['paid', 'Paid'], ['void', 'Void']] },
         ...(isReseller() ? [] : [{ name: 'seller', label: 'Sold by: anyone', options: sellerOptions(invoices) }]),
+        ...(isOwner() && invoices.some((i) => i.reseller_id) ? [{ name: 'source', label: 'Clients: all', options: [['direct', 'Our clients'], ['reseller', 'Resellers\' clients'],
+          ...[...new Set(invoices.filter((i) => i.reseller_id).map((i) => String(i.reseller_name || '')))].map((n) => [`r:${n.replace(/ /g, '\u00a0')}`, `Reseller: ${n}`])] }] : []),
         { name: 'month', label: 'Issued: any month', options: [...new Set(invoices.map((i) => String(i.issue_date || i.created_at).slice(0, 7)))].sort().reverse().map((m) => [m, monthName(m)]) },
       ]) : ''}
       ${invoices.length ? `<div class="table-wrap"><table>
@@ -1537,7 +1540,7 @@ function adminInvoices() {
           const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
           const in7 = i.status === 'unpaid' && i.due_date >= today && i.due_date <= week;
           return `<tr data-id="${i.id}" data-search="${searchText(`#${i.id}`, i.id, i.company, i.name, i.email, i.description, i.seller)}"
-            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}"><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.name || i.email)}${(i.company || i.name) ? `<div class="muted small">${esc(i.email)}</div>` : ''}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
+            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-source="${i.reseller_id ? `reseller r:${esc(String(i.reseller_name || '').replace(/ /g, '\u00a0'))}` : 'direct'}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}"><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.name || i.email)}${(i.company || i.name) ? `<div class="muted small">${esc(i.email)}</div>` : ''}${i.reseller_id && isOwner() ? `<div><span class="badge b-in_progress">Reseller: ${esc(i.reseller_name || '')}</span></div>` : ''}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
           <td><div class="row" style="flex-wrap:nowrap">
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
             <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
