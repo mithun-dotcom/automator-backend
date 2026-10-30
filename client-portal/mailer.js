@@ -75,7 +75,8 @@ async function sendMail(opts) {
       }
     }
     await transport.sendMail({
-      from: brand ? `${quoteName(brand.senderName)} <${SMTP_USER || SMTP_FROM}>` : SMTP_FROM || SMTP_USER,
+      // A reseller's sending email works here once it's a verified "Send mail as" address of our account.
+      from: brand ? `${quoteName(brand.senderName)} <${brand.senderEmail || SMTP_USER || SMTP_FROM}>` : SMTP_FROM || SMTP_USER,
       replyTo: brand && brand.replyTo ? brand.replyTo : undefined,
       to, subject, text, html,
     });

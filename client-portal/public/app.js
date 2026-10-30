@@ -2405,7 +2405,7 @@ function showResellerLink(r, email) {
   };
 }
 
-function renderResellerDetail({ reseller: r, clients, orders, invoices, today }) {
+function renderResellerDetail({ reseller: r, clients, orders, invoices, today, mailAccount }) {
   const active = orders.filter((o) => o.status === 'active');
   const unpaid = invoices.filter((i) => i.status === 'unpaid');
   shell(ADMIN_TABS, '#/admin/resellers', `
@@ -2437,13 +2437,17 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today })
           </div><div class="hint">PNG or JPG, up to 300 KB. A wide logo on a white or transparent background works best.</div></div>
         <div class="grid-2">
           <div class="field"><label>Sender name</label><input name="sender_name" value="${esc(r.sender_name)}" placeholder="${esc(r.brand_name)}"></div>
-          <div class="field"><label>Reply-to email</label><input name="reply_to" type="email" value="${esc(r.reply_to)}"><div class="hint">Where their clients' replies go.</div></div>
+          <div class="field"><label>Sending email (From)</label><input name="sender_email" type="email" value="${esc(r.sender_email)}" placeholder="e.g. billing@theirbrand.com"></div>
         </div>
-        <div class="field"><label>Support email (email footer)</label><input name="support_email" type="email" value="${esc(r.support_email)}"></div>
+        <div class="hint" style="margin:-8px 0 14px">The address their clients' emails come from. To send from it through MithMill's mail account, add it once in Gmail for ${esc(mailAccount || 'the portal\'s mail account')}: <strong>Settings → Accounts → Send mail as → Add another email address</strong>, and confirm the code sent to it. Until then, Gmail shows your own address instead. Or enter their own mail server below.</div>
+        <div class="grid-2">
+          <div class="field"><label>Reply-to email</label><input name="reply_to" type="email" value="${esc(r.reply_to)}"><div class="hint">Where their clients' replies go.</div></div>
+          <div class="field"><label>Support email (email footer)</label><input name="support_email" type="email" value="${esc(r.support_email)}"></div>
+        </div>
         <div class="field"><label>Payment details</label><textarea name="payment_note" style="min-height:90px" placeholder="Their payment method: bank details, or a payment link">${esc(r.payment_note)}</textarea>
           <div class="hint">Replaces the Mixxbee LLC notice on their clients' invoices and emails while white-label is on. The reseller can also edit this, the sender name and the reply-to.</div></div>
         <details class="smtp-box" ${r.smtp_host ? 'open' : ''}><summary><strong>Send from their own email address</strong> <span class="muted small">(optional: their mail server)</span></summary>
-          <p class="muted small">Without this, their clients' emails come from the MithMill mail account under their sender name, with replies going to their reply-to email. With it, emails are sent from their own address. For Google Workspace: smtp.gmail.com, port 465, their email and an app password.</p>
+          <p class="muted small">Sends through their own mail account instead of MithMill's, so no Gmail "Send mail as" step is needed. For Google Workspace: smtp.gmail.com, port 465, the sending email as the username, and an app password.</p>
           <div class="grid-2">
             <div class="field"><label>SMTP server</label><input name="smtp_host" value="${esc(r.smtp_host)}" placeholder="smtp.gmail.com"></div>
             <div class="field"><label>Port</label><input name="smtp_port" type="number" value="${esc(r.smtp_port)}"></div>
@@ -2452,7 +2456,6 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today })
             <div class="field"><label>Username</label><input name="smtp_user" value="${esc(r.smtp_user)}" autocomplete="off"></div>
             <div class="field"><label>Password ${r.has_smtp_pass ? '<span class="muted small">(saved; leave blank to keep)</span>' : ''}</label><input name="smtp_pass" type="password" autocomplete="new-password"></div>
           </div>
-          <div class="field"><label>Sending email</label><input name="sender_email" type="email" value="${esc(r.sender_email)}" placeholder="Same as the username"></div>
         </details>
         <div class="row" style="justify-content:space-between;margin-top:8px">
           <div class="row"><button class="btn btn-primary" type="submit">Save</button><button type="button" class="btn" id="rs-test">Send me a test email</button></div>

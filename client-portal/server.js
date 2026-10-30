@@ -1723,7 +1723,8 @@ admin.get('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
            FROM invoices i JOIN users u ON u.id = i.user_id
            WHERE u.reseller_id = $1 ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`, [r.id]),
   ]);
-  res.json({ reseller: resellerOut(r), clients: clients.rows, orders: orders.rows, invoices: invoices.rows, today: billing.today() });
+  res.json({ reseller: resellerOut(r), clients: clients.rows, orders: orders.rows, invoices: invoices.rows, today: billing.today(),
+    mailAccount: process.env.SMTP_USER || '' });
 }));
 
 admin.post('/resellers', ownerOnly, asyncRoute(async (req, res) => {
@@ -1844,7 +1845,7 @@ resellerRouter.get('/settings', asyncRoute(async (req, res) => {
   res.json({
     brand_name: r.brand_name, white_label: r.white_label, logo: r.logo_type ? `/brand/${r.id}/logo?v=${r.logo_version}` : null,
     website: r.website, support_email: r.support_email, payment_note: r.payment_note, sender_name: r.sender_name,
-    reply_to: r.reply_to, sender_email: r.smtp_host ? (r.sender_email || r.smtp_user) : '', mailEnabled: mailEnabled(),
+    reply_to: r.reply_to, sender_email: r.sender_email || (r.smtp_host ? r.smtp_user : ''), mailEnabled: mailEnabled(),
   });
 }));
 
