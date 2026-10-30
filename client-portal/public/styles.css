@@ -496,3 +496,10 @@ table.activity td { vertical-align: top; }
 @media (max-width: 700px) { .agree-details { grid-template-columns: 1fr; } .agree-card { padding: 20px 16px; } }
 .agree-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .agree-rates span:not(.muted) { margin-right: 10px; }
+
+/* Locations */
+.country-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; background: var(--surface-2); }
+.loc-history > td { background: var(--surface-2); }
+.sub-table { width: 100%; font-size: 13px; }
+.sub-table th, .sub-table td { padding: 6px 8px; }

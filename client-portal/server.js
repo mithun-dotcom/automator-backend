@@ -14,6 +14,7 @@ const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
 const policy = require('./reseller-policy');
 const agreementPdf = require('./agreementPdf');
+const geo = require('./geo');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -126,6 +127,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   loginAttempts.delete(`${email}|${req.ip}`);
   if (user.role === 'reseller') await assertResellerActive(user.id);
   setSession(res, user);
+  geo.record(user.id, req.ip, 'login', req.get('user-agent'));
   res.json({ ok: true, role: user.role });
 }));
 
@@ -206,6 +208,7 @@ app.get('/api/invites/:token', asyncRoute(async (req, res) => {
 
 app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
   const invite = await findInvite(req.params.token);
+  const { rows: [before] } = await query('SELECT password_set FROM users WHERE email = $1', [invite.email]);
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
   const name = str(req.body.name, 200) || invite.name;
@@ -220,6 +223,7 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
     [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client', invite.sold_by || ''],
   );
   await query('UPDATE invites SET accepted_at = now() WHERE id = $1', [invite.id]);
+  geo.record(user.id, req.ip, before && before.password_set ? 'reset' : 'invite', req.get('user-agent'));
   setSession(res, user);
   res.json({ ok: true, role: user.role });
 }));
@@ -1596,6 +1600,30 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
     today, months: months.rows, lastMonthToDate: compare.rows[0], outstanding: outstanding.rows[0],
     byType: byType.rows, topClients: topClients.rows, recentPayments: recent.rows, bySeller: bySeller.rows,
   });
+}));
+
+// Client / reseller locations (owner): last known city and country per profile,
+// from where they accepted their invite and logged in.
+admin.get('/locations', ownerOnly, asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `SELECT u.id, u.email, u.name, u.company, u.role, u.reseller_id, u.password_set, u.city, u.region, u.country, u.country_code,
+       r.brand_name AS reseller_name,
+       (SELECT min(e.created_at) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'invite') AS joined_at,
+       (SELECT max(e.created_at) FROM login_events e WHERE e.user_id = u.id) AS last_seen,
+       (SELECT e.ip FROM login_events e WHERE e.user_id = u.id ORDER BY e.created_at DESC LIMIT 1) AS last_ip,
+       (SELECT count(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'login')::int AS logins,
+       (SELECT count(DISTINCT e.country) FROM login_events e WHERE e.user_id = u.id AND e.country <> '')::int AS countries
+     FROM users u LEFT JOIN resellers r ON r.user_id = u.reseller_id
+     WHERE u.role IN ('client', 'reseller') AND u.password_set
+     ORDER BY last_seen DESC NULLS LAST, u.created_at DESC`);
+  res.json({ people: rows });
+}));
+
+admin.get('/locations/:id', ownerOnly, asyncRoute(async (req, res) => {
+  const { rows: events } = await query(
+    `SELECT kind, ip, city, region, country, country_code, user_agent, created_at FROM login_events
+      WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`, [Number(req.params.id) || 0]);
+  res.json({ events });
 }));
 
 admin.get('/team', ownerOnly, asyncRoute(async (req, res) => {

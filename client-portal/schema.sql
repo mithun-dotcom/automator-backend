@@ -305,3 +305,23 @@ CREATE TABLE IF NOT EXISTS reseller_agreements (
 CREATE INDEX IF NOT EXISTS reseller_agreements_reseller ON reseller_agreements (reseller_id, signed_at DESC);
 -- Agreed monthly order commitment (inboxes), shown in the agreement.
 ALTER TABLE resellers ADD COLUMN IF NOT EXISTS monthly_commitment INT;
+
+-- Where clients and resellers accept their invite and log in from (approximate,
+-- from their IP address), plus their last known location on the user.
+CREATE TABLE IF NOT EXISTS login_events (
+  id           SERIAL PRIMARY KEY,
+  user_id      INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL,           -- invite | login | reset
+  ip           TEXT NOT NULL DEFAULT '',
+  city         TEXT NOT NULL DEFAULT '',
+  region       TEXT NOT NULL DEFAULT '',
+  country      TEXT NOT NULL DEFAULT '',
+  country_code TEXT NOT NULL DEFAULT '',
+  user_agent   TEXT NOT NULL DEFAULT '',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS login_events_user ON login_events (user_id, created_at DESC);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT '';

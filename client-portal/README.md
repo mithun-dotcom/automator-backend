@@ -30,6 +30,10 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 
 The login page has **Forgot password?**. Anyone with a working login (clients, team members, resellers) enters their email and gets a link to set a new password. The link works for 1 hour and only once. The page gives the same answer whether or not the email has an account, so it can't be used to find out who's a client. Each address gets at most one reset email every 2 minutes. Clients who haven't accepted their invite yet need a new invite instead (Clients & invites → Resend invite).
 
+## Client / reseller locations
+
+When a client or reseller accepts an invite, logs in or resets their password, the portal records their IP address and looks up an approximate city, region and country (ipwho.is, in the background, set by `GEO_LOOKUP_URL`). **Locations** (owner only) lists every client and reseller with their last known city and country, last IP, when they joined, their last login and how many times they've logged in. It also has a count per country, search, filters by type and country, and a login history per person with the device. Locations are approximate (VPNs and mobile networks vary), and recording began when this was added.
+
 ## Resellers
 
 The owner invites resellers under **Resellers** (owner only). A reseller logs in to the same portal and gets a reseller panel (Batches, Clients, Invoices, Settings) that shows only their own clients. There they add clients, batches and invoices, and send invoices and urgent reminders. Their clients don't log in; they get invoices and the 7/3/1-day renewal reminders by email.

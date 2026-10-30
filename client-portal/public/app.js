@@ -216,6 +216,7 @@ const ICONS = {
   invoices: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
   team: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/><path d="m17 3 1.5 1.5L21 2"/>',
   chart: '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 6-7"/>',
+  map: '<path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
   reseller: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
@@ -226,7 +227,7 @@ const ICONS = {
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
   '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
-  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing',
+  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
 };
 
 // Layout borrowed from the MithMill commission portal: navy sidebar with the
@@ -849,7 +850,7 @@ function setAdminTabs() {
   }
   ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices']);
   if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
-  if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
+  if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/locations', 'Locations'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
 
 async function renderAdmin(page, arg, sub) {
@@ -863,6 +864,7 @@ async function renderAdmin(page, arg, sub) {
     if (page === 'payouts') return resellerPayouts(await api('GET', '/api/reseller/payouts'));
     if (['team', 'analytics', 'resellers'].includes(page)) return go('#/admin/orders');
   }
+  if (page === 'locations') return isOwner() ? renderLocations(await api('GET', '/api/admin/locations')) : go('#/admin/orders');
   if (page === 'resellers') {
     if (!isOwner()) return go('#/admin/orders');
     return arg ? renderResellerDetail({
@@ -2764,4 +2766,72 @@ function renderAgreement(ag) {
     go('#/admin/orders');
     route();
   });
+}
+
+// ------------------------------------------------------------------ locations (owner)
+
+const flag = (cc) => (/^[A-Z]{2}$/.test(cc || '') ? String.fromCodePoint(...[...cc].map((c) => 127397 + c.charCodeAt(0))) : '');
+const KIND_LABEL = { invite: 'Accepted invite', login: 'Logged in', reset: 'Reset password' };
+
+// Where each client and reseller accepted their invite and logs in from.
+function renderLocations({ people }) {
+  const byCountry = {};
+  people.filter((p) => p.country).forEach((p) => { byCountry[p.country] = (byCountry[p.country] || { n: 0, cc: p.country_code }); byCountry[p.country].n += 1; });
+  const countries = Object.entries(byCountry).sort((a, b) => b[1].n - a[1].n);
+  const type = (p) => (p.role === 'reseller' ? 'reseller' : p.reseller_id ? 'reseller_client' : 'client');
+  const typeLabel = { client: 'Client', reseller: 'Reseller', reseller_client: "Reseller's client" };
+  shell(ADMIN_TABS, '#/admin/locations', `
+    <div class="page-head"><div><h1>Client / reseller locations</h1><p class="muted">Approximate city and country from where each person accepted their invite and logs in. Only you can see this page.</p></div></div>
+    <div class="stack">
+      ${countries.length ? `<div class="card card-pad"><div class="country-chips">${countries.map(([c, v]) => `<span class="chip">${flag(v.cc)} ${esc(c)} <strong>${v.n}</strong></span>`).join('')}</div></div>` : ''}
+      <div class="card">
+        ${people.length ? filterBar('locations', [
+          { name: 'type', label: 'Type: all', options: [['client', 'Clients'], ['reseller', 'Resellers']] },
+          { name: 'country', label: 'Country: any', options: [...countries.map(([c]) => [c, c]), ['__none', 'Unknown']] },
+        ]) : ''}
+        ${people.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Profile</th><th>Type</th><th>City</th><th>Country</th><th>Last IP</th><th>Joined</th><th>Last login</th><th class="num">Logins</th><th></th></tr></thead>
+          <tbody>${people.map((p) => `<tr data-id="${p.id}" data-search="${searchText(p.name, p.company, p.email, p.city, p.country, p.reseller_name)}"
+              data-type="${p.role === 'reseller' ? 'reseller' : 'client'}" data-country="${esc(p.country || '__none')}">
+            <td><strong>${esc(p.company || p.name || p.email)}</strong><div class="muted small">${p.company && p.name ? `${esc(p.name)} · ` : ''}${esc(p.email)}</div>
+              ${p.reseller_name ? `<div class="muted small">via reseller ${esc(p.reseller_name)}</div>` : ''}</td>
+            <td><span class="badge ${p.role === 'reseller' ? 'b-in_progress' : 'b-active'}">${typeLabel[type(p)]}</span></td>
+            <td>${esc(p.city) || '<span class="muted">—</span>'}${p.region && p.region !== p.city ? `<div class="muted small">${esc(p.region)}</div>` : ''}</td>
+            <td>${p.country ? `${flag(p.country_code)} ${esc(p.country)}` : '<span class="muted">Unknown</span>'}${p.countries > 1 ? `<div class="muted small">${p.countries} countries seen</div>` : ''}</td>
+            <td class="small">${esc(p.last_ip || '—')}</td>
+            <td>${p.joined_at ? fmtDate(p.joined_at) : '<span class="muted">—</span>'}</td>
+            <td>${p.last_seen ? fmtWhen(p.last_seen) : '<span class="muted">Not since tracking began</span>'}</td>
+            <td class="num">${p.logins}</td>
+            <td><button class="btn btn-sm" data-history="${p.id}">History</button></td>
+          </tr>
+          <tr data-for="${p.id}" class="loc-history" hidden><td colspan="9"><div class="muted small">Loading…</div></td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="empty">No clients or resellers have logged in yet.</div>'}
+      </div>
+      <p class="muted small">Locations are looked up from IP addresses, so they're approximate: VPNs, mobile networks and company proxies can show a nearby city or another country. Recording started when this page was added; earlier logins aren't included.</p>
+    </div>`);
+  wireFilterBar('locations');
+  document.querySelectorAll('[data-history]').forEach((b) => {
+    b.onclick = async () => {
+      const row = document.querySelector(`tr[data-for="${b.dataset.history}"]`);
+      row.hidden = !row.hidden;
+      if (row.hidden || row.dataset.loaded) return;
+      try {
+        const { events } = await api('GET', `/api/admin/locations/${b.dataset.history}`);
+        row.dataset.loaded = '1';
+        row.firstElementChild.innerHTML = events.length ? `<table class="sub-table"><thead><tr><th>When</th><th>What</th><th>Location</th><th>IP</th><th>Device</th></tr></thead><tbody>
+          ${events.map((e) => `<tr><td>${fmtWhen(e.created_at)}</td><td>${KIND_LABEL[e.kind] || esc(e.kind)}</td>
+            <td>${e.country ? `${flag(e.country_code)} ${esc([e.city, e.region, e.country].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i).join(', '))}` : '<span class="muted">Unknown</span>'}</td>
+            <td class="small">${esc(e.ip)}</td><td class="small muted">${esc(deviceOf(e.user_agent))}</td></tr>`).join('')}</tbody></table>`
+          : '<div class="muted small">No activity recorded yet.</div>';
+      } catch (ex) { row.firstElementChild.textContent = ex.message; }
+    };
+  });
+}
+
+// "Chrome on Windows" from a user-agent string.
+function deviceOf(ua) {
+  const s = String(ua || '');
+  const browser = /Edg\//.test(s) ? 'Edge' : /OPR\//.test(s) ? 'Opera' : /Chrome\//.test(s) ? 'Chrome' : /Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : '';
+  const os = /Windows/.test(s) ? 'Windows' : /iPhone|iPad/.test(s) ? 'iOS' : /Android/.test(s) ? 'Android' : /Mac OS X/.test(s) ? 'macOS' : /Linux/.test(s) ? 'Linux' : '';
+  return [browser, os].filter(Boolean).join(' on ') || '—';
 }
