@@ -26,6 +26,10 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Separated team members
+
+Under **Team**, the owner can switch on **Separated** when inviting a team member, or later on the member's row. A separated member only sees the clients they added or invited themselves, along with those clients' batches, invoices and pending invites. Other clients don't appear in their lists, and opening one by link returns "not found". Clients added before this feature have no "added by", so separated members don't see them. Switching it off gives the member the normal team view again, right away.
+
 ## Forgot password
 
 The login page has **Forgot password?**. Anyone with a working login (clients, team members, resellers) enters their email and gets a link to set a new password. The link works for 1 hour and only once. The page gives the same answer whether or not the email has an account, so it can't be used to find out who's a client. Each address gets at most one reset email every 2 minutes. Clients who haven't accepted their invite yet need a new invite instead (Clients & invites → Resend invite).

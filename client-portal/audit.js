@@ -71,14 +71,14 @@ async function user(idOrEmail) {
   if (!u) return null;
   return {
     title: `${u.role === 'client' ? 'client' : 'team member'} ${u.company || u.name || u.email} <${u.email}>`,
-    fields: { Email: u.email, Name: u.name, Company: u.company, 'Sold by': u.sold_by, Role: u.role === 'staff' ? 'Team member' : cap(u.role), Account: u.password_set ? 'Joined' : 'Not joined yet' },
+    fields: { Email: u.email, Name: u.name, Company: u.company, 'Sold by': u.sold_by, Role: u.role === 'staff' ? 'Team member' : cap(u.role), ...(u.role === 'staff' ? { Separated: u.separated ? 'Yes, sees only their own clients' : 'No' } : {}), Account: u.password_set ? 'Joined' : 'Not joined yet' },
   };
 }
 
 async function invite(id) {
   const { rows: [i] } = await query('SELECT * FROM invites WHERE id = $1', [id]);
   if (!i) return null;
-  return { title: `invite for ${i.email}`, fields: { Email: i.email, Name: i.name, Company: i.company, Type: i.role === 'staff' ? 'Team member' : 'Client' } };
+  return { title: `invite for ${i.email}`, fields: { Email: i.email, Name: i.name, Company: i.company, Type: i.role === 'staff' ? (i.separated ? 'Team member (separated)' : 'Team member') : 'Client' } };
 }
 
 async function clientPricing(userId) {

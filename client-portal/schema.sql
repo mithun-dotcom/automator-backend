@@ -278,6 +278,12 @@ ALTER TABLE invoices ADD COLUMN IF NOT EXISTS reseller_cost NUMERIC(10,2);
 -- When the owner was alerted that this invoice is unpaid past its limit.
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS overdue_alert_at TIMESTAMPTZ;
 
+-- Separated team members only see the clients they added (users.added_by).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS separated BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS added_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS separated BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS added_by INT REFERENCES users(id) ON DELETE SET NULL;
+
 -- Payouts the owner has made to a reseller.
 CREATE TABLE IF NOT EXISTS reseller_payouts (
   id          SERIAL PRIMARY KEY,

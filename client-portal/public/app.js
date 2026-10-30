@@ -1913,7 +1913,7 @@ function renderTeam(team) {
   }).join('')}</ul>` : '<span class="muted small">No field changes</span>');
 
   shell(ADMIN_TABS, '#/admin/team', `
-    <div class="page-head"><div><h1>Team</h1><p class="muted">Team members can add clients, send invites and manage orders, batches and invoices. Only you can manage the team and Settings.</p></div></div>
+    <div class="page-head"><div><h1>Team</h1><p class="muted">Team members can add clients, send invites and manage orders, batches and invoices. Separated members only see the clients they added. Only you can manage the team and Settings.</p></div></div>
     <div class="stack">
       <form class="card card-pad" id="team-form">
         <h2 style="margin-bottom:14px">Add a team member</h2>
@@ -1921,6 +1921,8 @@ function renderTeam(team) {
           <div class="field"><label for="t-email">Email</label><input id="t-email" name="email" type="email" required></div>
           <div class="field"><label for="t-name">Name</label><input id="t-name" name="name" placeholder="Shown in the activity log and emails"></div>
         </div>
+        <label class="sep-toggle"><span class="switch"><input type="checkbox" name="separated"><span></span></span>
+          <span><strong>Separated</strong><span class="muted small">They only see the clients they add themselves, with those clients' batches and invoices. Other clients stay hidden.</span></span></label>
         <div class="row"><button class="btn btn-primary" type="submit">Send team invite</button><span class="muted small">They set their own password from the invite link.</span></div>
         <div class="error"></div>
         <div id="team-link"></div>
@@ -1929,15 +1931,16 @@ function renderTeam(team) {
       <div class="card">
         <div class="card-head"><h2>Members</h2></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Account</th><th>Added</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th title="Separated members only see the clients they added">Separated</th><th>Account</th><th>Added</th><th></th></tr></thead>
           <tbody>${members.map((m) => `<tr>
             <td>${esc(m.name || '—')}</td><td>${esc(m.email)}</td>
             <td>${m.role === 'admin' ? '<span class="badge b-in_progress">Owner</span>' : 'Team member'}</td>
+            <td>${m.role === 'staff' ? `<label class="switch" title="Only sees the clients they added"><input type="checkbox" data-separate="${m.id}" aria-label="Separated: ${esc(m.email)}" ${m.separated ? 'checked' : ''}><span></span></label>` : '<span class="muted small">Sees all</span>'}</td>
             <td>${m.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-pending">Not joined</span>'}</td>
             <td>${fmtDate(m.created_at)}</td>
             <td>${m.role === 'staff' ? `<button class="btn btn-sm btn-danger" data-remove-member="${m.id}" data-email="${esc(m.email)}">Remove</button>` : ''}</td>
           </tr>`).join('')}
-          ${invites.map((i) => `<tr><td>${esc(i.name || '—')}</td><td>${esc(i.email)}</td><td>Team member</td><td><span class="badge b-in_progress">Invited</span></td><td>${fmtDate(i.created_at)}</td>
+          ${invites.map((i) => `<tr><td>${esc(i.name || '—')}</td><td>${esc(i.email)}</td><td>Team member</td><td>${i.separated ? '<span class="badge b-pending">Separated</span>' : '<span class="muted small">No</span>'}</td><td><span class="badge b-in_progress">Invited</span></td><td>${fmtDate(i.created_at)}</td>
             <td><button class="btn btn-sm btn-ghost" data-revoke-team="${i.id}">Revoke invite</button></td></tr>`).join('')}</tbody>
         </table></div>
       </div>
@@ -1955,11 +1958,19 @@ function renderTeam(team) {
     </div>`);
 
   onSubmit(document.getElementById('team-form'), async (d) => {
-    const r = await api('POST', `${API()}/team`, d);
+    const r = await api('POST', `${API()}/team`, { ...d, separated: d.separated === 'on' });
     renderTeam(await api('GET', `${API()}/team`));
     document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="flex:1;min-width:0">
       <strong>Team invite for ${esc(d.email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
       <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}"></div></div></div>`;
+  });
+  document.querySelectorAll('[data-separate]').forEach((c) => {
+    c.onchange = async () => {
+      try {
+        await api('PATCH', `${API()}/team/${c.dataset.separate}`, { separated: c.checked });
+        toast(c.checked ? 'Separated: they now only see the clients they added' : 'They can now see all clients');
+      } catch (ex) { c.checked = !c.checked; toast(ex.message); }
+    };
   });
   document.querySelectorAll('[data-remove-member]').forEach((b) => {
     b.onclick = async () => {

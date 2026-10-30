@@ -66,7 +66,7 @@ const auth = asyncRoute(async (req, res, next) => {
     throw new HttpError(401, 'Please log in');
   }
   const { rows: [user] } = await query(
-    'SELECT id, email, name, company, role FROM users WHERE id = $1', [uid],
+    'SELECT id, email, name, company, role, separated FROM users WHERE id = $1', [uid],
   );
   if (!user) throw new HttpError(401, 'Please log in');
   if (user.role === 'reseller') await assertResellerActive(user.id);
@@ -215,12 +215,14 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
   const hash = await bcrypt.hash(password, 10);
 
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, role, sold_by) VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO users (email, name, company, password_hash, role, sold_by, added_by, separated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set = true,
        name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
-       sold_by = CASE WHEN users.sold_by = '' THEN EXCLUDED.sold_by ELSE users.sold_by END
+       sold_by = CASE WHEN users.sold_by = '' THEN EXCLUDED.sold_by ELSE users.sold_by END,
+       added_by = COALESCE(users.added_by, EXCLUDED.added_by)
      RETURNING *`,
-    [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client', invite.sold_by || ''],
+    [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client', invite.sold_by || '',
+      invite.role === 'client' ? invite.added_by : null, invite.role === 'staff' && invite.separated],
   );
   await query('UPDATE invites SET accepted_at = now() WHERE id = $1', [invite.id]);
   geo.record(user.id, req.ip, before && before.password_set ? 'reset' : 'invite', req.get('user-agent'));
@@ -446,28 +448,31 @@ const requireAgreement = asyncRoute(async (req, res, next) => {
 shared.use(requireAgreement);
 
 // The owner sees every client; team members only Mithmill's own (not
-// resellers'); a reseller only their own.
-function canSee(req, resellerId) {
+// resellers'), and a separated team member only the clients they added; a
+// reseller only their own. client: { reseller_id, added_by }.
+const separated = (req) => req.user.role === 'staff' && req.user.separated;
+function canSee(req, client) {
   if (req.user.role === 'admin') return true;
-  if (req.user.role === 'reseller') return resellerId === req.user.id;
-  return resellerId == null;
+  if (req.user.role === 'reseller') return client.reseller_id === req.user.id;
+  return client.reseller_id == null && (!separated(req) || client.added_by === req.user.id);
 }
 async function assertClient(req, userId) {
   const { rows: [c] } = await query("SELECT * FROM users WHERE id = $1 AND role = 'client'", [Number(userId) || 0]);
-  if (!c || !canSee(req, c.reseller_id)) throw new HttpError(404, 'Client not found');
+  if (!c || !canSee(req, c)) throw new HttpError(404, 'Client not found');
   return c;
 }
 async function assertOrder(req, id) {
-  const { rows: [o] } = await query('SELECT u.reseller_id FROM orders o JOIN users u ON u.id = o.user_id WHERE o.id = $1', [Number(id) || 0]);
-  if (!o || !canSee(req, o.reseller_id)) throw new HttpError(404, 'Batch not found');
+  const { rows: [o] } = await query('SELECT u.reseller_id, u.added_by FROM orders o JOIN users u ON u.id = o.user_id WHERE o.id = $1', [Number(id) || 0]);
+  if (!o || !canSee(req, o)) throw new HttpError(404, 'Batch not found');
 }
 async function assertInvoice(req, id) {
-  const { rows: [i] } = await query('SELECT u.reseller_id FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.id = $1', [Number(id) || 0]);
-  if (!i || !canSee(req, i.reseller_id)) throw new HttpError(404, 'Invoice not found');
+  const { rows: [i] } = await query('SELECT u.reseller_id, u.added_by FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.id = $1', [Number(id) || 0]);
+  if (!i || !canSee(req, i)) throw new HttpError(404, 'Invoice not found');
 }
 // SQL condition on `users u` for list queries, matching canSee.
 const clientScope = (req) => (req.user.role === 'admin' ? 'true'
-  : req.user.role === 'reseller' ? `u.reseller_id = ${Number(req.user.id)}` : 'u.reseller_id IS NULL');
+  : req.user.role === 'reseller' ? `u.reseller_id = ${Number(req.user.id)}`
+    : separated(req) ? `u.reseller_id IS NULL AND u.added_by = ${Number(req.user.id)}` : 'u.reseller_id IS NULL');
 
 async function activityRecipients() {
   const st = await getSettings();
@@ -527,7 +532,8 @@ shared.get('/overview', asyncRoute(async (req, res) => {
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
            WHERE u.role = 'client' AND ${scope} GROUP BY u.id ORDER BY u.created_at DESC`),
     reseller ? { rows: [] } : query(`SELECT id, email, name, company, expires_at, created_at FROM invites
-           WHERE accepted_at IS NULL AND expires_at > now() AND role = 'client' ORDER BY created_at DESC`),
+           WHERE accepted_at IS NULL AND expires_at > now() AND role = 'client'
+             ${separated(req) ? `AND added_by = ${Number(req.user.id)}` : ''} ORDER BY created_at DESC`),
     query(`SELECT i.*, u.email, u.name, u.company, u.reseller_id, u.sold_by AS seller,
              (SELECT COALESCE(NULLIF(r.brand_name, ''), ru.company, ru.email) FROM resellers r JOIN users ru ON ru.id = r.user_id WHERE r.user_id = u.reseller_id) AS reseller_name
            FROM invoices i JOIN users u ON u.id = i.user_id
@@ -770,10 +776,11 @@ shared.delete('/orders/:id', audited('deleted', 'order', byParam, async (req, re
 admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.id : null), async (req, res) => {
   const email = str(req.body.email, 200).toLowerCase();
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
-  const { rows: [found] } = await query('SELECT role, name, company, password_set, reseller_id FROM users WHERE email = $1', [email]);
+  const { rows: [found] } = await query('SELECT role, name, company, password_set, reseller_id, added_by FROM users WHERE email = $1', [email]);
   if (found && found.role !== 'client') throw new HttpError(400, found.role === 'reseller' ? 'That email belongs to a reseller' : 'That email belongs to a team member');
   // Resellers' clients don't log in to the portal.
   if (found && found.reseller_id) throw new HttpError(400, 'That email belongs to a reseller\'s client, who can\'t be invited');
+  if (found && !canSee(req, found)) throw new HttpError(400, 'A client with that email already exists');
   // A client you added yourself but who never joined gets a normal invite, not a reset.
   const existing = found && found.password_set ? found : null;
   const name = str(req.body.name, 200) || (found && found.name) || '';
@@ -784,9 +791,9 @@ admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.
   // An existing client keeps theirs unless one is given; a new one gets it when they accept.
   if (found && soldBy) await query('UPDATE users SET sold_by = $1 WHERE email = $2', [soldBy, email]);
   const { rows: [created] } = await query(
-    `INSERT INTO invites (email, name, company, token, expires_at, sold_by)
-     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', $5) RETURNING id`,
-    [email, name, company, token, soldBy],
+    `INSERT INTO invites (email, name, company, token, expires_at, sold_by, added_by)
+     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', $5, $6) RETURNING id`,
+    [email, name, company, token, soldBy, req.user.id],
   );
   const link = `${baseUrl(req)}/#/invite/${token}`;
   const emailed = await sendMail({
@@ -833,8 +840,8 @@ shared.post('/clients', audited('added', 'user', (req, body) => (body ? body.id 
   }
   const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id, sold_by) VALUES ($1, $2, $3, $4, false, $5, $6) RETURNING id`,
-    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null, reseller ? '' : str(req.body.sold_by, 100)],
+    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id, sold_by, added_by) VALUES ($1, $2, $3, $4, false, $5, $6, $7) RETURNING id`,
+    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null, reseller ? '' : str(req.body.sold_by, 100), req.user.id],
   );
   res.status(201).json({ id: user.id });
 }));
@@ -999,7 +1006,8 @@ shared.post('/orders/:id/history', asyncRoute(async (req, res) => {
 }));
 
 admin.delete('/invites/:id', audited('revoked', 'invite', byParam, async (req, res) => {
-  await query('DELETE FROM invites WHERE id = $1 AND accepted_at IS NULL', [Number(req.params.id)]);
+  await query(`DELETE FROM invites WHERE id = $1 AND accepted_at IS NULL${separated(req) ? ' AND added_by = $2' : ''}`,
+    separated(req) ? [Number(req.params.id), req.user.id] : [Number(req.params.id)]);
   res.json({ ok: true });
 }));
 
@@ -1636,8 +1644,8 @@ admin.get('/locations/:id', ownerOnly, asyncRoute(async (req, res) => {
 
 admin.get('/team', ownerOnly, asyncRoute(async (req, res) => {
   const [members, invites, log] = await Promise.all([
-    query("SELECT id, email, name, role, password_set, created_at FROM users WHERE role IN ('admin', 'staff') ORDER BY role, created_at"),
-    query(`SELECT id, email, name, expires_at, created_at FROM invites
+    query("SELECT id, email, name, role, password_set, separated, created_at FROM users WHERE role IN ('admin', 'staff') ORDER BY role, created_at"),
+    query(`SELECT id, email, name, separated, expires_at, created_at FROM invites
            WHERE role = 'staff' AND accepted_at IS NULL AND expires_at > now() ORDER BY created_at DESC`),
     query('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 300'),
   ]);
@@ -1653,21 +1661,29 @@ admin.post('/team', ownerOnly, audited('invited', 'invite', (req, body) => (body
   const name = str(req.body.name, 200);
   const token = crypto.randomBytes(24).toString('base64url');
   const { rows: [created] } = await query(
-    `INSERT INTO invites (email, name, company, token, expires_at, role)
-     VALUES ($1, $2, 'Mithmill', $3, now() + interval '${INVITE_DAYS} days', 'staff') RETURNING id`,
-    [email, name, token],
+    `INSERT INTO invites (email, name, company, token, expires_at, role, separated)
+     VALUES ($1, $2, 'Mithmill', $3, now() + interval '${INVITE_DAYS} days', 'staff', $4) RETURNING id`,
+    [email, name, token, req.body.separated === true],
   );
   const link = `${baseUrl(req)}/#/invite/${token}`;
   const emailed = await sendMail({
     to: email,
     subject: 'You have been added to the Mithmill admin team',
     text: `Hi ${name || 'there'},\n\n${req.user.name || req.user.email} added you to the Mithmill client portal admin team. ` +
-      `You can add clients, send invites and manage orders and invoices.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n${link}\n\nMithmill`,
+      `${req.body.separated === true ? 'You can add your own clients and manage their orders and invoices' : 'You can add clients, send invites and manage orders and invoices'}.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n${link}\n\nMithmill`,
     heading: 'Join the MithMill admin team',
     cta: { label: 'Join the team', url: link },
     reason: 'You receive this because the MithMill account owner added you to the admin team.',
   });
   res.status(201).json({ id: created.id, link, emailed });
+}));
+
+// Separated: the team member only sees the clients they added themselves.
+admin.patch('/team/:id', ownerOnly, audited('edited', 'user', byParam, async (req, res) => {
+  const { rows: [u] } = await query("UPDATE users SET separated = $2 WHERE id = $1 AND role = 'staff' RETURNING id",
+    [Number(req.params.id), req.body.separated === true]);
+  if (!u) throw new HttpError(400, 'Only team members can be separated');
+  res.json({ ok: true });
 }));
 
 admin.delete('/team/:id', ownerOnly, audited('deleted', 'user', byParam, async (req, res) => {
