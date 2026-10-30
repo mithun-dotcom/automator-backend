@@ -263,3 +263,25 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS sequencer_invited BOOLEAN NOT NULL D
 -- Whether clients ordering this type give us their domains (and domain
 -- access). Pre-warmed mailboxes come on our own domains, so they don't.
 ALTER TABLE pricing ADD COLUMN IF NOT EXISTS needs_domains BOOLEAN NOT NULL DEFAULT true;
+
+-- Reseller prices: what each reseller pays MithMill per mailbox per month, by
+-- type (missing = the standard price). A reseller's payout on an invoice is
+-- its total minus their cost (reseller_cost, worked out from these prices
+-- when the invoice is created or edited, and fixed once it's paid).
+CREATE TABLE IF NOT EXISTS reseller_pricing (
+  reseller_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  inbox_type        TEXT NOT NULL REFERENCES pricing(inbox_type) ON DELETE CASCADE,
+  price_per_mailbox NUMERIC(10,2) NOT NULL CHECK (price_per_mailbox >= 0),
+  PRIMARY KEY (reseller_id, inbox_type)
+);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS reseller_cost NUMERIC(10,2);
+
+-- Payouts the owner has made to a reseller.
+CREATE TABLE IF NOT EXISTS reseller_payouts (
+  id          SERIAL PRIMARY KEY,
+  reseller_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount      NUMERIC(10,2) NOT NULL CHECK (amount > 0),
+  paid_on     DATE NOT NULL,
+  note        TEXT NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

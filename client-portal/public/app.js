@@ -215,7 +215,7 @@ const ICONS = {
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
   '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
-  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller',
+  '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing',
 };
 
 // Layout borrowed from the MithMill commission portal: navy sidebar with the
@@ -833,7 +833,7 @@ const ADMIN_TABS = [];
 function setAdminTabs() {
   ADMIN_TABS.length = 0;
   if (isReseller()) {
-    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/invoices', 'Invoices'], ['#/admin/settings', 'Settings']);
+    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
     return;
   }
   ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices']);
@@ -849,11 +849,15 @@ async function renderAdmin(page, arg, sub) {
     ? { ...raw, orders: direct(raw.orders), clients: direct(raw.clients), invoices: direct(raw.invoices) } : raw;
   if (isReseller()) {
     if (page === 'settings') return resellerSettings(await api('GET', '/api/reseller/settings'));
+    if (page === 'payouts') return resellerPayouts(await api('GET', '/api/reseller/payouts'));
     if (['team', 'analytics', 'resellers'].includes(page)) return go('#/admin/orders');
   }
   if (page === 'resellers') {
     if (!isOwner()) return go('#/admin/orders');
-    return arg ? renderResellerDetail(await api('GET', `/api/admin/resellers/${encodeURIComponent(arg)}`))
+    return arg ? renderResellerDetail({
+      ...(await api('GET', `/api/admin/resellers/${encodeURIComponent(arg)}`)),
+      pay: await api('GET', `/api/admin/resellers/${encodeURIComponent(arg)}/payouts`),
+    })
       : renderResellers(await api('GET', '/api/admin/resellers'));
   }
   if (page === 'invoice') {
@@ -2425,7 +2429,7 @@ function showResellerLink(r, email) {
   };
 }
 
-function renderResellerDetail({ reseller: r, clients, orders, invoices, today, mailAccount }) {
+function renderResellerDetail({ reseller: r, clients, orders, invoices, today, mailAccount, pay }) {
   const active = orders.filter((o) => o.status === 'active');
   const unpaid = invoices.filter((i) => i.status === 'unpaid');
   shell(ADMIN_TABS, '#/admin/resellers', `
@@ -2483,6 +2487,33 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
         </div>
         <div class="error"></div>
       </form>
+
+      <form class="card" id="rs-prices">
+        <div class="card-head"><div><h2>Their prices</h2><div class="muted small">What this reseller pays you per mailbox per month. Their payout on each invoice is the invoice total minus these prices. Leave blank for your standard price.</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Mailbox type</th><th class="num">Standard price</th><th class="num" style="width:180px">Their price ($)</th></tr></thead><tbody>
+          ${pay.prices.map((p) => `<tr><td>${esc(p.label)}</td><td class="num">${money(p.standard)}</td>
+            <td class="num"><input type="number" step="0.01" min="0" class="num" data-type="${esc(p.inbox_type)}" value="${p.price === null ? '' : p.price}" placeholder="${money(p.standard)}"></td></tr>`).join('')}
+        </tbody></table></div>
+        <div class="card-pad" style="padding-top:12px"><button class="btn btn-primary" type="submit">Save prices</button> <span class="muted small">Unpaid invoices are recalculated; paid ones keep the price they were paid at.</span><div class="error"></div></div>
+      </form>
+
+      <div class="card">
+        <div class="card-head"><div><h2>Payouts</h2><div class="muted small">Their payout = invoice total − their cost. Earned counts paid invoices.</div></div></div>
+        <div class="card-pad">
+          ${payoutTiles(pay.earnings)}
+          <form class="row" id="rs-payout" style="margin-top:16px;align-items:flex-end">
+            <div class="field" style="margin:0;width:140px"><label>Amount ($)</label><input name="amount" type="number" step="0.01" min="0.01" required value="${pay.earnings.balance > 0 ? pay.earnings.balance : ''}"></div>
+            <div class="field" style="margin:0;width:170px"><label>Paid on</label><input name="paid_on" type="date" value="${esc(today)}"></div>
+            <div class="field" style="margin:0;flex:1;min-width:180px"><label>Note (optional)</label><input name="note" placeholder="e.g. Wise transfer, October"></div>
+            <button class="btn btn-primary" type="submit">Record payout</button>
+          </form>
+          <div class="error" id="rs-payout-err"></div>
+        </div>
+        ${pay.payouts.length ? `<div class="table-wrap"><table><thead><tr><th>Paid on</th><th>Note</th><th class="num">Amount</th><th></th></tr></thead><tbody>
+          ${pay.payouts.map((p) => `<tr><td>${fmtDate(p.paid_on)}</td><td>${esc(p.note) || '<span class="muted">—</span>'}</td><td class="num">${money(p.amount)}</td>
+            <td><button class="btn btn-sm btn-ghost" data-del-payout="${p.id}">Delete</button></td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="empty">No payouts recorded yet.</div>'}
+      </div>
 
       <div class="card">
         <div class="card-head"><div><h2>Their clients</h2><div class="muted small">The reseller doesn't see that you can see these.</div></div><span class="muted small">${clients.length}</span></div>
@@ -2546,6 +2577,67 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
     };
     reader.readAsDataURL(file);
   };
+  onSubmit(document.getElementById('rs-prices'), async () => {
+    const prices = [...document.querySelectorAll('#rs-prices input[data-type]')].map((i) => ({ inbox_type: i.dataset.type, price: i.value }));
+    const res = await api('PUT', `/api/admin/resellers/${r.id}/pricing`, { prices });
+    toast(`Prices saved${res.recalculated ? ` · ${res.recalculated} unpaid invoice${res.recalculated === 1 ? '' : 's'} recalculated` : ''}`);
+    route();
+  });
+  const pf = document.getElementById('rs-payout');
+  pf.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('POST', `/api/admin/resellers/${r.id}/payouts`, formData(pf));
+      toast('Payout recorded');
+      route();
+    } catch (ex) { document.getElementById('rs-payout-err').textContent = ex.message; }
+  };
+  document.querySelectorAll('[data-del-payout]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('Delete this payout record?')) return;
+      try { await api('DELETE', `/api/admin/resellers/${r.id}/payouts/${b.dataset.delPayout}`); toast('Payout deleted'); route(); } catch (ex) { toast(ex.message); }
+    };
+  });
   const rm = document.getElementById('rs-logo-remove');
   if (rm) rm.onclick = async () => { await api('PUT', `/api/admin/resellers/${r.id}/logo`, { data_url: null }); toast('Logo removed'); route(); };
+}
+
+// Earned / pending / paid out / balance tiles, for both the reseller and the owner.
+function payoutTiles(e) {
+  const tile = (label, value, sub, strong) => `<div class="pay-tile${strong ? ' strong' : ''}"><div class="kpi-label">${label}</div><div class="kpi-value">${money(value)}</div><div class="kpi-sub">${sub}</div></div>`;
+  return `<div class="pay-tiles">
+    ${tile('Total payout earned', e.earned, `From paid invoices (${money(e.sales)} sales − ${money(e.cost)} cost)`)}
+    ${tile('Pending', e.pending, 'From unpaid invoices, once they\'re paid')}
+    ${tile('Paid out', e.paid_out, 'Payouts made so far')}
+    ${tile('Balance due', e.balance, e.balance > 0 ? 'Earned but not paid out yet' : 'Nothing owed right now', true)}
+  </div>`;
+}
+
+// Reseller: what they earn. Payout on an invoice = its total − their cost (their prices).
+function resellerPayouts({ earnings, prices, invoices, payouts }) {
+  shell(ADMIN_TABS, '#/admin/payouts', `
+    <div class="page-head"><div><h1>Payouts</h1><p class="muted">Your payout on each invoice is what you charge your client minus your price from MithMill.</p></div></div>
+    <div class="stack">
+      <div class="card card-pad">${payoutTiles(earnings)}</div>
+      <div class="charts">
+        <div class="card"><div class="card-head"><div><h2>Your prices</h2><div class="muted small">Per mailbox per month</div></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Mailbox type</th><th class="num">Your price</th></tr></thead><tbody>
+            ${prices.map((p) => `<tr><td>${esc(p.label)}</td><td class="num">${money(p.price === null ? p.standard : p.price)}</td></tr>`).join('')}
+          </tbody></table></div></div>
+        <div class="card"><div class="card-head"><h2>Payouts received</h2></div>
+          ${payouts.length ? `<div class="table-wrap"><table><thead><tr><th>Paid on</th><th>Note</th><th class="num">Amount</th></tr></thead><tbody>
+            ${payouts.map((p) => `<tr><td>${fmtDate(p.paid_on)}</td><td>${esc(p.note) || '<span class="muted">—</span>'}</td><td class="num">${money(p.amount)}</td></tr>`).join('')}
+          </tbody></table></div>` : '<div class="empty">No payouts yet.</div>'}</div>
+      </div>
+      <div class="card"><div class="card-head"><h2>Payout per invoice</h2><span class="muted small">${invoices.length} invoice${invoices.length === 1 ? '' : 's'}</span></div>
+        ${invoices.length ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>Client</th><th>Date</th><th>Status</th><th class="num">Invoice total</th><th class="num">Your cost</th><th class="num">Your payout</th></tr></thead><tbody>
+          ${invoices.map((i) => {
+            const payout = i.amount - (i.reseller_cost || 0);
+            return `<tr><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.name || i.email)}<div class="muted small">${esc(i.description)}</div></td>
+              <td>${fmtDate(i.issue_date || i.created_at)}</td><td>${badge(i.status)}</td><td class="num">${money(i.amount)}</td>
+              <td class="num">${money(i.reseller_cost || 0)}</td><td class="num"><strong class="${payout < 0 ? 'neg' : ''}">${money(payout)}</strong></td></tr>`;
+          }).join('')}
+        </tbody></table></div>` : '<div class="empty">No invoices yet.</div>'}
+      </div>
+    </div>`);
 }

@@ -1205,6 +1205,7 @@ shared.post('/invoices', audited('added', 'invoice', (req, body) => (body ? body
     }
   }
   if (v.orderId) batchIds = await syncRecurringOtherLines(id);
+  await billing.resellerCost(id);
   if (req.body.notify !== false) {
     await billing.notify(v.user, `New invoice: ${billing.money(v.amount)}`,
       `Invoice #${id} for ${billing.money(v.amount)} (${v.description}) is due on ${billing.prettyDate(v.dueDate)}.`,
@@ -1230,6 +1231,7 @@ shared.put('/invoices/:id', audited('edited', 'invoice', byParam, async (req, re
     if (v.status === 'unpaid') await client.query("UPDATE invoices SET status = 'unpaid', paid_at = NULL WHERE id = $1", [id]);
   });
   const batchIds = await syncRecurringOtherLines(id);
+  if (existing.status !== 'paid') await billing.resellerCost(id);
   let thanked = null;
   if (v.status === 'paid' && existing.status !== 'paid' && req.body.thank !== false) {
     const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [id]);
@@ -1835,6 +1837,82 @@ admin.post('/resellers/:id/test-email', ownerOnly, asyncRoute(async (req, res) =
   res.json({ ok: true, to: req.user.email, via: brand.smtp ? 'their mail server' : 'the MithMill mail account' });
 }));
 
+// Reseller earnings: payout = invoice total - their cost. Earned counts paid
+// invoices, pending unpaid ones; balance is earned minus payouts made.
+async function resellerEarnings(resellerId) {
+  const { rows: [e] } = await query(
+    `SELECT COALESCE(SUM(i.amount - COALESCE(i.reseller_cost, 0)) FILTER (WHERE i.status = 'paid'), 0) AS earned,
+            COALESCE(SUM(i.amount - COALESCE(i.reseller_cost, 0)) FILTER (WHERE i.status = 'unpaid'), 0) AS pending,
+            COALESCE(SUM(i.amount) FILTER (WHERE i.status = 'paid'), 0) AS sales,
+            COALESCE(SUM(i.reseller_cost) FILTER (WHERE i.status = 'paid'), 0) AS cost,
+            (SELECT COALESCE(SUM(amount), 0) FROM reseller_payouts WHERE reseller_id = $1) AS paid_out
+       FROM invoices i JOIN users u ON u.id = i.user_id WHERE u.reseller_id = $1`, [resellerId]);
+  return { ...e, balance: Math.round((e.earned - e.paid_out) * 100) / 100 };
+}
+
+async function resellerPrices(resellerId) {
+  const { rows } = await query(
+    `SELECT p.inbox_type, p.label, p.price_per_mailbox AS standard, rp.price_per_mailbox AS price
+       FROM pricing p LEFT JOIN reseller_pricing rp ON rp.inbox_type = p.inbox_type AND rp.reseller_id = $1
+      WHERE p.active OR rp.price_per_mailbox IS NOT NULL ORDER BY p.sort_order`, [resellerId]);
+  return rows;
+}
+
+admin.get('/resellers/:id/payouts', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const { rows: payouts } = await query('SELECT * FROM reseller_payouts WHERE reseller_id = $1 ORDER BY paid_on DESC, id DESC', [r.id]);
+  res.json({ earnings: await resellerEarnings(r.id), prices: await resellerPrices(r.id), payouts });
+}));
+
+// Their price per mailbox per month for each type; blank = the standard price.
+// Unpaid invoices are re-costed; paid ones keep the cost they were paid at.
+admin.put('/resellers/:id/pricing', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const prices = Array.isArray(req.body.prices) ? req.body.prices : [];
+  const changes = [];
+  for (const p of prices) {
+    const type = str(p.inbox_type, 50);
+    const { rows: [old] } = await query('SELECT price_per_mailbox FROM reseller_pricing WHERE reseller_id = $1 AND inbox_type = $2', [r.id, type]);
+    if (p.price === null || p.price === '' || p.price === undefined) {
+      if (old) { await query('DELETE FROM reseller_pricing WHERE reseller_id = $1 AND inbox_type = $2', [r.id, type]); changes.push({ field: type, from: billing.money(old.price_per_mailbox), to: 'standard price' }); }
+      continue;
+    }
+    const price = Number(p.price);
+    if (!(price >= 0)) throw new HttpError(400, 'Prices must be 0 or more');
+    await query(
+      `INSERT INTO reseller_pricing (reseller_id, inbox_type, price_per_mailbox)
+       SELECT $1, inbox_type, $3 FROM pricing WHERE inbox_type = $2
+       ON CONFLICT (reseller_id, inbox_type) DO UPDATE SET price_per_mailbox = EXCLUDED.price_per_mailbox`, [r.id, type, price]);
+    if (!old || old.price_per_mailbox !== price) changes.push({ field: type, from: old ? billing.money(old.price_per_mailbox) : 'standard price', to: billing.money(price) });
+  }
+  const { rows: unpaid } = await query(
+    "SELECT i.id FROM invoices i JOIN users u ON u.id = i.user_id WHERE u.reseller_id = $1 AND i.status = 'unpaid'", [r.id]);
+  for (const { id } of unpaid) await billing.resellerCost(id);
+  if (changes.length) await audit.record(req.user, 'edited', `reseller prices for ${r.brand_name || r.email}`, changes);
+  res.json({ ok: true, recalculated: unpaid.length });
+}));
+
+admin.post('/resellers/:id/payouts', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const amount = Math.round(Number(req.body.amount) * 100) / 100;
+  if (!(amount > 0)) throw new HttpError(400, 'Enter the amount paid');
+  const paidOn = str(req.body.paid_on, 10) || billing.today();
+  if (!DATE_RE.test(paidOn)) throw new HttpError(400, 'Paid on must be a date');
+  const { rows: [p] } = await query(
+    'INSERT INTO reseller_payouts (reseller_id, amount, paid_on, note) VALUES ($1, $2, $3, $4) RETURNING id',
+    [r.id, amount, paidOn, str(req.body.note, 500)]);
+  await audit.record(req.user, 'added', `payout of ${billing.money(amount)} to reseller ${r.brand_name || r.email}`, []);
+  res.status(201).json({ id: p.id });
+}));
+
+admin.delete('/resellers/:id/payouts/:pid', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const { rowCount } = await query('DELETE FROM reseller_payouts WHERE id = $1 AND reseller_id = $2', [Number(req.params.pid) || 0, r.id]);
+  if (!rowCount) throw new HttpError(404, 'Payout not found');
+  await audit.record(req.user, 'deleted', `a payout to reseller ${r.brand_name || r.email}`, []);
+  res.json({ ok: true });
+}));
+
 // ---- reseller portal: their own settings
 
 const resellerRouter = express.Router();
@@ -1867,6 +1945,17 @@ resellerRouter.put('/settings', asyncRoute(async (req, res) => {
   const changes = Object.entries(v).filter(([k, val]) => val !== r[k]).map(([k, val]) => ({ field: k.replace(/_/g, ' '), from: r[k] || '', to: val }));
   if (changes.length) await audit.record(req.user, 'edited', `reseller settings (${r.email})`, changes);
   res.json({ ok: true });
+}));
+
+// The reseller's Payouts page: earnings, their prices, a line per invoice and payouts received.
+resellerRouter.get('/payouts', asyncRoute(async (req, res) => {
+  const [invoices, payouts] = await Promise.all([
+    query(`SELECT i.id, i.description, i.amount, i.reseller_cost, i.status, i.issue_date, i.paid_at, i.created_at, u.email, u.name, u.company
+             FROM invoices i JOIN users u ON u.id = i.user_id
+            WHERE u.reseller_id = $1 AND i.status <> 'void' ORDER BY COALESCE(i.issue_date, i.created_at::date) DESC, i.id DESC LIMIT 500`, [req.user.id]),
+    query('SELECT id, amount, paid_on, note FROM reseller_payouts WHERE reseller_id = $1 ORDER BY paid_on DESC, id DESC', [req.user.id]),
+  ]);
+  res.json({ earnings: await resellerEarnings(req.user.id), prices: await resellerPrices(req.user.id), invoices: invoices.rows, payouts: payouts.rows });
 }));
 
 app.use('/api/reseller', shared);
@@ -2008,6 +2097,10 @@ async function scheduledBilling() {
   await linkStandaloneInvoices();
   await syncExistingOtherLines();
   await moveSoldByToClients();
+  // Resellers' invoices from before reseller prices existed get their cost worked out.
+  const { rows: uncosted } = await query(
+    'SELECT i.id FROM invoices i JOIN users u ON u.id = i.user_id WHERE u.reseller_id IS NOT NULL AND i.reseller_cost IS NULL');
+  for (const { id } of uncosted) await billing.resellerCost(id);
   // One-time: pre-warmed types don't need the client's domains.
   await query(`INSERT INTO settings (key, value) VALUES ('prewarmed_no_domains_v1', now()::text) ON CONFLICT (key) DO NOTHING`).then(async (r) => {
     if (r.rowCount) await query("UPDATE pricing SET needs_domains = false WHERE label ~* 'pre.?warm' OR inbox_type ~* 'pre_?warm'");

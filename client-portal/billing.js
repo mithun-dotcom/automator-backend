@@ -132,8 +132,29 @@ async function createOrderInvoice(order, periodStart, description, itemDescripti
        months === 1 ? itemDescription : `${itemDescription} (${periodLabel(months)} × ${money(order.price_per_mailbox)}/month)`,
        order.quantity, order.price_per_mailbox * months],
     );
+    await resellerCost(inv.id);
   }
   return inv;
+}
+
+// What a reseller pays MithMill for one of their clients' invoices: each line's
+// mailboxes at the reseller's price for that type (or the standard price),
+// for the batch's billing cycle. Stored on the invoice; null for non-resellers.
+async function resellerCost(invoiceId) {
+  const { rows: [inv] } = await query(
+    `SELECT i.order_id, u.reseller_id, o.billing_months FROM invoices i JOIN users u ON u.id = i.user_id
+       LEFT JOIN orders o ON o.id = i.order_id WHERE i.id = $1`, [invoiceId]);
+  if (!inv || !inv.reseller_id) return null;
+  const months = Math.max(1, Number(inv.billing_months) || 1);
+  const { rows: items } = await query(
+    `SELECT it.quantity, COALESCE(rp.price_per_mailbox, p.price_per_mailbox, 0) AS rate
+       FROM invoice_items it
+       LEFT JOIN pricing p ON p.inbox_type = it.inbox_type
+       LEFT JOIN reseller_pricing rp ON rp.inbox_type = it.inbox_type AND rp.reseller_id = $2
+      WHERE it.invoice_id = $1`, [invoiceId, inv.reseller_id]);
+  const cost = Math.round(items.reduce((t, it) => t + it.quantity * it.rate * months, 0) * 100) / 100;
+  await query('UPDATE invoices SET reseller_cost = $1 WHERE id = $2', [cost, invoiceId]);
+  return cost;
 }
 
 // "3 × Google Workspace mailboxes", or the service's name for an "Other" batch.
@@ -248,7 +269,7 @@ const payButtons = (inv, fallbackNote = '') => {
 };
 
 module.exports = {
-  payButtons, whatLabel, periodsSince,
+  payButtons, whatLabel, periodsSince, resellerCost,
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
   cycleMonths, cycleLabel, cycleAmount,
 };

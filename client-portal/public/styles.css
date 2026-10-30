@@ -465,3 +465,11 @@ table.activity td { vertical-align: top; }
 .fb-empty .btn { margin-left: 8px; }
 .invite-note { margin-bottom: 14px; }
 .invite-check { margin-top: 10px; font-weight: 600; color: var(--text); }
+
+/* Reseller payouts */
+.pay-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.pay-tile { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.pay-tile.strong { background: var(--brand-50); border-color: var(--brand-100); }
+.pay-tile .kpi-value { font-size: 22px; }
+.neg { color: var(--red-700); }
+@media (max-width: 900px) { .pay-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
