@@ -46,6 +46,8 @@ The owner can pause anyone's portal access with the **Portal access** switch:
 
 When access is off, that person is logged out right away. They can't log in, use a reset link or accept an invite, and they see "Portal access paused. Please contact MithMill." Emails (invoices, renewal reminders) still go out. Turn the switch back on to restore access. For a reseller this is the same setting as **Access** on their reseller page. Only the owner can change it.
 
+**Cloudflare:** client.mithmill.com is behind Cloudflare, so the app reads the visitor's real address from Cloudflare's `CF-Connecting-IP` header. It only trusts that header when the request really comes from a Cloudflare address. Locations recorded before this fix were Cloudflare servers' (often "Portland, United States"). Those were cleared at startup and are filled in again at each person's next login.
+
 ## Block VPN
 
 On the **Locations** page, the owner can switch on **Block VPN** for any client, reseller or team member. The same switch is on the client and team invite forms. With it on, that person can't accept their invite, log in or keep using the portal while a VPN or proxy is on. They see "Turn off your VPN to connect", so their real location is recorded. Blocked attempts show in red in their location history and as "N blocked" on the Locations page.

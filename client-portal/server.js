@@ -31,6 +31,11 @@ if (!SESSION_SECRET) {
 
 const app = express();
 app.set('trust proxy', 1);
+// req.ip = the visitor's real address, also behind Cloudflare (see geo.clientIp).
+app.use((req, res, next) => {
+  Object.defineProperty(req, 'ip', { value: geo.clientIp(req), configurable: true });
+  next();
+});
 // Large enough for an onboarding CSV of a few thousand mailboxes.
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
@@ -1706,7 +1711,7 @@ admin.get('/locations', ownerOnly, asyncRoute(async (req, res) => {
        (SELECT count(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'vpn_blocked')::int AS vpn_blocked,
        (SELECT min(e.created_at) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'invite') AS joined_at,
        (SELECT max(e.created_at) FROM login_events e WHERE e.user_id = u.id) AS last_seen,
-       (SELECT e.ip FROM login_events e WHERE e.user_id = u.id AND e.kind <> 'vpn_blocked' ORDER BY e.created_at DESC LIMIT 1) AS last_ip,
+       (SELECT e.ip FROM login_events e WHERE e.user_id = u.id AND e.kind <> 'vpn_blocked' AND e.ip <> '' ORDER BY e.created_at DESC LIMIT 1) AS last_ip,
        (SELECT count(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'login')::int AS logins,
        (SELECT count(DISTINCT e.country) FROM login_events e WHERE e.user_id = u.id AND e.country <> '')::int AS countries
      FROM users u LEFT JOIN resellers r ON r.user_id = u.reseller_id
@@ -2359,6 +2364,8 @@ async function scheduledBilling() {
   await linkStandaloneInvoices();
   await syncExistingOtherLines();
   await moveSoldByToClients();
+  const fixedLocations = await geo.forgetCloudflareLocations();
+  if (fixedLocations) console.log(`Cleared ${fixedLocations} location(s) recorded from Cloudflare addresses`);
   // Resellers' invoices from before reseller prices existed get their cost worked out.
   const { rows: uncosted } = await query(
     'SELECT i.id FROM invoices i JOIN users u ON u.id = i.user_id WHERE u.reseller_id IS NOT NULL AND i.reseller_cost IS NULL');
