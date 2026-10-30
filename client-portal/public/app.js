@@ -158,6 +158,7 @@ async function route() {
     try { state.me = await api('GET', '/api/me'); } catch { state.me = null; }
   }
   if (!state.me) return renderLogin();
+  tawkIdentify();
   setAdminTabs();
   if (parts[0] === 'login' || parts[0] === '') return go(isAdminRole(state.me.role) ? '#/admin' : '#/dashboard');
 
@@ -174,6 +175,25 @@ async function route() {
   }
 }
 window.addEventListener('hashchange', route);
+
+// Tells the Tawk.to chat (loaded in index.html) who is chatting, so chats show
+// the person's name, email and whether they're a client, reseller or admin.
+let tawkDone = '';
+function tawkIdentify() {
+  const me = state.me;
+  if (!me || !window.Tawk_API || tawkDone === me.email) return;
+  const attrs = {
+    name: me.name || me.email,
+    email: me.email,
+    role: me.role === 'admin' ? 'Owner' : me.role === 'staff' ? 'Team member' : me.role === 'reseller' ? 'Reseller' : 'Client',
+    ...(me.company ? { company: me.company } : {}),
+  };
+  const apply = () => {
+    try { window.Tawk_API.setAttributes(attrs, () => {}); tawkDone = me.email; } catch { /* chat not ready */ }
+  };
+  if (typeof window.Tawk_API.setAttributes === 'function') apply();
+  else window.Tawk_API.onLoad = apply;
+}
 
 const ICONS = {
   dashboard: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
