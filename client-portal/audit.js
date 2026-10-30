@@ -108,7 +108,7 @@ async function settings() {
   const { rows } = await query('SELECT key, value FROM settings');
   const labels = {
     order_notify_emails: 'New-order emails', csv_required_min: 'CSV required from (mailboxes)',
-    cancel_note: 'Cancellation note', support_email: 'Cancellation requests go to', activity_emails: 'Team activity emails', overdue_alert_emails: 'Unpaid-renewal alerts', website_url: 'Website', privacy_url: 'Privacy policy link', terms_url: 'Terms link',
+    cancel_note: 'Cancellation note', support_email: 'Cancellation requests go to', activity_emails: 'Team activity emails', overdue_alert_emails: 'Unpaid-invoice alerts', website_url: 'Website', privacy_url: 'Privacy policy link', terms_url: 'Terms link',
   };
   return { title: 'settings', fields: Object.fromEntries(rows.filter((r) => labels[r.key]).map((r) => [labels[r.key], r.value])) };
 }

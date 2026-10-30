@@ -1432,7 +1432,7 @@ admin.put('/settings', ownerOnly, audited('edited', 'settings', () => 'all', asy
   }
   if (b.overdue_alert_emails !== undefined) {
     const list = emailList(b.overdue_alert_emails);
-    if (!list.length) throw new HttpError(400, 'Add at least one valid email for unpaid-renewal alerts');
+    if (!list.length) throw new HttpError(400, 'Add at least one valid email for unpaid-invoice alerts');
     updates.overdue_alert_emails = list.join(', ');
   }
   if (b.activity_emails !== undefined) {

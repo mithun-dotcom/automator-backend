@@ -254,47 +254,76 @@ async function runBilling() {
   return { checked: orders.length, remindersSent: sent, overdueAlerts, today: now };
 }
 
-// The day after a renewal date passes with its invoice still unpaid, the owner
-// gets one email per renewal: who hasn't paid, what, and a link to cancel the
-// subscription. Renewals more than 14 days old are skipped (no flood of old alerts).
+// Owner alerts for invoices that should be cancelled for non-payment. Each
+// invoice is alerted once (invoices.overdue_alert_at); invoices more than 14
+// days old are skipped, so there's no flood of old alerts.
+// - Renewal invoice: the day after its renewal date, if still unpaid.
+// - New invoice (a new batch's first invoice, or one with no billing period):
+//   NEW_INVOICE_DAYS days after its issue date, if still unpaid.
+const NEW_INVOICE_DAYS = 3;
+
+// A renewal invoice is issued ahead of its period, or follows an earlier invoice for the batch.
+const IS_RENEWAL = `(i.period_start IS NOT NULL AND (i.period_start > COALESCE(i.issue_date, i.created_at::date)
+  OR EXISTS (SELECT 1 FROM invoices e WHERE e.order_id = i.order_id AND e.period_start < i.period_start)))`;
+
 async function alertUnpaidRenewals(now) {
   const { rows: [setting] } = await query("SELECT value FROM settings WHERE key = 'overdue_alert_emails'");
   const to = String(setting ? setting.value : (process.env.OVERDUE_ALERT_EMAILS || 'mithun@mithmill.com'))
     .split(/[\s,;]+/).filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
   if (!to.length) return 0;
   const { rows } = await query(
-    `SELECT i.id AS invoice_id, i.amount, i.period_start, o.id AS order_id, o.batch_name, o.quantity, o.inbox_type, p.label,
-            u.email, u.name, u.company, u.sold_by,
-            (SELECT COALESCE(NULLIF(r.brand_name, ''), ru.email) FROM resellers r JOIN users ru ON ru.id = r.user_id WHERE r.user_id = u.reseller_id) AS reseller
-       FROM invoices i JOIN orders o ON o.id = i.order_id JOIN pricing p ON p.inbox_type = o.inbox_type JOIN users u ON u.id = i.user_id
-      WHERE i.status = 'unpaid' AND i.period_start IS NOT NULL AND i.period_start < $1 AND i.period_start >= ($1::date - 14)
-        AND o.status = 'active'
-        AND NOT EXISTS (SELECT 1 FROM reminders_sent s WHERE s.order_id = o.id AND s.billing_date = i.period_start AND s.days_before = -1)
-      ORDER BY i.period_start`, [now]);
+    `SELECT * FROM (
+       SELECT i.id AS invoice_id, i.amount, i.sent_at, i.order_id, o.batch_name, o.quantity, o.inbox_type, p.label,
+              u.email, u.name, u.company, u.sold_by,
+              (SELECT COALESCE(NULLIF(r.brand_name, ''), ru.email) FROM resellers r JOIN users ru ON ru.id = r.user_id WHERE r.user_id = u.reseller_id) AS reseller,
+              ${IS_RENEWAL} AS renewal,
+              CASE WHEN ${IS_RENEWAL} THEN i.period_start ELSE COALESCE(i.issue_date, i.created_at::date) END AS since
+         FROM invoices i JOIN users u ON u.id = i.user_id
+         LEFT JOIN orders o ON o.id = i.order_id LEFT JOIN pricing p ON p.inbox_type = o.inbox_type
+        WHERE i.status = 'unpaid' AND i.overdue_alert_at IS NULL AND (o.id IS NULL OR o.status <> 'cancelled')
+     ) x
+     WHERE since >= ($1::date - 14)
+       AND ((renewal AND since < $1) OR (NOT renewal AND since <= ($1::date - ${NEW_INVOICE_DAYS})))
+       -- Renewals alerted before overdue_alert_at existed.
+       AND NOT (renewal AND EXISTS (SELECT 1 FROM reminders_sent s WHERE s.order_id = x.order_id AND s.billing_date = x.since AND s.days_before = -1))
+     ORDER BY since`, [now]);
   let sent = 0;
   for (const r of rows) {
-    const claim = await query(
-      'INSERT INTO reminders_sent (order_id, billing_date, days_before) VALUES ($1, $2, -1) ON CONFLICT DO NOTHING RETURNING 1',
-      [r.order_id, r.period_start]);
+    const claim = await query('UPDATE invoices SET overdue_alert_at = now() WHERE id = $1 AND overdue_alert_at IS NULL RETURNING 1', [r.invoice_id]);
     if (!claim.rows.length) continue;
     const who = r.company || r.name || r.email;
-    const what = r.inbox_type === 'other' ? (r.batch_name || 'Other service') : `${r.quantity} × ${r.label} mailboxes`;
-    const batch = r.batch_name ? `${r.batch_name} (batch #${r.order_id})` : `Batch #${r.order_id}`;
-    const late = daysBetween(r.period_start, now);
+    const what = !r.order_id ? 'invoice' : r.inbox_type === 'other' ? (r.batch_name || 'Other service') : `${r.quantity} × ${r.label} mailboxes`;
+    const batch = !r.order_id ? `Invoice #${r.invoice_id}` : r.batch_name ? `${r.batch_name} (batch #${r.order_id})` : `Batch #${r.order_id}`;
+    const late = daysBetween(r.since, now);
+    const ago = late === 1 ? '1 day' : `${late} days`;
     const link = APP_URL ? `${APP_URL}/#/admin/invoice/${r.invoice_id}` : '';
+    const when = r.renewal
+      ? `• Due / renewal date: ${prettyDate(r.since)} (${ago} ago)\n`
+      : `• New invoice issued: ${prettyDate(r.since)} (unpaid for ${ago}; the limit is ${NEW_INVOICE_DAYS} days)\n` +
+        `• Sent to the client: ${r.sent_at ? prettyDate(r.sent_at) : 'not yet (use Send invoice)'}\n`;
+    const history = r.renewal
+      ? 'The client was sent the 7, 3 and 1-day renewal reminders. The due date is over'
+      : `This new invoice is past its ${NEW_INVOICE_DAYS}-day payment limit`;
     await sendMail({
       to: to.join(', '),
-      subject: `Payment not received: ${who}, due ${prettyDate(r.period_start)}`,
-      text: `${who} (${r.email}) hasn't paid for ${batch}: ${what}.\n\n` +
-        `• Due / renewal date: ${prettyDate(r.period_start)} (${late === 1 ? '1 day' : `${late} days`} ago)\n` +
+      subject: r.renewal
+        ? `Payment not received: ${who}, due ${prettyDate(r.since)}`
+        : `New invoice unpaid for ${ago}: ${who}, invoice #${r.invoice_id}`,
+      text: `${who} (${r.email}) hasn't paid for ${batch}${r.order_id ? `: ${what}` : ''}.\n\n` +
+        when +
         `• Unpaid invoice: #${r.invoice_id}, ${money(r.amount)}\n` +
         `${r.reseller ? `• Reseller's client: ${r.reseller}\n` : ''}${r.sold_by ? `• Sold by: ${r.sold_by}\n` : ''}` +
-        `\nThe client was sent the 7, 3 and 1-day renewal reminders. The due date is over, so you may want to cancel this subscription: ` +
+        `\n${history}, so you may want to cancel this subscription: ` +
         `open the invoice and click Cancel subscription (choose "No payment made" to email the client).${link ? `\n\nOpen the invoice: ${link}` : ''}\n\nMithmill`,
       heading: 'Payment not received: cancel the subscription?',
-      alert: { title: `${who} hasn't paid`, body: `${batch} was due on ${prettyDate(r.period_start)}. Invoice #${r.invoice_id} (${money(r.amount)}) is still unpaid.` },
+      alert: {
+        title: `${who} hasn't paid`,
+        body: r.renewal
+          ? `${batch} was due on ${prettyDate(r.since)}. Invoice #${r.invoice_id} (${money(r.amount)}) is still unpaid.`
+          : `New invoice #${r.invoice_id} (${money(r.amount)}) was issued on ${prettyDate(r.since)} and is still unpaid after ${ago}.`,
+      },
       cta: link ? { label: 'Open invoice to cancel', url: link } : null,
-      reason: 'You receive this because you are on the unpaid-renewal alert list (Settings).',
+      reason: 'You receive this because you are on the unpaid-invoice alert list (Settings).',
     });
     sent += 1;
   }

@@ -62,7 +62,11 @@ Each active batch renews monthly. Before each renewal date the client gets an in
 
 While the renewal invoice is unpaid, each reminder email also asks the client to confirm their payment by replying with a screenshot, or by sharing it in their WhatsApp or Slack group with you (recommended).
 
-**Unpaid-renewal alert:** if a renewal invoice is still unpaid the day after its renewal date, an alert goes to `mithun@mithmill.com`. You can change this address under **Pricing & reminders** → "Send unpaid-renewal alerts to". The alert names the client, batch, amount, days overdue, reseller and seller, and has an **Open invoice to cancel** button (then **Cancel subscription** → "No payment made"). It is sent once per renewal. Renewals more than 14 days overdue are skipped.
+**Unpaid-invoice alerts:** an alert goes to `mithun@mithmill.com` when:
+- a renewal invoice is still unpaid the day after its renewal date, or
+- a new invoice (a new batch's first invoice, or an invoice with no billing period) is still unpaid 3 days after its issue date.
+
+You can change the address under **Pricing & reminders** → "Send unpaid-invoice alerts to". The alert names the client, batch, amount, how long it has been unpaid, reseller and seller. For a new invoice it also says whether the invoice has been sent to the client. It has an **Open invoice to cancel** button (then **Cancel subscription** → "No payment made"). Each invoice is alerted once. Invoices more than 14 days past the date are skipped.
 
 Renewal reminders are emailed even to clients who haven't accepted their invite yet (without the portal link). Other notifications wait until they join.
 

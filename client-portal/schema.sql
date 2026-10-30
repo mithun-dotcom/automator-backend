@@ -275,6 +275,8 @@ CREATE TABLE IF NOT EXISTS reseller_pricing (
   PRIMARY KEY (reseller_id, inbox_type)
 );
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS reseller_cost NUMERIC(10,2);
+-- When the owner was alerted that this invoice is unpaid past its limit.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS overdue_alert_at TIMESTAMPTZ;
 
 -- Payouts the owner has made to a reseller.
 CREATE TABLE IF NOT EXISTS reseller_payouts (
