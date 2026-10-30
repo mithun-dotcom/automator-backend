@@ -473,3 +473,26 @@ table.activity td { vertical-align: top; }
 .pay-tile .kpi-value { font-size: 22px; }
 .neg { color: var(--red-700); }
 @media (max-width: 900px) { .pay-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Reseller agreement */
+.agree-page { min-height: 100vh; background: var(--brand-950); padding: 32px 16px; display: flex; justify-content: center; }
+.agree-card { width: 100%; max-width: 860px; padding: 28px 32px; align-self: flex-start; }
+.agree-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.agree-head img { height: 44px; width: auto; }
+.agree-card h1 { font-size: 22px; margin: 0 0 6px; }
+.agree-details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; margin: 16px 0; padding: 14px 16px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; }
+.agree-details > div { display: grid; gap: 2px; min-width: 0; }
+.agree-rates { grid-column: 1 / -1; display: flex !important; flex-wrap: wrap; gap: 6px 16px; }
+.agree-rates .muted { flex-basis: 100%; }
+.agree-text { max-height: 46vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin-bottom: 18px; font-size: 14px; line-height: 1.6; color: var(--text-2); }
+.agree-text h2 { font-size: 15px; margin: 18px 0 6px; color: var(--brand-800); }
+.agree-text h2:first-child { margin-top: 0; }
+.agree-text h3 { font-size: 14px; margin: 12px 0 4px; color: var(--text); }
+.agree-text p { margin: 0 0 6px; }
+.agree-text ul { margin: 4px 0 8px; padding-left: 20px; }
+.sig-tabs { margin-bottom: 10px; }
+.sig-draw canvas { width: 100%; max-width: 600px; height: auto; aspect-ratio: 600 / 180; border: 1px dashed var(--border); border-radius: 10px; background: #fff; touch-action: none; cursor: crosshair; display: block; margin-bottom: 6px; }
+#sig-preview { display: block; max-width: 300px; max-height: 120px; margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+@media (max-width: 700px) { .agree-details { grid-template-columns: 1fr; } .agree-card { padding: 20px 16px; } }
+.agree-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.agree-rates span:not(.muted) { margin-right: 10px; }

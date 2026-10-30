@@ -12,6 +12,8 @@ const onboarding = require('./onboarding');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
+const policy = require('./reseller-policy');
+const agreementPdf = require('./agreementPdf');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -422,6 +424,21 @@ admin.use(auth, adminOnly);
 const shared = express.Router();
 shared.use(auth, (req, res, next) => (
   ['admin', 'staff', 'reseller'].includes(req.user.role) ? next() : next(new HttpError(403, 'Not allowed'))));
+
+// A reseller has to sign the current Reseller Agreement before using their dashboard.
+async function signedAgreement(resellerId) {
+  const { rows: [a] } = await query(
+    'SELECT id, version, signer_name, signer_title, signed_at FROM reseller_agreements WHERE reseller_id = $1 AND version = $2 ORDER BY signed_at DESC LIMIT 1',
+    [resellerId, policy.VERSION]);
+  return a || null;
+}
+const requireAgreement = asyncRoute(async (req, res, next) => {
+  // The agreement itself (reading, signing, downloading) is always reachable.
+  if (req.user.role !== 'reseller' || req.path.startsWith('/agreement')) return next();
+  if (!(await signedAgreement(req.user.id))) throw new HttpError(428, 'Please read and sign the Reseller Agreement first.');
+  next();
+});
+shared.use(requireAgreement);
 
 // The owner sees every client; team members only Mithmill's own (not
 // resellers'); a reseller only their own.
@@ -1725,8 +1742,10 @@ admin.get('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
            FROM invoices i JOIN users u ON u.id = i.user_id
            WHERE u.reseller_id = $1 ORDER BY (i.status = 'unpaid') DESC, i.due_date DESC, i.id DESC LIMIT 500`, [r.id]),
   ]);
+  const { rows: [agreement] } = await query(
+    'SELECT version, signer_name, signer_title, signed_at, ip FROM reseller_agreements WHERE reseller_id = $1 ORDER BY signed_at DESC LIMIT 1', [r.id]);
   res.json({ reseller: resellerOut(r), clients: clients.rows, orders: orders.rows, invoices: invoices.rows, today: billing.today(),
-    mailAccount: process.env.SMTP_USER || '' });
+    mailAccount: process.env.SMTP_USER || '', agreement: agreement || null, agreementVersion: policy.VERSION });
 }));
 
 admin.post('/resellers', ownerOnly, asyncRoute(async (req, res) => {
@@ -1781,6 +1800,8 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
     smtp_user: b.smtp_user === undefined ? r.smtp_user : str(b.smtp_user, 200),
     white_label: b.white_label === undefined ? r.white_label : Boolean(b.white_label),
     active: b.active === undefined ? r.active : Boolean(b.active),
+    monthly_commitment: b.monthly_commitment === undefined ? r.monthly_commitment
+      : (b.monthly_commitment === '' || b.monthly_commitment === null ? null : Math.max(0, Math.round(Number(b.monthly_commitment)) || 0)),
   };
   if (!v.brand_name) throw new HttpError(400, 'Give the reseller a brand name');
   if (v.smtp_port < 1 || v.smtp_port > 65535) throw new HttpError(400, 'SMTP port must be a number like 465 or 587');
@@ -1791,9 +1812,9 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
   await query(
     `UPDATE resellers SET brand_name = $1, website = $2, support_email = $3, payment_note = $4, sender_name = $5,
        sender_email = $6, reply_to = $7, smtp_host = $8, smtp_port = $9, smtp_user = $10, smtp_pass = $11,
-       white_label = $12, active = $13 WHERE user_id = $14`,
+       white_label = $12, active = $13, monthly_commitment = $15 WHERE user_id = $14`,
     [v.brand_name, v.website, v.support_email, v.payment_note, v.sender_name, v.sender_email, v.reply_to,
-     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id]);
+     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id, v.monthly_commitment]);
   const changes = Object.entries(v).filter(([k, val]) => String(val) !== String(r[k]))
     .map(([k, val]) => ({ field: k.replace(/_/g, ' '), from: String(r[k] ?? ''), to: String(val) }));
   if (pass !== r.smtp_pass) changes.push({ field: 'smtp password', from: '', to: pass ? '(changed)' : '(removed)' });
@@ -1858,6 +1879,13 @@ async function resellerPrices(resellerId) {
   return rows;
 }
 
+admin.get('/resellers/:id/agreement.pdf', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const { rows: [a] } = await query('SELECT pdf, version FROM reseller_agreements WHERE reseller_id = $1 ORDER BY signed_at DESC LIMIT 1', [r.id]);
+  if (!a) throw new HttpError(404, 'This reseller hasn\'t signed the agreement yet');
+  res.attachment(`Mithmill-Reseller-Agreement-v${a.version}-${(r.brand_name || r.email).replace(/[^A-Za-z0-9]+/g, '-')}.pdf`).type('application/pdf').send(a.pdf);
+}));
+
 admin.get('/resellers/:id/payouts', ownerOnly, asyncRoute(async (req, res) => {
   const r = await findReseller(req.params.id);
   const { rows: payouts } = await query('SELECT * FROM reseller_payouts WHERE reseller_id = $1 ORDER BY paid_on DESC, id DESC', [r.id]);
@@ -1917,6 +1945,88 @@ admin.delete('/resellers/:id/payouts/:pid', ownerOnly, asyncRoute(async (req, re
 
 const resellerRouter = express.Router();
 resellerRouter.use(auth, (req, res, next) => (req.user.role === 'reseller' ? next() : next(new HttpError(403, 'Resellers only'))));
+
+// The agreement: its text, the reseller's details and rates, and whether they've signed this version.
+resellerRouter.get('/agreement', asyncRoute(async (req, res) => {
+  const r = await findReseller(req.user.id);
+  const prices = (await resellerPrices(r.id)).map((p) => ({ label: p.label, price: p.price === null ? p.standard : p.price }));
+  res.json({
+    title: policy.TITLE, version: policy.VERSION, blocks: policy.blocks(), signed: await signedAgreement(r.id),
+    reseller: { brand: r.brand_name, name: r.name, email: r.email, commitment: r.monthly_commitment }, prices,
+  });
+}));
+
+// Signing: the reseller's name and a signature image (uploaded or drawn).
+// The signed PDF is stored and emailed to the reseller and to MithMill.
+resellerRouter.post('/agreement', asyncRoute(async (req, res) => {
+  const r = await findReseller(req.user.id);
+  if (await signedAgreement(r.id)) return res.json({ ok: true, already: true });
+  const signerName = str(req.body.signer_name, 120);
+  if (!signerName) throw new HttpError(400, 'Type your full name');
+  if (req.body.agree !== true) throw new HttpError(400, 'Tick the box to confirm you agree');
+  const m = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/.exec(String(req.body.signature || ''));
+  if (!m) throw new HttpError(400, 'Add your signature: upload a PNG or JPG image, or draw it');
+  const signature = Buffer.from(m[2], 'base64');
+  if (signature.length > 1024 * 1024) throw new HttpError(400, 'The signature image must be 1 MB or smaller');
+  if (signature.length < 200) throw new HttpError(400, 'The signature looks empty. Please sign again.');
+  const prices = (await resellerPrices(r.id)).map((p) => ({ label: p.label, price: p.price === null ? p.standard : p.price }));
+  const signedAt = new Date();
+  const signer = { name: signerName, title: str(req.body.signer_title, 120) };
+  let pdf;
+  try {
+    pdf = await agreementPdf.build({
+      reseller: { brand: r.brand_name, name: r.name, company: r.company, email: r.email, commitment: r.monthly_commitment },
+      prices, signer, signedAt, ip: req.ip, signature,
+    });
+  } catch (err) {
+    console.error('Agreement PDF failed:', err);
+    throw new HttpError(400, 'That signature image couldn\'t be used. Please upload a PNG or JPG, or draw it instead.');
+  }
+  await query(
+    `INSERT INTO reseller_agreements (reseller_id, version, signer_name, signer_title, signature, signature_type, ip, user_agent, pdf, signed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [r.id, policy.VERSION, signer.name, signer.title, signature, m[1], req.ip || '', str(req.get('user-agent'), 300), pdf, signedAt]);
+  await audit.record(req.user, 'added', `signed Reseller Agreement v${policy.VERSION} (${r.brand_name || r.email})`,
+    [{ field: 'Signed by', from: '', to: signer.name }]);
+
+  const filename = `Mithmill-Reseller-Agreement-v${policy.VERSION}-${(r.brand_name || r.email).replace(/[^A-Za-z0-9]+/g, '-')}.pdf`;
+  const attachments = [{ filename, content: pdf, contentType: 'application/pdf' }];
+  const when = billing.prettyDate(signedAt.toISOString().slice(0, 10));
+  await sendMail({
+    to: r.email,
+    subject: `Your signed ${policy.TITLE}`,
+    text: `Hi ${r.name || signer.name},\n\nThank you for signing the ${policy.TITLE} (version ${policy.VERSION}) on ${when}. ` +
+      `A copy of the signed agreement is attached as a PDF for your records.\n\nYour reseller dashboard is ready to use: ${baseUrl(req)}\n\nMithmill`,
+    heading: 'Your signed reseller agreement',
+    cta: { label: 'Open your dashboard', url: baseUrl(req) },
+    attachments,
+    reason: 'You receive this because you signed the Mithmill reseller agreement.',
+  });
+  const owners = [...new Set([ADMIN_EMAIL, ...(await activityRecipients())].filter(Boolean))];
+  if (owners.length) {
+    await sendMail({
+      to: owners.join(', '),
+      subject: `Reseller agreement signed: ${r.brand_name || r.email}`,
+      text: `${signer.name}${signer.title ? ` (${signer.title})` : ''} signed the ${policy.TITLE} (version ${policy.VERSION}) for ` +
+        `${r.brand_name || r.company || 'their business'} <${r.email}> on ${signedAt.toUTCString()} from IP ${req.ip || 'unknown'}.\n\n` +
+        `The signed PDF is attached.\n\nReseller page: ${baseUrl(req)}/#/admin/resellers/${r.id}`,
+      heading: 'Reseller agreement signed',
+      cta: { label: 'Open the reseller', url: `${baseUrl(req)}/#/admin/resellers/${r.id}` },
+      attachments,
+      reason: 'You receive this because a reseller signed the Mithmill reseller agreement.',
+    });
+  }
+  res.json({ ok: true });
+}));
+
+resellerRouter.get('/agreement.pdf', asyncRoute(async (req, res) => {
+  const { rows: [a] } = await query('SELECT pdf, version FROM reseller_agreements WHERE reseller_id = $1 ORDER BY signed_at DESC LIMIT 1', [req.user.id]);
+  if (!a) throw new HttpError(404, 'You haven\'t signed the agreement yet');
+  res.attachment(`Mithmill-Reseller-Agreement-v${a.version}.pdf`).type('application/pdf').send(a.pdf);
+}));
+
+// Everything else in the reseller portal needs the signed agreement.
+resellerRouter.use(requireAgreement);
 
 resellerRouter.get('/settings', asyncRoute(async (req, res) => {
   const r = await findReseller(req.user.id);

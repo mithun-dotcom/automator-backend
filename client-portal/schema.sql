@@ -285,3 +285,23 @@ CREATE TABLE IF NOT EXISTS reseller_payouts (
   note        TEXT NOT NULL DEFAULT '',
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Signed reseller agreements: who signed which version, when, from where,
+-- their signature image and the PDF that was emailed. A reseller can't use
+-- their dashboard until they've signed the current version.
+CREATE TABLE IF NOT EXISTS reseller_agreements (
+  id             SERIAL PRIMARY KEY,
+  reseller_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  version        TEXT NOT NULL,
+  signer_name    TEXT NOT NULL,
+  signer_title   TEXT NOT NULL DEFAULT '',
+  signature      BYTEA NOT NULL,
+  signature_type TEXT NOT NULL,
+  ip             TEXT NOT NULL DEFAULT '',
+  user_agent     TEXT NOT NULL DEFAULT '',
+  pdf            BYTEA NOT NULL,
+  signed_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS reseller_agreements_reseller ON reseller_agreements (reseller_id, signed_at DESC);
+-- Agreed monthly order commitment (inboxes), shown in the agreement.
+ALTER TABLE resellers ADD COLUMN IF NOT EXISTS monthly_commitment INT;

@@ -48,7 +48,8 @@ function toHtml({ subject, text, heading, cta, note, reason, preheader, html, af
 
 // Never throws: a failed email must not break an invite, order or reminder.
 // Options: to, subject, text, and optionally heading, cta {label, url}, note, reason,
-// and brand (a reseller's white-label branding from brands.js).
+// brand (a reseller's white-label branding from brands.js) and attachments
+// (nodemailer format, e.g. [{ filename, content: Buffer }]).
 async function sendMail(opts) {
   const { to, subject } = opts;
   if (!transport) {
@@ -67,7 +68,7 @@ async function sendMail(opts) {
       try {
         await brandTransport(brand.smtp).sendMail({
           from: `${quoteName(brand.senderName)} <${brand.senderEmail || brand.smtp.user}>`,
-          replyTo: brand.replyTo || undefined, to, subject, text, html,
+          replyTo: brand.replyTo || undefined, to, subject, text, html, attachments: opts.attachments,
         });
         return true;
       } catch (err) {
@@ -78,7 +79,7 @@ async function sendMail(opts) {
       // A reseller's sending email works here once it's a verified "Send mail as" address of our account.
       from: brand ? `${quoteName(brand.senderName)} <${brand.senderEmail || SMTP_USER || SMTP_FROM}>` : SMTP_FROM || SMTP_USER,
       replyTo: brand && brand.replyTo ? brand.replyTo : undefined,
-      to, subject, text, html,
+      to, subject, text, html, attachments: opts.attachments,
     });
     return true;
   } catch (err) {

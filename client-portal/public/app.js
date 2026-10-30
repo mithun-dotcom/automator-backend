@@ -160,6 +160,17 @@ async function route() {
   if (!state.me) return renderLogin();
   tawkIdentify();
   setAdminTabs();
+  // Resellers sign the Reseller Agreement before anything else.
+  if (isReseller() && !state.agreementOk && parts[0] !== 'password') {
+    try {
+      const ag = await api('GET', '/api/reseller/agreement');
+      if (!ag.signed) return renderAgreement(ag);
+      state.agreementOk = true;
+    } catch (ex) {
+      $app.innerHTML = `<div class="boot">${esc(ex.message)}</div>`;
+      return;
+    }
+  }
   if (parts[0] === 'login' || parts[0] === '') return go(isAdminRole(state.me.role) ? '#/admin' : '#/dashboard');
 
   try {
@@ -256,7 +267,7 @@ function shell(tabs, active, content) {
   document.getElementById('nav-backdrop').onclick = () => document.body.classList.remove('nav-open');
   document.getElementById('logout').onclick = async () => {
     await api('POST', '/api/auth/logout');
-    Object.assign(state, { me: null, dash: null, admin: null, order: null });
+    Object.assign(state, { me: null, dash: null, admin: null, order: null, agreementOk: false });
     go('#/login');
   };
 }
@@ -2354,6 +2365,8 @@ function resellerSettings(st) {
           ${st.logo ? `<img src="${esc(st.logo)}" alt="">` : ''}<div><strong>${esc(st.brand_name)}</strong>${st.website ? `<div class="muted small">${esc(st.website)}</div>` : ''}
           <div class="muted small">Brand name, logo${st.sender_email ? ' and sending address' : ''} are set up by MithMill.</div></div></div>` : ''}
       </div>
+      <div class="card card-pad agree-status"><div><h2>Reseller Agreement</h2><div class="muted small" style="margin-top:4px">You signed the Mithmill Reseller Agreement & Payment Policy.</div></div>
+        <a class="btn btn-sm" href="/api/reseller/agreement.pdf">⬇ Download signed PDF</a></div>
       ${st.white_label ? `<form class="card card-pad" id="rs-form">
         <h2 style="margin-bottom:14px">Your clients' emails</h2>
         <div class="grid-2">
@@ -2429,7 +2442,7 @@ function showResellerLink(r, email) {
   };
 }
 
-function renderResellerDetail({ reseller: r, clients, orders, invoices, today, mailAccount, pay }) {
+function renderResellerDetail({ reseller: r, clients, orders, invoices, today, mailAccount, pay, agreement, agreementVersion }) {
   const active = orders.filter((o) => o.status === 'active');
   const unpaid = invoices.filter((i) => i.status === 'unpaid');
   shell(ADMIN_TABS, '#/admin/resellers', `
@@ -2444,6 +2457,14 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
         [money(unpaid.reduce((n, i) => n + i.amount, 0)), `Unpaid · ${unpaid.length}`],
       ], 'Reseller')}
 
+      <div class="card card-pad agree-status">
+        <div><h2>Reseller Agreement</h2>
+          <div class="muted small" style="margin-top:4px">${agreement
+            ? `Signed by <strong>${esc(agreement.signer_name)}</strong>${agreement.signer_title ? ` (${esc(agreement.signer_title)})` : ''} on ${fmtDate(agreement.signed_at)} · version ${esc(agreement.version)}${agreement.version !== agreementVersion ? ` · <strong>they'll be asked to sign the new version ${esc(agreementVersion)}</strong>` : ''}`
+            : `Not signed yet. They'll be asked to read and sign version ${esc(agreementVersion)} when they next log in, before they can use their dashboard.`}</div></div>
+        ${agreement ? `<a class="btn btn-sm" href="/api/admin/resellers/${r.id}/agreement.pdf">⬇ Signed PDF</a>` : `<span class="badge b-pending">Not signed</span>`}
+      </div>
+
       <form class="card card-pad" id="rs-brand">
         <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:14px">
           <div><h2>White-label</h2><div class="muted small" style="margin-top:4px">On: their clients' emails and invoices use the branding below. Off: they go out under MithMill's brand.</div></div>
@@ -2453,6 +2474,8 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
           <div class="field"><label>Brand name</label><input name="brand_name" required value="${esc(r.brand_name)}"></div>
           <div class="field"><label>Website</label><input name="website" value="${esc(r.website)}" placeholder="https://"></div>
         </div>
+        <div class="field" style="max-width:320px"><label>Monthly order commitment (inboxes)</label><input name="monthly_commitment" type="number" min="0" step="1" value="${r.monthly_commitment ?? ''}" placeholder="e.g. 1000">
+          <div class="hint">Shown in their Reseller Agreement (section 5).</div></div>
         <div class="field"><label>Logo</label>
           <div class="row" style="align-items:center">
             <div class="logo-box">${r.has_logo ? `<img src="/brand/${r.id}/logo?v=${r.logo_version}" alt="">` : '<span class="muted small">No logo</span>'}</div>
@@ -2640,4 +2663,105 @@ function resellerPayouts({ earnings, prices, invoices, payouts }) {
         </tbody></table></div>` : '<div class="empty">No invoices yet.</div>'}
       </div>
     </div>`);
+}
+
+// ------------------------------------------------------------------ reseller agreement
+
+// Shown to a reseller until they sign the current Reseller Agreement: the full
+// text, their details and rates, their name and a signature (drawn or uploaded).
+function renderAgreement(ag) {
+  const para = (b) => (b.type === 'h2' ? `<h2>${esc(b.text)}</h2>` : b.type === 'h3' ? `<h3>${esc(b.text)}</h3>`
+    : b.type === 'li' ? `<li>${esc(b.text)}</li>` : `<p>${esc(b.text)}</p>`);
+  // Group consecutive bullets into lists.
+  let body = '';
+  let inList = false;
+  for (const b of ag.blocks) {
+    if (b.type === 'li' && !inList) { body += '<ul>'; inList = true; }
+    if (b.type !== 'li' && inList) { body += '</ul>'; inList = false; }
+    body += para(b);
+  }
+  if (inList) body += '</ul>';
+  const r = ag.reseller;
+  $app.innerHTML = `<div class="agree-page"><div class="card agree-card">
+    <div class="agree-head"><img src="logo-full.png" alt="MithMill"><div class="muted small">Version ${esc(ag.version)}</div></div>
+    <h1>${esc(ag.title)}</h1>
+    <p class="muted">Before using your reseller dashboard, please read the agreement below and sign it. A signed PDF copy will be emailed to you and to Mithmill.</p>
+    <div class="agree-details">
+      <div><span class="muted small">Business</span><strong>${esc(r.brand || '—')}</strong></div>
+      <div><span class="muted small">Email</span><strong>${esc(r.email)}</strong></div>
+      <div><span class="muted small">Monthly commitment</span><strong>${r.commitment ? `${Number(r.commitment).toLocaleString('en-US')} inboxes` : 'As agreed with Mithmill'}</strong></div>
+      ${ag.prices.length ? `<div class="agree-rates"><span class="muted small">Your wholesale rates (per mailbox / month)</span>${ag.prices.map((p) => `<span>${esc(p.label)}: <strong>${money(p.price)}</strong></span>`).join('')}</div>` : ''}
+    </div>
+    <div class="agree-text" id="agree-text" tabindex="0">${body}</div>
+    <form id="agree-form">
+      <div class="grid-2">
+        <div class="field"><label for="ag-name">Your full name</label><input id="ag-name" name="signer_name" required value="${esc(r.name || '')}" autocomplete="name"></div>
+        <div class="field"><label for="ag-title">Title / role (optional)</label><input id="ag-title" name="signer_title" placeholder="e.g. Founder"></div>
+      </div>
+      <div class="field"><label>Signature</label>
+        <div class="seg sig-tabs" role="group"><button type="button" class="on" data-sig="draw">Draw</button><button type="button" data-sig="upload">Upload image</button></div>
+        <div class="sig-draw"><canvas id="sig-pad" width="600" height="180" aria-label="Draw your signature"></canvas>
+          <div class="row" style="justify-content:space-between"><span class="muted small">Sign with your mouse or finger.</span><button type="button" class="btn btn-sm btn-ghost" id="sig-clear">Clear</button></div></div>
+        <div class="sig-upload" hidden><input type="file" id="sig-file" accept="image/png,image/jpeg"><div class="hint">A photo or scan of your signature, PNG or JPG, up to 1 MB.</div>
+          <img id="sig-preview" alt="" hidden></div>
+      </div>
+      <label class="check" style="margin-bottom:14px"><input type="checkbox" id="ag-agree"> I have read and agree to the ${esc(ag.title)} (version ${esc(ag.version)}).</label>
+      <div class="error"></div>
+      <div class="row" style="justify-content:space-between"><button type="button" class="btn btn-ghost" id="ag-logout">Log out</button><button class="btn btn-primary" type="submit">Sign and continue</button></div>
+    </form>
+  </div></div>`;
+
+  // Drawing pad.
+  const pad = document.getElementById('sig-pad');
+  const ctx = pad.getContext('2d');
+  ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111827';
+  let drawing = false; let drawn = false;
+  const pos = (e) => { const b = pad.getBoundingClientRect(); return [(e.clientX - b.left) * (pad.width / b.width), (e.clientY - b.top) * (pad.height / b.height)]; };
+  pad.addEventListener('pointerdown', (e) => { drawing = true; pad.setPointerCapture(e.pointerId); ctx.beginPath(); ctx.moveTo(...pos(e)); });
+  pad.addEventListener('pointermove', (e) => { if (!drawing) return; ctx.lineTo(...pos(e)); ctx.stroke(); drawn = true; });
+  ['pointerup', 'pointercancel'].forEach((t) => pad.addEventListener(t, () => { drawing = false; }));
+  document.getElementById('sig-clear').onclick = () => { ctx.clearRect(0, 0, pad.width, pad.height); drawn = false; };
+
+  let mode = 'draw'; let uploaded = null;
+  document.querySelectorAll('[data-sig]').forEach((b) => {
+    b.onclick = () => {
+      mode = b.dataset.sig;
+      document.querySelectorAll('[data-sig]').forEach((x) => x.classList.toggle('on', x === b));
+      document.querySelector('.sig-draw').hidden = mode !== 'draw';
+      document.querySelector('.sig-upload').hidden = mode !== 'upload';
+    };
+  });
+  document.getElementById('sig-file').onchange = (e) => {
+    const file = e.target.files[0];
+    uploaded = null;
+    if (!file) return;
+    if (file.size > 1024 * 1024) { toast('The image must be 1 MB or smaller'); e.target.value = ''; return; }
+    const reader = new FileReader();
+    reader.onload = () => { uploaded = reader.result; const img = document.getElementById('sig-preview'); img.src = uploaded; img.hidden = false; };
+    reader.readAsDataURL(file);
+  };
+  document.getElementById('ag-logout').onclick = async () => {
+    await api('POST', '/api/auth/logout');
+    Object.assign(state, { me: null, agreementOk: false });
+    go('#/login');
+  };
+  onSubmit(document.getElementById('agree-form'), async (d) => {
+    if (!document.getElementById('ag-agree').checked) throw new Error('Tick the box to confirm you agree');
+    let signature = null;
+    if (mode === 'draw') {
+      if (!drawn) throw new Error('Draw your signature in the box, or upload an image');
+      // White background so the signature shows on any PDF viewer.
+      const c = document.createElement('canvas'); c.width = pad.width; c.height = pad.height;
+      const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(pad, 0, 0);
+      signature = c.toDataURL('image/png');
+    } else {
+      if (!uploaded) throw new Error('Choose an image of your signature');
+      signature = uploaded;
+    }
+    await api('POST', '/api/reseller/agreement', { signer_name: d.signer_name, signer_title: d.signer_title, signature, agree: true });
+    state.agreementOk = true;
+    toast('Thank you! Your signed agreement has been emailed to you.');
+    go('#/admin/orders');
+    route();
+  });
 }
