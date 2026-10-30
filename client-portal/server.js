@@ -67,9 +67,11 @@ const auth = asyncRoute(async (req, res, next) => {
     throw new HttpError(401, 'Please log in');
   }
   const { rows: [user] } = await query(
-    'SELECT id, email, name, company, role, separated, block_vpn FROM users WHERE id = $1', [uid],
+    'SELECT id, email, name, company, role, separated, block_vpn, access_blocked FROM users WHERE id = $1', [uid],
   );
   if (!user) throw new HttpError(401, 'Please log in');
+  assertNotBlocked(user);
+  delete user.access_blocked;
   if (user.role === 'reseller') await assertResellerActive(user.id);
   if (user.block_vpn) await assertNoVpn(req);
   delete user.block_vpn;
@@ -90,10 +92,18 @@ async function assertNoVpn(req, userId) {
   return check ? false : null;
 }
 
+// "Portal access" off (owner, per person): they can't log in, accept an invite
+// or use the portal until it's turned back on. Emails still go out. For a
+// reseller this is resellers.active; for everyone else users.access_blocked.
+const BLOCKED_MESSAGE = 'Your portal access is paused. Please contact MithMill.';
+function assertNotBlocked(user) {
+  if (user && user.access_blocked) throw new HttpError(403, BLOCKED_MESSAGE, 'blocked');
+}
+
 // The owner can turn a reseller's access off; they can't log in or use the portal then.
 async function assertResellerActive(id) {
   const { rows: [r] } = await query('SELECT active FROM resellers WHERE user_id = $1', [id]);
-  if (!r || !r.active) throw new HttpError(403, 'Your reseller access is turned off. Please contact MithMill.');
+  if (!r || !r.active) throw new HttpError(403, BLOCKED_MESSAGE, 'blocked');
 }
 
 // Team members ("staff") use the admin panel; the owner ("admin") also
@@ -141,6 +151,7 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     throw new HttpError(401, 'Wrong email or password');
   }
   loginAttempts.delete(`${email}|${req.ip}`);
+  assertNotBlocked(user);
   if (user.role === 'reseller') await assertResellerActive(user.id);
   const vpn = user.block_vpn ? await assertNoVpn(req, user.id) : null;
   setSession(res, user);
@@ -160,9 +171,9 @@ app.post('/api/auth/forgot', asyncRoute(async (req, res) => {
   const done = () => res.json({ ok: true });
   // At most one reset email per address every 2 minutes.
   if (Date.now() - (lastReset.get(email) || 0) < 2 * 60000) return done();
-  const { rows: [user] } = await query('SELECT id, email, name, role, password_set FROM users WHERE email = $1', [email]);
+  const { rows: [user] } = await query('SELECT id, email, name, role, password_set, access_blocked FROM users WHERE email = $1', [email]);
   // Not-yet-joined clients (and resellers' clients, who don't log in) need an invite, not a reset.
-  if (!user || !user.password_set) return done();
+  if (!user || !user.password_set || user.access_blocked) return done();
   if (user.role === 'reseller') {
     const { rows: [r] } = await query('SELECT active FROM resellers WHERE user_id = $1', [user.id]);
     if (!r || !r.active) return done();
@@ -225,9 +236,11 @@ app.get('/api/invites/:token', asyncRoute(async (req, res) => {
 
 app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
   const invite = await findInvite(req.params.token);
-  const { rows: [before] } = await query('SELECT id, password_set, block_vpn FROM users WHERE email = $1', [invite.email]);
+  const { rows: [before] } = await query('SELECT id, role, password_set, block_vpn, access_blocked FROM users WHERE email = $1', [invite.email]);
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+  assertNotBlocked(before);
+  if (before && before.role === 'reseller') await assertResellerActive(before.id);
   const blockVpn = invite.block_vpn || Boolean(before && before.block_vpn);
   const vpn = blockVpn ? await assertNoVpn(req, before && before.id) : null;
   const name = str(req.body.name, 200) || invite.name;
@@ -543,7 +556,7 @@ shared.get('/overview', asyncRoute(async (req, res) => {
            LEFT JOIN order_files f ON f.order_id = o.id
            WHERE ${scope}
            ORDER BY (o.status IN ('pending','in_progress')) DESC, o.created_at DESC`),
-    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set, u.reseller_id, u.sold_by AS seller,
+    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set, u.reseller_id, u.sold_by AS seller, u.access_blocked,
              EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
@@ -1647,6 +1660,7 @@ admin.get('/locations', ownerOnly, asyncRoute(async (req, res) => {
   const { rows } = await query(
     `SELECT u.id, u.email, u.name, u.company, u.role, u.reseller_id, u.password_set, u.city, u.region, u.country, u.country_code,
        u.block_vpn, r.brand_name AS reseller_name,
+       CASE WHEN u.role = 'reseller' THEN NOT COALESCE((SELECT rr.active FROM resellers rr WHERE rr.user_id = u.id), true) ELSE u.access_blocked END AS access_blocked,
        (SELECT count(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'vpn_blocked')::int AS vpn_blocked,
        (SELECT min(e.created_at) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'invite') AS joined_at,
        (SELECT max(e.created_at) FROM login_events e WHERE e.user_id = u.id) AS last_seen,
@@ -1657,6 +1671,17 @@ admin.get('/locations', ownerOnly, asyncRoute(async (req, res) => {
      WHERE u.role IN ('reseller', 'staff') OR (u.role = 'client' AND u.reseller_id IS NULL)
      ORDER BY last_seen DESC NULLS LAST, u.created_at DESC`);
   res.json({ people: rows });
+}));
+
+// Portal access on or off for one client, reseller or team member.
+admin.patch('/access/:id', ownerOnly, audited('edited', 'user', byParam, async (req, res) => {
+  const id = Number(req.params.id) || 0;
+  const blocked = req.body.blocked === true;
+  const { rows: [u] } = await query("SELECT role FROM users WHERE id = $1 AND role IN ('client', 'reseller', 'staff')", [id]);
+  if (!u) throw new HttpError(404, 'Person not found');
+  if (u.role === 'reseller') await query('UPDATE resellers SET active = $2 WHERE user_id = $1', [id, !blocked]);
+  else await query('UPDATE users SET access_blocked = $2 WHERE id = $1', [id, blocked]);
+  res.json({ ok: true });
 }));
 
 // "Block VPN" on or off for one client, reseller or team member.

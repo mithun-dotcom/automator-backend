@@ -71,7 +71,7 @@ async function user(idOrEmail) {
   if (!u) return null;
   return {
     title: `${u.role === 'client' ? 'client' : 'team member'} ${u.company || u.name || u.email} <${u.email}>`,
-    fields: { Email: u.email, Name: u.name, Company: u.company, 'Sold by': u.sold_by, Role: u.role === 'staff' ? 'Team member' : cap(u.role), ...(u.role === 'staff' ? { Separated: u.separated ? 'Yes, sees only their own clients' : 'No' } : {}), 'Block VPN': u.block_vpn ? 'On' : 'Off', Account: u.password_set ? 'Joined' : 'Not joined yet' },
+    fields: { Email: u.email, Name: u.name, Company: u.company, 'Sold by': u.sold_by, Role: u.role === 'staff' ? 'Team member' : cap(u.role), ...(u.role === 'staff' ? { Separated: u.separated ? 'Yes, sees only their own clients' : 'No' } : {}), 'Block VPN': u.block_vpn ? 'On' : 'Off', 'Portal access': u.access_blocked ? 'Blocked' : 'On', Account: u.password_set ? 'Joined' : 'Not joined yet' },
   };
 }
 

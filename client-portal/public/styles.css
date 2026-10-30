@@ -440,6 +440,11 @@ table.activity td { vertical-align: top; }
 .vpn-steps { margin: 4px 0 18px; padding-left: 20px; color: var(--text); line-height: 1.7; }
 .vpn-hits { color: var(--red, #b91c1c); margin-top: 4px; white-space: nowrap; }
 tr.vpn-row td { background: #fef2f2; }
+.switch-sm { width: 30px; height: 17px; }
+.switch-sm span::before { width: 11px; height: 11px; left: 3px; top: 3px; }
+.switch-sm input:checked + span::before { transform: translateX(13px); }
+.access-toggle { display: flex; align-items: center; gap: 6px; margin-top: 6px; cursor: pointer; white-space: nowrap; }
+.access-off { color: var(--red, #b91c1c); font-weight: 600; }
 .switch-lg { width: 48px; height: 26px; }
 .switch-lg span::before { width: 20px; height: 20px; }
 .switch-lg input:checked + span::before { transform: translateX(22px); }

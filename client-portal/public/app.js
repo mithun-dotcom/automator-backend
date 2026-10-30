@@ -23,9 +23,9 @@ async function api(method, url, body) {
     go('#/login');
     throw new Error(data.error || 'Please log in');
   }
-  if (data.code === 'vpn' && !/^\/api\/(auth|invites)\//.test(url)) {
-    // "Block VPN" is on for this person and they're on a VPN: nothing works until it's off.
-    renderVpnBlocked();
+  if ((data.code === 'vpn' || data.code === 'blocked') && !/^\/api\/(auth|invites)\//.test(url)) {
+    // "Block VPN" is on and they're on a VPN, or the owner paused their access: nothing works until that changes.
+    if (data.code === 'vpn') renderVpnBlocked(); else renderAccessPaused(data.error);
     throw Object.assign(new Error(data.error), { vpn: true });
   }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
@@ -324,6 +324,22 @@ function renderVpnBlocked() {
     <button class="btn btn-primary" style="width:100%" id="vpn-retry">Try again</button>
     <p class="muted small" style="margin:16px 0 0">Still seeing this with the VPN off? Contact your Mithmill account manager.</p>`);
   document.getElementById('vpn-retry').onclick = () => { state.me = undefined; route(); };
+}
+
+function renderAccessPaused(message) {
+  authCard(`
+    <div class="vpn-icon" aria-hidden="true">⏸️</div>
+    <h1>Portal access paused</h1>
+    <p class="muted">${esc(message || 'Your portal access is paused. Please contact MithMill.')}</p>
+    <button class="btn btn-primary" style="width:100%" id="paused-retry">Try again</button>
+    <p class="muted small" style="margin:16px 0 0"><a href="#/login" id="paused-logout">Log out</a></p>`);
+  document.getElementById('paused-retry').onclick = () => { state.me = undefined; route(); };
+  document.getElementById('paused-logout').onclick = async (e) => {
+    e.preventDefault();
+    await api('POST', '/api/auth/logout');
+    state.me = null;
+    renderLogin();
+  };
 }
 
 function renderForgot() {
@@ -1404,7 +1420,9 @@ function adminClients() {
             return `<tr data-id="${c.id}" data-search="${searchText(c.company, c.name, c.email, c.seller)}" data-seller="${esc(c.seller || '__none')}"
               data-account="${c.password_set ? 'joined' : c.invited ? 'invited' : 'not_invited'}" data-active="${c.active_mailboxes > 0 ? 'yes' : 'no'}">
             <td>${esc(c.company || c.name)}<div class="muted small">${esc(c.name)} · ${esc(c.email)}</div>${c.seller ? `<div class="muted small">Sold by <strong>${esc(c.seller)}</strong></div>` : ''}</td>
-            <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}</td>
+            <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}
+              ${isOwner() ? `<label class="access-toggle" title="Turn off to block this client from the portal for now"><span class="switch switch-sm"><input type="checkbox" data-access="${c.id}" aria-label="Portal access for ${esc(c.email)}" ${c.access_blocked ? '' : 'checked'}><span></span></span><span class="small ${c.access_blocked ? 'access-off' : 'muted'}">${c.access_blocked ? 'Access blocked' : 'Portal access'}</span></label>`
+                : c.access_blocked ? '<div class="small access-off">Access blocked</div>' : ''}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
             <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button>${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
@@ -1458,6 +1476,7 @@ function adminClients() {
     } catch (ex) { err.textContent = ex.message; }
   };
   document.querySelectorAll('[data-batch]').forEach((b) => { b.onclick = () => openBatchDialog(Number(b.dataset.batch)); });
+  wireAccessToggles();
   onSubmit(document.getElementById('inv'), async (d) => {
     const r = await api('POST', `${API()}/invites`, { ...d, block_vpn: d.block_vpn === 'on' });
     state.admin = await api('GET', `${API()}/overview`);
@@ -2812,6 +2831,26 @@ function renderAgreement(ag) {
 const flag = (cc) => (/^[A-Z]{2}$/.test(cc || '') ? String.fromCodePoint(...[...cc].map((c) => 127397 + c.charCodeAt(0))) : '');
 const KIND_LABEL = { invite: 'Accepted invite', login: 'Logged in', reset: 'Reset password', vpn_blocked: 'Blocked: VPN on' };
 
+// Owner's "Portal access" switches (Locations and Clients): off blocks them from the portal until turned back on.
+function wireAccessToggles() {
+  document.querySelectorAll('input[data-access]').forEach((c) => {
+    c.onchange = async () => {
+      const who = c.getAttribute('aria-label').replace('Portal access for ', '');
+      if (!c.checked && !confirm(`Block ${who} from the portal? They're logged out right away and can't log in until you turn access back on. Emails (invoices, reminders) still go out.`)) { c.checked = true; return; }
+      try {
+        await api('PATCH', `/api/admin/access/${c.dataset.access}`, { blocked: !c.checked });
+        const row = c.closest('tr');
+        if (row && row.dataset.access) row.dataset.access = c.checked ? 'on' : 'blocked';
+        const label = c.closest('.access-toggle');
+        if (label) { const t = label.lastElementChild; t.textContent = c.checked ? 'Portal access' : 'Access blocked'; t.className = `small ${c.checked ? 'muted' : 'access-off'}`; }
+        const cl = (state.admin && state.admin.clients || []).find((x) => String(x.id) === c.dataset.access);
+        if (cl) cl.access_blocked = !c.checked;
+        toast(c.checked ? 'Portal access turned back on' : 'Portal access blocked');
+      } catch (ex) { c.checked = !c.checked; toast(ex.message); }
+    };
+  });
+}
+
 // Owner-only "Block VPN" switch for invite forms.
 const vpnToggle = () => `<label class="sep-toggle"><span class="switch"><input type="checkbox" name="block_vpn"><span></span></span>
   <span><strong>Block VPN</strong><span class="muted small">They can't accept the invite or log in while a VPN or proxy is on, so you see where they really are (Locations).</span></span></label>`;
@@ -2832,17 +2871,20 @@ function renderLocations({ people }) {
       <div class="card">
         ${people.length ? filterBar('locations', [
           { name: 'type', label: 'Type: all', options: [['client', 'Clients'], ['reseller', 'Resellers'], ['team', 'Team members']] },
+          { name: 'access', label: 'Access: any', options: [['on', 'Access on'], ['blocked', 'Access blocked']] },
           { name: 'vpn', label: 'Block VPN: any', options: [['on', 'Block VPN on'], ['off', 'Block VPN off']] },
           { name: 'country', label: 'Country: any', options: [...countries.map(([c]) => [c, c]), ['__none', 'Unknown']] },
         ]) : ''}
         ${people.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Profile</th><th>Type</th><th title="Can't accept the invite, log in or use the portal over a VPN or proxy">Block VPN</th><th>City</th><th>Country</th><th>Last IP</th><th>Joined</th><th>Last login</th><th class="num">Logins</th><th></th></tr></thead>
+          <thead><tr><th>Profile</th><th>Type</th><th title="Turn off to block them from the portal for now">Portal access</th><th title="Can't accept the invite, log in or use the portal over a VPN or proxy">Block VPN</th><th>City</th><th>Country</th><th>Last IP</th><th>Joined</th><th>Last login</th><th class="num">Logins</th><th></th></tr></thead>
           <tbody>${people.map((p) => `<tr data-id="${p.id}" data-search="${searchText(p.name, p.company, p.email, p.city, p.country, p.reseller_name)}"
-              data-type="${type(p)}" data-vpn="${p.block_vpn ? 'on' : 'off'}" data-country="${esc(p.country || '__none')}">
+              data-type="${type(p)}" data-access="${p.access_blocked ? 'blocked' : 'on'}" data-vpn="${p.block_vpn ? 'on' : 'off'}" data-country="${esc(p.country || '__none')}">
             <td>${p.role === 'staff' ? `<strong>${esc(p.name || p.email)}</strong><div class="muted small">${esc(p.email)}</div>`
               : `<strong>${esc(p.company || p.name || p.email)}</strong><div class="muted small">${p.company && p.name ? `${esc(p.name)} · ` : ''}${esc(p.email)}</div>`}
               ${p.reseller_name ? `<div class="muted small">via reseller ${esc(p.reseller_name)}</div>` : ''}</td>
             <td><span class="badge ${typeBadge[type(p)]}">${typeLabel[type(p)]}</span>${p.password_set ? '' : '<div class="muted small">Not joined yet</div>'}</td>
+            <td><label class="switch" title="Portal access"><input type="checkbox" data-access="${p.id}" aria-label="Portal access for ${esc(p.email)}" ${p.access_blocked ? '' : 'checked'}><span></span></label>
+              ${p.access_blocked ? '<div class="access-off small">Blocked</div>' : ''}</td>
             <td><label class="switch" title="Block VPN"><input type="checkbox" data-block-vpn="${p.id}" aria-label="Block VPN for ${esc(p.email)}" ${p.block_vpn ? 'checked' : ''}><span></span></label>
               ${p.vpn_blocked ? `<div class="vpn-hits small">${p.vpn_blocked} blocked</div>` : ''}</td>
             <td>${esc(p.city) || '<span class="muted">—</span>'}${p.region && p.region !== p.city ? `<div class="muted small">${esc(p.region)}</div>` : ''}</td>
@@ -2853,12 +2895,13 @@ function renderLocations({ people }) {
             <td class="num">${p.logins}</td>
             <td><button class="btn btn-sm" data-history="${p.id}">History</button></td>
           </tr>
-          <tr data-for="${p.id}" class="loc-history" hidden><td colspan="10"><div class="muted small">Loading…</div></td></tr>`).join('')}</tbody></table></div>`
+          <tr data-for="${p.id}" class="loc-history" hidden><td colspan="11"><div class="muted small">Loading…</div></td></tr>`).join('')}</tbody></table></div>`
           : '<div class="empty">No clients, resellers or team members yet.</div>'}
       </div>
       <p class="muted small">Locations are looked up from IP addresses, so they're approximate: VPNs, mobile networks and company proxies can show a nearby city or another country. Recording started when this page was added; earlier logins aren't included.</p>
     </div>`);
   wireFilterBar('locations');
+  wireAccessToggles();
   document.querySelectorAll('[data-block-vpn]').forEach((c) => {
     c.onchange = async () => {
       try {

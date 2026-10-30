@@ -26,6 +26,14 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Portal access (temporary block)
+
+The owner can pause anyone's portal access with the **Portal access** switch:
+- for clients, on the **Clients & invites** list (under the account badge) and on **Locations**;
+- for resellers and team members, on **Locations**.
+
+When access is off, that person is logged out right away. They can't log in, use a reset link or accept an invite, and they see "Portal access paused. Please contact MithMill." Emails (invoices, renewal reminders) still go out. Turn the switch back on to restore access. For a reseller this is the same setting as **Access** on their reseller page. Only the owner can change it.
+
 ## Block VPN
 
 On the **Locations** page, the owner can switch on **Block VPN** for any client, reseller or team member. The same switch is on the client and team invite forms. With it on, that person can't accept their invite, log in or keep using the portal while a VPN or proxy is on. They see "Turn off your VPN to connect", so their real location is recorded. Blocked attempts show in red in their location history and as "N blocked" on the Locations page.

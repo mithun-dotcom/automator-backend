@@ -287,6 +287,8 @@ ALTER TABLE invites ADD COLUMN IF NOT EXISTS added_by INT REFERENCES users(id) O
 -- "Block VPN": these people can't accept an invite, log in or use the portal over a VPN or proxy.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS block_vpn BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE invites ADD COLUMN IF NOT EXISTS block_vpn BOOLEAN NOT NULL DEFAULT false;
+-- Portal access paused by the owner (resellers use resellers.active instead).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_blocked BOOLEAN NOT NULL DEFAULT false;
 
 -- Payouts the owner has made to a reseller.
 CREATE TABLE IF NOT EXISTS reseller_payouts (
