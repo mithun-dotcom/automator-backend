@@ -289,6 +289,7 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
 const SETTING_DEFAULTS = {
   order_notify_emails: process.env.ORDER_NOTIFY_EMAILS || ADMIN_EMAIL,
   activity_emails: '',
+  overdue_alert_emails: process.env.OVERDUE_ALERT_EMAILS || 'mithun@mithmill.com',
   website_url: 'https://mithmill.com',
   privacy_url: 'https://mithmill.com/privacy-policy',
   terms_url: 'https://mithmill.com/terms',
@@ -1428,6 +1429,11 @@ admin.put('/settings', ownerOnly, audited('edited', 'settings', () => 'all', asy
       if (!/^https?:\/\/\S+$/i.test(url)) throw new HttpError(400, `${label} must be a full link starting with https://`);
       updates[key] = url;
     }
+  }
+  if (b.overdue_alert_emails !== undefined) {
+    const list = emailList(b.overdue_alert_emails);
+    if (!list.length) throw new HttpError(400, 'Add at least one valid email for unpaid-renewal alerts');
+    updates.overdue_alert_emails = list.join(', ');
   }
   if (b.activity_emails !== undefined) {
     const list = emailList(b.activity_emails);

@@ -62,6 +62,8 @@ Each active batch renews monthly. Before each renewal date the client gets an in
 
 While the renewal invoice is unpaid, each reminder email also asks the client to confirm their payment by replying with a screenshot, or by sharing it in their WhatsApp or Slack group with you (recommended).
 
+**Unpaid-renewal alert:** if a renewal invoice is still unpaid the day after its renewal date, an alert goes to `mithun@mithmill.com`. You can change this address under **Pricing & reminders** → "Send unpaid-renewal alerts to". The alert names the client, batch, amount, days overdue, reseller and seller, and has an **Open invoice to cancel** button (then **Cancel subscription** → "No payment made"). It is sent once per renewal. Renewals more than 14 days overdue are skipped.
+
 Renewal reminders are emailed even to clients who haven't accepted their invite yet (without the portal link). Other notifications wait until they join.
 
 The renewal invoice is created 7 days before the renewal date. The check runs at startup and then every hour. Each reminder is recorded in the database, so it is never sent twice. If the service was asleep and missed a reminder, the next run sends one catch-up message with the real number of days left. Dates use `BILLING_TZ`, which defaults to `Asia/Dhaka`.

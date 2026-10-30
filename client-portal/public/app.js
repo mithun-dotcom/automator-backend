@@ -1987,6 +1987,9 @@ function adminSettings() {
         <div class="field"><label for="s-activity">Send team activity (who changed what) to</label>
           <input id="s-activity" name="activity_emails" value="${esc(settings.activity_emails || settings.order_notify_emails)}">
           <div class="hint">You get an email whenever a team member adds, edits or deletes something, with the before and after.</div></div>
+        <div class="field"><label for="s-overdue">Send unpaid-renewal alerts to</label>
+          <input id="s-overdue" name="overdue_alert_emails" value="${esc(settings.overdue_alert_emails)}">
+          <div class="hint">The day after a renewal date passes without payment, you get an email to cancel that subscription.</div></div>
         <h3 class="section-title">Email footer</h3>
         <div class="grid-2">
           <div class="field"><label for="s-web">Website</label><input id="s-web" name="website_url" value="${esc(settings.website_url)}"></div>
