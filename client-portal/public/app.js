@@ -2468,7 +2468,8 @@ function renderResellers({ resellers, mailEnabled }) {
           <thead><tr><th>Reseller</th><th>Access</th><th>White-label</th><th class="num">Clients</th><th class="num">Mailboxes</th><th class="num">Monthly</th><th class="num">Unpaid</th><th></th></tr></thead>
           <tbody>${resellers.map((r) => `<tr>
             <td><a href="#/admin/resellers/${r.id}"><strong>${esc(r.brand_name || r.company || r.email)}</strong></a><div class="muted small">${esc(r.name ? `${r.name} · ` : '')}${esc(r.email)}</div></td>
-            <td>${!r.active ? '<span class="badge b-cancelled">Turned off</span>' : r.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-in_progress">Invited</span>'}</td>
+            <td>${r.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-in_progress">Invited</span>'}
+              <label class="access-toggle" title="Turn off to block this reseller from the portal for now"><span class="switch switch-sm"><input type="checkbox" data-access="${r.id}" aria-label="Portal access for ${esc(r.email)}" ${r.active ? 'checked' : ''}><span></span></span><span class="small ${r.active ? 'muted' : 'access-off'}">${r.active ? 'Portal access' : 'Access blocked'}</span></label></td>
             <td><label class="switch"><input type="checkbox" data-wl="${r.id}" ${r.white_label ? 'checked' : ''}><span></span></label></td>
             <td class="num">${r.clients}</td><td class="num">${r.mailboxes}</td><td class="num">${money(r.monthly)}</td><td class="num">${money(r.unpaid)}</td>
             <td><a class="btn btn-sm" href="#/admin/resellers/${r.id}">Open</a></td>
@@ -2481,6 +2482,7 @@ function renderResellers({ resellers, mailEnabled }) {
     location.hash = `#/admin/resellers/${r.id}`;
     setTimeout(() => showResellerLink(r, d.email), 600);
   });
+  wireAccessToggles();
   document.querySelectorAll('[data-wl]').forEach((cb) => {
     cb.onchange = async () => {
       try {

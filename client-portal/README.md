@@ -30,7 +30,8 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 
 The owner can pause anyone's portal access with the **Portal access** switch:
 - for clients, on the **Clients & invites** list (under the account badge) and on **Locations**;
-- for resellers and team members, on **Locations**.
+- for resellers, on the **Resellers** list and on **Locations**;
+- for team members, on **Locations**.
 
 When access is off, that person is logged out right away. They can't log in, use a reset link or accept an invite, and they see "Portal access paused. Please contact MithMill." Emails (invoices, renewal reminders) still go out. Turn the switch back on to restore access. For a reseller this is the same setting as **Access** on their reseller page. Only the owner can change it.
 
