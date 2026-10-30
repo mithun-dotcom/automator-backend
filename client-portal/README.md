@@ -26,6 +26,12 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Block VPN
+
+On the **Locations** page, the owner can switch on **Block VPN** for any client, reseller or team member. The same switch is on the client and team invite forms. With it on, that person can't accept their invite, log in or keep using the portal while a VPN or proxy is on. They see "Turn off your VPN to connect", so their real location is recorded. Blocked attempts show in red in their location history and as "N blocked" on the Locations page.
+
+VPNs are detected with [proxycheck.io](https://proxycheck.io). It works without a key for about 1,000 checks a day. Each address is cached for 6 hours, and only people with Block VPN on are checked. Set `PROXYCHECK_KEY` on Render for a higher limit. If the check can't be done (the service is down or the daily limit is used up), the person is let in, so nobody is locked out by mistake.
+
 ## Separated team members
 
 Under **Team**, the owner can switch on **Separated** when inviting a team member, or later on the member's row. A separated member only sees the clients they added or invited themselves, along with those clients' batches, invoices and pending invites. Other clients don't appear in their lists, and opening one by link returns "not found". Clients added before this feature have no "added by", so separated members don't see them. Switching it off gives the member the normal team view again, right away.

@@ -31,25 +31,58 @@ async function lookup(ip) {
   }
 }
 
+// VPN / proxy detection for the people the owner has set to "Block VPN".
+// proxycheck.io answers without a key (about 1,000 checks a day); set
+// PROXYCHECK_KEY for more. If the check can't be done, the person is let in.
+const VPN_URL = process.env.VPN_CHECK_URL || 'https://proxycheck.io/v2/{ip}?vpn=1';
+const vpnCache = new Map(); // ip -> { at, result }
+const VPN_TTL = 6 * 3600 * 1000;
+
+// -> { vpn: true|false, type } or null when unknown.
+async function vpnCheck(ip) {
+  const addr = cleanIp(ip);
+  if (isPrivate(addr)) return { vpn: false, type: 'private' };
+  const hit = vpnCache.get(addr);
+  if (hit && Date.now() - hit.at < VPN_TTL) return hit.result;
+  try {
+    let url = VPN_URL.replace('{ip}', encodeURIComponent(addr));
+    if (process.env.PROXYCHECK_KEY) url += `${url.includes('?') ? '&' : '?'}key=${encodeURIComponent(process.env.PROXYCHECK_KEY)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    const d = await res.json();
+    const info = d[addr];
+    if (!info || !['ok', 'warning'].includes(d.status)) throw new Error(d.message || d.status || 'no answer');
+    const result = { vpn: info.proxy === 'yes', type: String(info.type || '').slice(0, 40) };
+    vpnCache.set(addr, { at: Date.now(), result });
+    if (vpnCache.size > 5000) vpnCache.delete(vpnCache.keys().next().value);
+    return result;
+  } catch (err) {
+    console.warn(`[geo] VPN check failed for ${addr}: ${err.message}`);
+    return null;
+  }
+}
+
 // Logs an invite acceptance / login / password reset, then fills in where it
 // came from and updates the person's last known location.
-function record(userId, ip, kind, userAgent) {
+// vpn: the VPN check's answer (true/false) for people with "Block VPN" on.
+// A blocked attempt (kind 'vpn_blocked') doesn't change their last location.
+function record(userId, ip, kind, userAgent, vpn = null) {
   const addr = cleanIp(ip);
   (async () => {
     const { rows: [ev] } = await query(
-      'INSERT INTO login_events (user_id, ip, kind, user_agent) VALUES ($1, $2, $3, $4) RETURNING id',
-      [userId, addr, kind, String(userAgent || '').slice(0, 300)]);
+      'INSERT INTO login_events (user_id, ip, kind, user_agent, vpn) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+      [userId, addr, kind, String(userAgent || '').slice(0, 300), vpn]);
     const loc = await lookup(addr);
     if (!loc) return;
     await query('UPDATE login_events SET city = $1, region = $2, country = $3, country_code = $4 WHERE id = $5',
       [loc.city, loc.region, loc.country, loc.country_code, ev.id]);
+    if (kind === 'vpn_blocked') return;
     // Last known location = the most recent event that has one (lookups can finish out of order).
     await query(
       `UPDATE users u SET city = e.city, region = e.region, country = e.country, country_code = e.country_code
          FROM (SELECT city, region, country, country_code FROM login_events
-                WHERE user_id = $1 AND country <> '' ORDER BY created_at DESC, id DESC LIMIT 1) e
+                WHERE user_id = $1 AND country <> '' AND kind <> 'vpn_blocked' ORDER BY created_at DESC, id DESC LIMIT 1) e
         WHERE u.id = $1`, [userId]);
   })().catch((err) => console.error('[geo] record failed:', err.message));
 }
 
-module.exports = { record, lookup };
+module.exports = { record, lookup, vpnCheck };

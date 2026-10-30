@@ -436,6 +436,10 @@ table.activity td { vertical-align: top; }
 .switch input:focus-visible + span { outline: 2px solid var(--brand-500); outline-offset: 2px; }
 .sep-toggle { display: flex; gap: 12px; align-items: flex-start; margin: 2px 0 16px; cursor: pointer; }
 .sep-toggle > span:last-child { display: flex; flex-direction: column; gap: 2px; }
+.vpn-icon { font-size: 40px; line-height: 1; margin: 4px 0 10px; text-align: center; }
+.vpn-steps { margin: 4px 0 18px; padding-left: 20px; color: var(--text); line-height: 1.7; }
+.vpn-hits { color: var(--red, #b91c1c); margin-top: 4px; white-space: nowrap; }
+tr.vpn-row td { background: #fef2f2; }
 .switch-lg { width: 48px; height: 26px; }
 .switch-lg span::before { width: 20px; height: 20px; }
 .switch-lg input:checked + span::before { transform: translateX(22px); }

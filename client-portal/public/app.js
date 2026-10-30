@@ -23,6 +23,11 @@ async function api(method, url, body) {
     go('#/login');
     throw new Error(data.error || 'Please log in');
   }
+  if (data.code === 'vpn' && !/^\/api\/(auth|invites)\//.test(url)) {
+    // "Block VPN" is on for this person and they're on a VPN: nothing works until it's off.
+    renderVpnBlocked();
+    throw Object.assign(new Error(data.error), { vpn: true });
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -155,7 +160,7 @@ async function route() {
   if (parts[0] === 'forgot') return renderForgot();
 
   if (state.me === undefined) {
-    try { state.me = await api('GET', '/api/me'); } catch { state.me = null; }
+    try { state.me = await api('GET', '/api/me'); } catch (ex) { state.me = null; if (ex.vpn) return; }
   }
   if (!state.me) return renderLogin();
   tawkIdentify();
@@ -304,6 +309,21 @@ function renderLogin() {
     state.me = await api('GET', '/api/me');
     go(isAdminRole(r.role) ? '#/admin' : '#/dashboard');
   });
+}
+
+function renderVpnBlocked() {
+  if (document.getElementById('vpn-retry')) return;
+  authCard(`
+    <div class="vpn-icon" aria-hidden="true">🛡️</div>
+    <h1>Turn off your VPN to connect</h1>
+    <p class="muted">We detected a VPN or proxy on your connection. For security, this account can only be used without one.</p>
+    <ol class="vpn-steps">
+      <li>Turn off your VPN or proxy (also check browser VPN extensions).</li>
+      <li>Click <strong>Try again</strong>.</li>
+    </ol>
+    <button class="btn btn-primary" style="width:100%" id="vpn-retry">Try again</button>
+    <p class="muted small" style="margin:16px 0 0">Still seeing this with the VPN off? Contact your Mithmill account manager.</p>`);
+  document.getElementById('vpn-retry').onclick = () => { state.me = undefined; route(); };
 }
 
 function renderForgot() {
@@ -1363,6 +1383,7 @@ function adminClients() {
           <div class="field"><label for="i-company">Company</label><input id="i-company" name="company"></div>
           ${soldByField('')}
         </div>
+        ${isOwner() ? vpnToggle() : ''}
         <div class="row"><button class="btn btn-primary" type="submit">Send invite</button><button class="btn" type="button" id="add-client">Add without inviting</button>
           <span class="muted small">${mailEnabled ? 'The invite is emailed, and you also get the link to share.' : 'Email is not configured yet: copy the link and send it yourself.'}</span></div>
         <div class="error"></div>
@@ -1429,7 +1450,7 @@ function adminClients() {
     const err = form.querySelector('.error');
     err.textContent = '';
     try {
-      const r = await api('POST', `${API()}/clients`, d);
+      const r = await api('POST', `${API()}/clients`, { ...d, block_vpn: d.block_vpn === 'on' });
       toast(`${d.email} added. Now add their batches.`);
       state.admin = await api('GET', `${API()}/overview`);
       adminClients();
@@ -1438,7 +1459,7 @@ function adminClients() {
   };
   document.querySelectorAll('[data-batch]').forEach((b) => { b.onclick = () => openBatchDialog(Number(b.dataset.batch)); });
   onSubmit(document.getElementById('inv'), async (d) => {
-    const r = await api('POST', `${API()}/invites`, d);
+    const r = await api('POST', `${API()}/invites`, { ...d, block_vpn: d.block_vpn === 'on' });
     state.admin = await api('GET', `${API()}/overview`);
     adminClients();
     showLink(r, d.email);
@@ -1923,6 +1944,7 @@ function renderTeam(team) {
         </div>
         <label class="sep-toggle"><span class="switch"><input type="checkbox" name="separated"><span></span></span>
           <span><strong>Separated</strong><span class="muted small">They only see the clients they add themselves, with those clients' batches and invoices. Other clients stay hidden.</span></span></label>
+        ${vpnToggle()}
         <div class="row"><button class="btn btn-primary" type="submit">Send team invite</button><span class="muted small">They set their own password from the invite link.</span></div>
         <div class="error"></div>
         <div id="team-link"></div>
@@ -1958,7 +1980,7 @@ function renderTeam(team) {
     </div>`);
 
   onSubmit(document.getElementById('team-form'), async (d) => {
-    const r = await api('POST', `${API()}/team`, { ...d, separated: d.separated === 'on' });
+    const r = await api('POST', `${API()}/team`, { ...d, separated: d.separated === 'on', block_vpn: d.block_vpn === 'on' });
     renderTeam(await api('GET', `${API()}/team`));
     document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="flex:1;min-width:0">
       <strong>Team invite for ${esc(d.email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
@@ -2788,31 +2810,41 @@ function renderAgreement(ag) {
 // ------------------------------------------------------------------ locations (owner)
 
 const flag = (cc) => (/^[A-Z]{2}$/.test(cc || '') ? String.fromCodePoint(...[...cc].map((c) => 127397 + c.charCodeAt(0))) : '');
-const KIND_LABEL = { invite: 'Accepted invite', login: 'Logged in', reset: 'Reset password' };
+const KIND_LABEL = { invite: 'Accepted invite', login: 'Logged in', reset: 'Reset password', vpn_blocked: 'Blocked: VPN on' };
 
-// Where each client and reseller accepted their invite and logs in from.
+// Owner-only "Block VPN" switch for invite forms.
+const vpnToggle = () => `<label class="sep-toggle"><span class="switch"><input type="checkbox" name="block_vpn"><span></span></span>
+  <span><strong>Block VPN</strong><span class="muted small">They can't accept the invite or log in while a VPN or proxy is on, so you see where they really are (Locations).</span></span></label>`;
+
+// Where each client, reseller and team member accepted their invite and logs
+// in from, with the owner's per-person "Block VPN" switch.
 function renderLocations({ people }) {
   const byCountry = {};
   people.filter((p) => p.country).forEach((p) => { byCountry[p.country] = (byCountry[p.country] || { n: 0, cc: p.country_code }); byCountry[p.country].n += 1; });
   const countries = Object.entries(byCountry).sort((a, b) => b[1].n - a[1].n);
-  const type = (p) => (p.role === 'reseller' ? 'reseller' : p.reseller_id ? 'reseller_client' : 'client');
-  const typeLabel = { client: 'Client', reseller: 'Reseller', reseller_client: "Reseller's client" };
+  const type = (p) => (p.role === 'reseller' ? 'reseller' : p.role === 'staff' ? 'team' : 'client');
+  const typeLabel = { client: 'Client', reseller: 'Reseller', team: 'Team member' };
+  const typeBadge = { client: 'b-active', reseller: 'b-in_progress', team: 'b-pending' };
   shell(ADMIN_TABS, '#/admin/locations', `
-    <div class="page-head"><div><h1>Client / reseller locations</h1><p class="muted">Approximate city and country from where each person accepted their invite and logs in. Only you can see this page.</p></div></div>
+    <div class="page-head"><div><h1>Client / reseller locations</h1><p class="muted">Approximate city and country from where each client, reseller and team member accepted their invite and logs in. Turn on <strong>Block VPN</strong> for anyone who must connect without a VPN, so their real location shows. Only you can see this page.</p></div></div>
     <div class="stack">
       ${countries.length ? `<div class="card card-pad"><div class="country-chips">${countries.map(([c, v]) => `<span class="chip">${flag(v.cc)} ${esc(c)} <strong>${v.n}</strong></span>`).join('')}</div></div>` : ''}
       <div class="card">
         ${people.length ? filterBar('locations', [
-          { name: 'type', label: 'Type: all', options: [['client', 'Clients'], ['reseller', 'Resellers']] },
+          { name: 'type', label: 'Type: all', options: [['client', 'Clients'], ['reseller', 'Resellers'], ['team', 'Team members']] },
+          { name: 'vpn', label: 'Block VPN: any', options: [['on', 'Block VPN on'], ['off', 'Block VPN off']] },
           { name: 'country', label: 'Country: any', options: [...countries.map(([c]) => [c, c]), ['__none', 'Unknown']] },
         ]) : ''}
         ${people.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Profile</th><th>Type</th><th>City</th><th>Country</th><th>Last IP</th><th>Joined</th><th>Last login</th><th class="num">Logins</th><th></th></tr></thead>
+          <thead><tr><th>Profile</th><th>Type</th><th title="Can't accept the invite, log in or use the portal over a VPN or proxy">Block VPN</th><th>City</th><th>Country</th><th>Last IP</th><th>Joined</th><th>Last login</th><th class="num">Logins</th><th></th></tr></thead>
           <tbody>${people.map((p) => `<tr data-id="${p.id}" data-search="${searchText(p.name, p.company, p.email, p.city, p.country, p.reseller_name)}"
-              data-type="${p.role === 'reseller' ? 'reseller' : 'client'}" data-country="${esc(p.country || '__none')}">
-            <td><strong>${esc(p.company || p.name || p.email)}</strong><div class="muted small">${p.company && p.name ? `${esc(p.name)} · ` : ''}${esc(p.email)}</div>
+              data-type="${type(p)}" data-vpn="${p.block_vpn ? 'on' : 'off'}" data-country="${esc(p.country || '__none')}">
+            <td>${p.role === 'staff' ? `<strong>${esc(p.name || p.email)}</strong><div class="muted small">${esc(p.email)}</div>`
+              : `<strong>${esc(p.company || p.name || p.email)}</strong><div class="muted small">${p.company && p.name ? `${esc(p.name)} · ` : ''}${esc(p.email)}</div>`}
               ${p.reseller_name ? `<div class="muted small">via reseller ${esc(p.reseller_name)}</div>` : ''}</td>
-            <td><span class="badge ${p.role === 'reseller' ? 'b-in_progress' : 'b-active'}">${typeLabel[type(p)]}</span></td>
+            <td><span class="badge ${typeBadge[type(p)]}">${typeLabel[type(p)]}</span>${p.password_set ? '' : '<div class="muted small">Not joined yet</div>'}</td>
+            <td><label class="switch" title="Block VPN"><input type="checkbox" data-block-vpn="${p.id}" aria-label="Block VPN for ${esc(p.email)}" ${p.block_vpn ? 'checked' : ''}><span></span></label>
+              ${p.vpn_blocked ? `<div class="vpn-hits small">${p.vpn_blocked} blocked</div>` : ''}</td>
             <td>${esc(p.city) || '<span class="muted">—</span>'}${p.region && p.region !== p.city ? `<div class="muted small">${esc(p.region)}</div>` : ''}</td>
             <td>${p.country ? `${flag(p.country_code)} ${esc(p.country)}` : '<span class="muted">Unknown</span>'}${p.countries > 1 ? `<div class="muted small">${p.countries} countries seen</div>` : ''}</td>
             <td class="small">${esc(p.last_ip || '—')}</td>
@@ -2821,12 +2853,21 @@ function renderLocations({ people }) {
             <td class="num">${p.logins}</td>
             <td><button class="btn btn-sm" data-history="${p.id}">History</button></td>
           </tr>
-          <tr data-for="${p.id}" class="loc-history" hidden><td colspan="9"><div class="muted small">Loading…</div></td></tr>`).join('')}</tbody></table></div>`
-          : '<div class="empty">No clients or resellers have logged in yet.</div>'}
+          <tr data-for="${p.id}" class="loc-history" hidden><td colspan="10"><div class="muted small">Loading…</div></td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="empty">No clients, resellers or team members yet.</div>'}
       </div>
       <p class="muted small">Locations are looked up from IP addresses, so they're approximate: VPNs, mobile networks and company proxies can show a nearby city or another country. Recording started when this page was added; earlier logins aren't included.</p>
     </div>`);
   wireFilterBar('locations');
+  document.querySelectorAll('[data-block-vpn]').forEach((c) => {
+    c.onchange = async () => {
+      try {
+        await api('PATCH', `/api/admin/locations/${c.dataset.blockVpn}`, { block_vpn: c.checked });
+        c.closest('tr').dataset.vpn = c.checked ? 'on' : 'off';
+        toast(c.checked ? 'Block VPN on: they must turn off their VPN to connect' : 'Block VPN off');
+      } catch (ex) { c.checked = !c.checked; toast(ex.message); }
+    };
+  });
   document.querySelectorAll('[data-history]').forEach((b) => {
     b.onclick = async () => {
       const row = document.querySelector(`tr[data-for="${b.dataset.history}"]`);
@@ -2836,7 +2877,7 @@ function renderLocations({ people }) {
         const { events } = await api('GET', `/api/admin/locations/${b.dataset.history}`);
         row.dataset.loaded = '1';
         row.firstElementChild.innerHTML = events.length ? `<table class="sub-table"><thead><tr><th>When</th><th>What</th><th>Location</th><th>IP</th><th>Device</th></tr></thead><tbody>
-          ${events.map((e) => `<tr><td>${fmtWhen(e.created_at)}</td><td>${KIND_LABEL[e.kind] || esc(e.kind)}</td>
+          ${events.map((e) => `<tr${e.kind === 'vpn_blocked' ? ' class="vpn-row"' : ''}><td>${fmtWhen(e.created_at)}</td><td>${KIND_LABEL[e.kind] || esc(e.kind)}${e.vpn === false ? ' <span class="muted small">· no VPN</span>' : ''}</td>
             <td>${e.country ? `${flag(e.country_code)} ${esc([e.city, e.region, e.country].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i).join(', '))}` : '<span class="muted">Unknown</span>'}</td>
             <td class="small">${esc(e.ip)}</td><td class="small muted">${esc(deviceOf(e.user_agent))}</td></tr>`).join('')}</tbody></table>`
           : '<div class="muted small">No activity recorded yet.</div>';

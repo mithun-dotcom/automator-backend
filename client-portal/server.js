@@ -40,9 +40,10 @@ app.use(cookieParser());
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -66,13 +67,28 @@ const auth = asyncRoute(async (req, res, next) => {
     throw new HttpError(401, 'Please log in');
   }
   const { rows: [user] } = await query(
-    'SELECT id, email, name, company, role, separated FROM users WHERE id = $1', [uid],
+    'SELECT id, email, name, company, role, separated, block_vpn FROM users WHERE id = $1', [uid],
   );
   if (!user) throw new HttpError(401, 'Please log in');
   if (user.role === 'reseller') await assertResellerActive(user.id);
+  if (user.block_vpn) await assertNoVpn(req);
+  delete user.block_vpn;
   req.user = user;
   next();
 });
+
+// "Block VPN" (set by the owner per person on the Locations page or when
+// inviting): over a VPN or proxy they can't accept an invite, log in or use the
+// portal, so their real location is recorded. Returns the check's answer.
+const VPN_MESSAGE = 'VPN detected. Please turn off your VPN or proxy to connect, then try again.';
+async function assertNoVpn(req, userId) {
+  const check = await geo.vpnCheck(req.ip);
+  if (check && check.vpn) {
+    if (userId) geo.record(userId, req.ip, 'vpn_blocked', req.get('user-agent'), true);
+    throw new HttpError(403, VPN_MESSAGE, 'vpn');
+  }
+  return check ? false : null;
+}
 
 // The owner can turn a reseller's access off; they can't log in or use the portal then.
 async function assertResellerActive(id) {
@@ -126,8 +142,9 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   }
   loginAttempts.delete(`${email}|${req.ip}`);
   if (user.role === 'reseller') await assertResellerActive(user.id);
+  const vpn = user.block_vpn ? await assertNoVpn(req, user.id) : null;
   setSession(res, user);
-  geo.record(user.id, req.ip, 'login', req.get('user-agent'));
+  geo.record(user.id, req.ip, 'login', req.get('user-agent'), vpn);
   res.json({ ok: true, role: user.role });
 }));
 
@@ -208,24 +225,27 @@ app.get('/api/invites/:token', asyncRoute(async (req, res) => {
 
 app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
   const invite = await findInvite(req.params.token);
-  const { rows: [before] } = await query('SELECT password_set FROM users WHERE email = $1', [invite.email]);
+  const { rows: [before] } = await query('SELECT id, password_set, block_vpn FROM users WHERE email = $1', [invite.email]);
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+  const blockVpn = invite.block_vpn || Boolean(before && before.block_vpn);
+  const vpn = blockVpn ? await assertNoVpn(req, before && before.id) : null;
   const name = str(req.body.name, 200) || invite.name;
   const hash = await bcrypt.hash(password, 10);
 
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, role, sold_by, added_by, separated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO users (email, name, company, password_hash, role, sold_by, added_by, separated, block_vpn) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set = true,
+       block_vpn = users.block_vpn OR EXCLUDED.block_vpn,
        name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
        sold_by = CASE WHEN users.sold_by = '' THEN EXCLUDED.sold_by ELSE users.sold_by END,
        added_by = COALESCE(users.added_by, EXCLUDED.added_by)
      RETURNING *`,
     [invite.email, name, invite.company, hash, ['staff', 'reseller'].includes(invite.role) ? invite.role : 'client', invite.sold_by || '',
-      invite.role === 'client' ? invite.added_by : null, invite.role === 'staff' && invite.separated],
+      invite.role === 'client' ? invite.added_by : null, invite.role === 'staff' && invite.separated, blockVpn],
   );
   await query('UPDATE invites SET accepted_at = now() WHERE id = $1', [invite.id]);
-  geo.record(user.id, req.ip, before && before.password_set ? 'reset' : 'invite', req.get('user-agent'));
+  geo.record(user.id, req.ip, before && before.password_set ? 'reset' : 'invite', req.get('user-agent'), vpn);
   setSession(res, user);
   res.json({ ok: true, role: user.role });
 }));
@@ -790,10 +810,12 @@ admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.
   const soldBy = str(req.body.sold_by, 100);
   // An existing client keeps theirs unless one is given; a new one gets it when they accept.
   if (found && soldBy) await query('UPDATE users SET sold_by = $1 WHERE email = $2', [soldBy, email]);
+  const blockVpn = req.user.role === 'admin' && req.body.block_vpn === true;
+  if (found && blockVpn) await query('UPDATE users SET block_vpn = true WHERE email = $1', [email]);
   const { rows: [created] } = await query(
-    `INSERT INTO invites (email, name, company, token, expires_at, sold_by, added_by)
-     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', $5, $6) RETURNING id`,
-    [email, name, company, token, soldBy, req.user.id],
+    `INSERT INTO invites (email, name, company, token, expires_at, sold_by, added_by, block_vpn)
+     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', $5, $6, $7) RETURNING id`,
+    [email, name, company, token, soldBy, req.user.id, blockVpn],
   );
   const link = `${baseUrl(req)}/#/invite/${token}`;
   const emailed = await sendMail({
@@ -840,8 +862,9 @@ shared.post('/clients', audited('added', 'user', (req, body) => (body ? body.id 
   }
   const unusable = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
   const { rows: [user] } = await query(
-    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id, sold_by, added_by) VALUES ($1, $2, $3, $4, false, $5, $6, $7) RETURNING id`,
-    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null, reseller ? '' : str(req.body.sold_by, 100), req.user.id],
+    `INSERT INTO users (email, name, company, password_hash, password_set, reseller_id, sold_by, added_by, block_vpn) VALUES ($1, $2, $3, $4, false, $5, $6, $7, $8) RETURNING id`,
+    [email, str(req.body.name, 200), str(req.body.company, 200), unusable, reseller ? req.user.id : null, reseller ? '' : str(req.body.sold_by, 100), req.user.id,
+      req.user.role === 'admin' && req.body.block_vpn === true],
   );
   res.status(201).json({ id: user.id });
 }));
@@ -1623,21 +1646,31 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
 admin.get('/locations', ownerOnly, asyncRoute(async (req, res) => {
   const { rows } = await query(
     `SELECT u.id, u.email, u.name, u.company, u.role, u.reseller_id, u.password_set, u.city, u.region, u.country, u.country_code,
-       r.brand_name AS reseller_name,
+       u.block_vpn, r.brand_name AS reseller_name,
+       (SELECT count(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'vpn_blocked')::int AS vpn_blocked,
        (SELECT min(e.created_at) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'invite') AS joined_at,
        (SELECT max(e.created_at) FROM login_events e WHERE e.user_id = u.id) AS last_seen,
-       (SELECT e.ip FROM login_events e WHERE e.user_id = u.id ORDER BY e.created_at DESC LIMIT 1) AS last_ip,
+       (SELECT e.ip FROM login_events e WHERE e.user_id = u.id AND e.kind <> 'vpn_blocked' ORDER BY e.created_at DESC LIMIT 1) AS last_ip,
        (SELECT count(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'login')::int AS logins,
        (SELECT count(DISTINCT e.country) FROM login_events e WHERE e.user_id = u.id AND e.country <> '')::int AS countries
      FROM users u LEFT JOIN resellers r ON r.user_id = u.reseller_id
-     WHERE u.role IN ('client', 'reseller') AND u.password_set
+     WHERE u.role IN ('reseller', 'staff') OR (u.role = 'client' AND u.reseller_id IS NULL)
      ORDER BY last_seen DESC NULLS LAST, u.created_at DESC`);
   res.json({ people: rows });
 }));
 
+// "Block VPN" on or off for one client, reseller or team member.
+admin.patch('/locations/:id', ownerOnly, audited('edited', 'user', byParam, async (req, res) => {
+  const { rows: [u] } = await query(
+    "UPDATE users SET block_vpn = $2 WHERE id = $1 AND role IN ('client', 'reseller', 'staff') RETURNING id",
+    [Number(req.params.id) || 0, req.body.block_vpn === true]);
+  if (!u) throw new HttpError(404, 'Person not found');
+  res.json({ ok: true });
+}));
+
 admin.get('/locations/:id', ownerOnly, asyncRoute(async (req, res) => {
   const { rows: events } = await query(
-    `SELECT kind, ip, city, region, country, country_code, user_agent, created_at FROM login_events
+    `SELECT kind, ip, city, region, country, country_code, user_agent, vpn, created_at FROM login_events
       WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`, [Number(req.params.id) || 0]);
   res.json({ events });
 }));
@@ -1661,9 +1694,9 @@ admin.post('/team', ownerOnly, audited('invited', 'invite', (req, body) => (body
   const name = str(req.body.name, 200);
   const token = crypto.randomBytes(24).toString('base64url');
   const { rows: [created] } = await query(
-    `INSERT INTO invites (email, name, company, token, expires_at, role, separated)
-     VALUES ($1, $2, 'Mithmill', $3, now() + interval '${INVITE_DAYS} days', 'staff', $4) RETURNING id`,
-    [email, name, token, req.body.separated === true],
+    `INSERT INTO invites (email, name, company, token, expires_at, role, separated, block_vpn)
+     VALUES ($1, $2, 'Mithmill', $3, now() + interval '${INVITE_DAYS} days', 'staff', $4, $5) RETURNING id`,
+    [email, name, token, req.body.separated === true, req.body.block_vpn === true],
   );
   const link = `${baseUrl(req)}/#/invite/${token}`;
   const emailed = await sendMail({
@@ -2166,7 +2199,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' });
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: status >= 500 && !(err instanceof HttpError) ? 'Something went wrong' : err.message });
+  res.status(status).json({ error: status >= 500 && !(err instanceof HttpError) ? 'Something went wrong' : err.message, ...(err.code ? { code: err.code } : {}) });
 });
 
 // ---------------------------------------------------------------- boot

@@ -284,6 +284,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS added_by INT REFERENCES users(id) ON 
 ALTER TABLE invites ADD COLUMN IF NOT EXISTS separated BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE invites ADD COLUMN IF NOT EXISTS added_by INT REFERENCES users(id) ON DELETE SET NULL;
 
+-- "Block VPN": these people can't accept an invite, log in or use the portal over a VPN or proxy.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS block_vpn BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS block_vpn BOOLEAN NOT NULL DEFAULT false;
+
 -- Payouts the owner has made to a reseller.
 CREATE TABLE IF NOT EXISTS reseller_payouts (
   id          SERIAL PRIMARY KEY,
@@ -329,6 +333,8 @@ CREATE TABLE IF NOT EXISTS login_events (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS login_events_user ON login_events (user_id, created_at DESC);
+-- The VPN check's answer, for people with "Block VPN" on.
+ALTER TABLE login_events ADD COLUMN IF NOT EXISTS vpn BOOLEAN;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT '';
