@@ -51,33 +51,46 @@ const str = (v, max = 5000) => (typeof v === 'string' ? v.trim().slice(0, max) :
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 const baseUrl = (req) => APP_URL || `${req.protocol}://${req.get('host')}`;
 
-function setSession(res, user) {
-  const token = jwt.sign({ uid: user.id }, SESSION_SECRET, { expiresIn: '14d' });
+// imp: the owner's id while they "Watch" someone (signed into that person's
+// account for up to WATCH_HOURS, with a way back to their own).
+const WATCH_HOURS = 2;
+function setSession(res, user, imp) {
+  const hours = imp ? WATCH_HOURS : 14 * 24;
+  const token = jwt.sign(imp ? { uid: user.id, imp } : { uid: user.id }, SESSION_SECRET, { expiresIn: `${hours}h` });
   res.cookie('session', token, {
-    httpOnly: true, sameSite: 'lax', secure: IS_PROD, maxAge: 14 * 86400000,
+    httpOnly: true, sameSite: 'lax', secure: IS_PROD, maxAge: hours * 3600000,
   });
 }
+const sessionToken = (req) => {
+  try { return jwt.verify(req.cookies.session || '', SESSION_SECRET); } catch { return null; }
+};
 
 const auth = asyncRoute(async (req, res, next) => {
   if (req.user) return next();
-  let uid;
-  try {
-    uid = jwt.verify(req.cookies.session || '', SESSION_SECRET).uid;
-  } catch {
-    throw new HttpError(401, 'Please log in');
-  }
+  const token = sessionToken(req);
+  if (!token) throw new HttpError(401, 'Please log in');
   const { rows: [user] } = await query(
-    'SELECT id, email, name, company, role, separated, block_vpn, access_blocked FROM users WHERE id = $1', [uid],
+    'SELECT id, email, name, company, role, separated, block_vpn, access_blocked FROM users WHERE id = $1', [token.uid],
   );
   if (!user) throw new HttpError(401, 'Please log in');
-  assertNotBlocked(user);
+  if (token.imp) {
+    // The owner watching: their access and VPN rules don't apply, the owner's must still hold.
+    const { rows: [owner] } = await query("SELECT id, email, name FROM users WHERE id = $1 AND role = 'admin'", [token.imp]);
+    if (!owner) throw new HttpError(401, 'Please log in');
+    user.watchedBy = owner;
+  } else {
+    assertNotBlocked(user);
+    if (user.role === 'reseller') await assertResellerActive(user.id);
+    if (user.block_vpn) await assertNoVpn(req);
+  }
   delete user.access_blocked;
-  if (user.role === 'reseller') await assertResellerActive(user.id);
-  if (user.block_vpn) await assertNoVpn(req);
   delete user.block_vpn;
   req.user = user;
   next();
 });
+// Things only the person themselves may do, not the owner while watching.
+const notWatching = (req, res, next) => (req.user.watchedBy
+  ? next(new HttpError(403, 'Not available while watching someone. Go back to your account first.')) : next());
 
 // "Block VPN" (set by the owner per person on the Locations page or when
 // inviting): over a VPN or proxy they can't accept an invite, log in or use the
@@ -200,13 +213,41 @@ app.post('/api/auth/forgot', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/auth/logout', (req, res) => {
+  // Logging out while watching goes back to the owner's own account.
+  const token = sessionToken(req);
+  if (token && token.imp) {
+    setSession(res, { id: token.imp });
+    return res.json({ ok: true, role: 'admin' });
+  }
   res.clearCookie('session');
   res.json({ ok: true });
 });
 
-app.get('/api/me', auth, (req, res) => res.json(req.user));
+app.get('/api/me', auth, (req, res) => {
+  const { watchedBy, ...me } = req.user;
+  res.json(watchedBy ? { ...me, watching: { name: watchedBy.name, email: watchedBy.email } } : me);
+});
 
-app.post('/api/auth/password', auth, asyncRoute(async (req, res) => {
+// "Watch": the owner opens a client's, reseller's or team member's dashboard as them.
+app.post('/api/admin/watch/:id', auth, ownerOnly, asyncRoute(async (req, res) => {
+  if (req.user.watchedBy) throw new HttpError(400, 'Go back to your account first');
+  const { rows: [u] } = await query(
+    "SELECT id, email, name, company, role, reseller_id FROM users WHERE id = $1 AND role IN ('client', 'reseller', 'staff')", [Number(req.params.id) || 0]);
+  if (!u) throw new HttpError(404, 'Person not found');
+  if (u.role === 'client' && u.reseller_id) throw new HttpError(400, 'Resellers\' clients don\'t have a dashboard. Watch the reseller instead.');
+  setSession(res, u, req.user.id);
+  await audit.record(req.user, 'watched', `${u.role === 'staff' ? 'team member' : u.role} ${(u.role === 'staff' ? u.name : u.company || u.name) || u.email} <${u.email}>`, []);
+  res.json({ ok: true, role: u.role });
+}));
+app.post('/api/auth/stop-watching', asyncRoute(async (req, res) => {
+  const token = sessionToken(req);
+  if (!token || !token.imp) return res.json({ ok: true });
+  const { rows: [owner] } = await query("SELECT id FROM users WHERE id = $1 AND role = 'admin'", [token.imp]);
+  if (owner) setSession(res, owner); else res.clearCookie('session');
+  res.json({ ok: true, role: owner ? 'admin' : null });
+}));
+
+app.post('/api/auth/password', auth, notWatching, asyncRoute(async (req, res) => {
   const current = typeof req.body.current === 'string' ? req.body.current : '';
   const next = typeof req.body.password === 'string' ? req.body.password : '';
   checkLoginRate(`pw|${req.user.id}`);
@@ -474,7 +515,8 @@ async function signedAgreement(resellerId) {
 }
 const requireAgreement = asyncRoute(async (req, res, next) => {
   // The agreement itself (reading, signing, downloading) is always reachable.
-  if (req.user.role !== 'reseller' || req.path.startsWith('/agreement')) return next();
+  // The owner watching a reseller can use their dashboard (but can't sign for them).
+  if (req.user.role !== 'reseller' || req.user.watchedBy || req.path.startsWith('/agreement')) return next();
   if (!(await signedAgreement(req.user.id))) throw new HttpError(428, 'Please read and sign the Reseller Agreement first.');
   next();
 });
@@ -2068,7 +2110,7 @@ resellerRouter.get('/agreement', asyncRoute(async (req, res) => {
 
 // Signing: the reseller's name and a signature image (uploaded or drawn).
 // The signed PDF is stored and emailed to the reseller and to MithMill.
-resellerRouter.post('/agreement', asyncRoute(async (req, res) => {
+resellerRouter.post('/agreement', notWatching, asyncRoute(async (req, res) => {
   const r = await findReseller(req.user.id);
   if (await signedAgreement(r.id)) return res.json({ ok: true, already: true });
   const signerName = str(req.body.signer_name, 120);

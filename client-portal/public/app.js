@@ -162,11 +162,12 @@ async function route() {
   if (state.me === undefined) {
     try { state.me = await api('GET', '/api/me'); } catch (ex) { state.me = null; if (ex.vpn) return; }
   }
-  if (!state.me) return renderLogin();
-  tawkIdentify();
+  if (!state.me) { updateWatchBar(); return renderLogin(); }
+  updateWatchBar();
+  if (!state.me.watching) tawkIdentify();
   setAdminTabs();
   // Resellers sign the Reseller Agreement before anything else.
-  if (isReseller() && !state.agreementOk && parts[0] !== 'password') {
+  if (isReseller() && !state.agreementOk && !state.me.watching && parts[0] !== 'password') {
     try {
       const ag = await api('GET', '/api/reseller/agreement');
       if (!ag.signed) return renderAgreement(ag);
@@ -228,6 +229,7 @@ const ICONS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
@@ -272,10 +274,48 @@ function shell(tabs, active, content) {
   document.getElementById('nav-close').onclick = () => document.body.classList.remove('nav-open');
   document.getElementById('nav-backdrop').onclick = () => document.body.classList.remove('nav-open');
   document.getElementById('logout').onclick = async () => {
+    if (state.me.watching) return switchAccount('/api/auth/stop-watching');
     await api('POST', '/api/auth/logout');
     Object.assign(state, { me: null, dash: null, admin: null, order: null, agreementOk: false });
     go('#/login');
   };
+}
+
+// ---- "Watch": the owner opens someone's dashboard as them, then comes back.
+
+async function switchAccount(url) {
+  try {
+    await api('POST', url);
+  } catch (ex) { toast(ex.message); return; }
+  Object.assign(state, { me: undefined, dash: null, admin: null, order: null, agreementOk: false });
+  document.body.classList.remove('nav-open');
+  if (location.hash === '#/') route(); else location.hash = '#/';
+}
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-watch]');
+  if (!b) return;
+  e.preventDefault();
+  switchAccount(`/api/admin/watch/${b.dataset.watch}`);
+});
+
+const watchBtn = (id) => (isOwner() ? `<button class="btn btn-sm btn-watch" data-watch="${id}" title="Open their dashboard as them (view and edit)">${icon('eye')} Watch</button>` : '');
+
+function updateWatchBar() {
+  let bar = document.getElementById('watch-bar');
+  const w = state.me && state.me.watching;
+  document.body.classList.toggle('watching', Boolean(w));
+  if (!w) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'watch-bar';
+    bar.setAttribute('role', 'status');
+    document.body.appendChild(bar);
+  }
+  const role = { client: 'client', reseller: 'reseller', staff: 'team member' }[state.me.role] || state.me.role;
+  bar.innerHTML = `${icon('eye')}<span>Watching <strong>${esc((state.me.role === 'staff' ? state.me.name : state.me.company || state.me.name) || state.me.email)}</strong> (${role}). Changes are saved as them.</span>
+    <button class="btn btn-sm" id="watch-stop">Back to my account</button>`;
+  document.getElementById('watch-stop').onclick = () => switchAccount('/api/auth/stop-watching');
 }
 
 function welcome(name, stats, eyebrow = 'Welcome back') {
@@ -1425,7 +1465,7 @@ function adminClients() {
                 : c.access_blocked ? '<div class="small access-off">Access blocked</div>' : ''}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
-            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button>${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
+            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button>${watchBtn(c.id)}${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
           </tr>
           <tr class="price-row" id="prices-${c.id}" data-for="${c.id}" hidden><td colspan="7">
             <form class="client-prices" data-id="${c.id}">
@@ -1944,7 +1984,7 @@ function renderInvoiceView(inv, isAdmin) {
 function renderTeam(team) {
   const { members, invites, log } = team;
   const ago = (ts) => new Date(ts).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-  const verb = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite:', revoked: 'revoked' };
+  const verb = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite:', revoked: 'revoked', cancelled: 'cancelled', sent: 'emailed', watched: 'opened the dashboard of' };
   const changeList = (changes, action) => (changes.length ? `<ul class="changes">${changes.map((c) => {
     const pre = (v) => (/\n/.test(v) || v.length > 80 ? `<pre>${esc(v)}</pre>` : `<span>${esc(v)}</span>`);
     if (action === 'added' || action === 'invited') return `<li><strong>${esc(c.field)}:</strong> ${pre(c.to)}</li>`;
@@ -1979,7 +2019,7 @@ function renderTeam(team) {
             <td>${m.role === 'staff' ? `<label class="switch" title="Only sees the clients they added"><input type="checkbox" data-separate="${m.id}" aria-label="Separated: ${esc(m.email)}" ${m.separated ? 'checked' : ''}><span></span></label>` : '<span class="muted small">Sees all</span>'}</td>
             <td>${m.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-pending">Not joined</span>'}</td>
             <td>${fmtDate(m.created_at)}</td>
-            <td>${m.role === 'staff' ? `<button class="btn btn-sm btn-danger" data-remove-member="${m.id}" data-email="${esc(m.email)}">Remove</button>` : ''}</td>
+            <td>${m.role === 'staff' ? `<div class="row" style="flex-wrap:nowrap;gap:6px">${watchBtn(m.id)}<button class="btn btn-sm btn-danger" data-remove-member="${m.id}" data-email="${esc(m.email)}">Remove</button></div>` : ''}</td>
           </tr>`).join('')}
           ${invites.map((i) => `<tr><td>${esc(i.name || '—')}</td><td>${esc(i.email)}</td><td>Team member</td><td>${i.separated ? '<span class="badge b-pending">Separated</span>' : '<span class="muted small">No</span>'}</td><td><span class="badge b-in_progress">Invited</span></td><td>${fmtDate(i.created_at)}</td>
             <td><button class="btn btn-sm btn-ghost" data-revoke-team="${i.id}">Revoke invite</button></td></tr>`).join('')}</tbody>
@@ -2472,7 +2512,7 @@ function renderResellers({ resellers, mailEnabled }) {
               <label class="access-toggle" title="Turn off to block this reseller from the portal for now"><span class="switch switch-sm"><input type="checkbox" data-access="${r.id}" aria-label="Portal access for ${esc(r.email)}" ${r.active ? 'checked' : ''}><span></span></span><span class="small ${r.active ? 'muted' : 'access-off'}">${r.active ? 'Portal access' : 'Access blocked'}</span></label></td>
             <td><label class="switch"><input type="checkbox" data-wl="${r.id}" ${r.white_label ? 'checked' : ''}><span></span></label></td>
             <td class="num">${r.clients}</td><td class="num">${r.mailboxes}</td><td class="num">${money(r.monthly)}</td><td class="num">${money(r.unpaid)}</td>
-            <td><a class="btn btn-sm" href="#/admin/resellers/${r.id}">Open</a></td>
+            <td><div class="row" style="flex-wrap:nowrap;gap:6px"><a class="btn btn-sm" href="#/admin/resellers/${r.id}">Open</a>${watchBtn(r.id)}</div></td>
           </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No resellers yet.</div>'}
       </div>
     </div>`);
@@ -2895,7 +2935,7 @@ function renderLocations({ people }) {
             <td>${p.joined_at ? fmtDate(p.joined_at) : '<span class="muted">—</span>'}</td>
             <td>${p.last_seen ? fmtWhen(p.last_seen) : '<span class="muted">Not since tracking began</span>'}</td>
             <td class="num">${p.logins}</td>
-            <td><button class="btn btn-sm" data-history="${p.id}">History</button></td>
+            <td><div class="row" style="flex-wrap:nowrap;gap:6px"><button class="btn btn-sm" data-history="${p.id}">History</button>${watchBtn(p.id)}</div></td>
           </tr>
           <tr data-for="${p.id}" class="loc-history" hidden><td colspan="11"><div class="muted small">Loading…</div></td></tr>`).join('')}</tbody></table></div>`
           : '<div class="empty">No clients, resellers or team members yet.</div>'}

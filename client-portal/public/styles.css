@@ -445,6 +445,15 @@ tr.vpn-row td { background: #fef2f2; }
 .switch-sm input:checked + span::before { transform: translateX(13px); }
 .access-toggle { display: flex; align-items: center; gap: 6px; margin-top: 6px; cursor: pointer; white-space: nowrap; }
 .access-off { color: var(--red, #b91c1c); font-weight: 600; }
+.btn-watch { display: inline-flex; align-items: center; gap: 5px; }
+.btn-watch .ico { width: 15px; height: 15px; }
+#watch-bar { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 10px;
+  max-width: calc(100vw - 32px); padding: 8px 8px 8px 14px; border-radius: 999px; background: #b45309; color: #fff; font-size: 14px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / .25); }
+#watch-bar .ico { width: 18px; height: 18px; flex-shrink: 0; }
+#watch-bar span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#watch-bar .btn { background: #fff; color: #7c2d12; border-color: #fff; white-space: nowrap; }
+@media (max-width: 640px) { #watch-bar { bottom: 12px; font-size: 13px; } }
 .switch-lg { width: 48px; height: 26px; }
 .switch-lg span::before { width: 20px; height: 20px; }
 .switch-lg input:checked + span::before { transform: translateX(22px); }

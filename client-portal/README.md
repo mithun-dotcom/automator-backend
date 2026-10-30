@@ -26,6 +26,17 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Watch (open someone's dashboard)
+
+The owner can open any client's, reseller's or team member's dashboard as them with the **Watch** button. It's on the **Clients & invites**, **Resellers**, **Team** and **Locations** lists. You see exactly what they see and can make changes there. An orange bar at the bottom shows who you're watching, with **Back to my account**; logging out also takes you back.
+
+- A Watch session lasts up to 2 hours.
+- It works even if the person's portal access is blocked or Block VPN is on.
+- It isn't recorded as a login in their location history.
+- While watching you can't change their password or sign a reseller agreement for them. You can use a reseller's dashboard before they've signed.
+- The Activity log records each Watch, and records changes made while watching as "Owner (as Name)", not as them.
+- Only the owner can watch.
+
 ## Portal access (temporary block)
 
 The owner can pause anyone's portal access with the **Portal access** switch:

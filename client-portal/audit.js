@@ -124,9 +124,12 @@ function diff(before, after) {
     .filter((c) => c.from !== c.to);
 }
 
-const VERB = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite', revoked: 'revoked', cancelled: 'cancelled', sent: 'emailed' };
+const VERB = { added: 'added', edited: 'edited', deleted: 'deleted', invited: 'sent an invite', revoked: 'revoked', cancelled: 'cancelled', sent: 'emailed', watched: 'opened the dashboard of' };
 
-async function record(actor, action, title, changes, { recipients, appUrl } = {}) {
+async function record(user, action, title, changes, { recipients, appUrl } = {}) {
+  // The owner "watching" someone: the change is the owner's, made in that person's dashboard.
+  const w = user.watchedBy;
+  const actor = w ? { id: w.id, name: `${w.name || w.email} (as ${user.name || user.email})`, email: w.email, role: 'admin' } : user;
   await query(
     `INSERT INTO audit_log (actor_id, actor_name, actor_email, actor_role, action, title, changes)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
