@@ -755,8 +755,9 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
             WHERE order_id = $1 AND status = 'unpaid' AND period_start IS NOT NULL AND period_start >= $2`,
           [id, billing.today()],
         );
+        const domainNote = billing.domainsLine(await billing.subscriptionDomains(order.user_id, [id]));
         await billing.notify(client, `Batch #${id} cancelled`,
-          `Your ${order.quantity} ${order.label} mailboxes (batch #${id}) have been cancelled and will not renew.`);
+          `Your ${order.quantity} ${order.label} mailboxes (batch #${id}) have been cancelled and will not renew.${domainNote ? `\n\n${domainNote}` : ''}`);
       }
     }
   }
@@ -804,7 +805,9 @@ async function cancelBatches(req, ids, { reason, note, notify, voidInvoiceId }) 
   const first = orders[0];
   const brand = await brands.forClient(first.user_id);
   const brandName = brand ? brand.name : 'MithMill';
-  const what = orders.map((o) => `• ${o.batch_name ? `${o.batch_name} (batch #${o.id})` : `Batch #${o.id}`}: ${billing.whatLabel(o)}`).join('\n');
+  const domainNote = billing.domainsLine(await billing.subscriptionDomains(first.user_id, orders.map((o) => o.id)));
+  const what = orders.map((o) => `• ${o.batch_name ? `${o.batch_name} (batch #${o.id})` : `Batch #${o.id}`}: ${billing.whatLabel(o)}`).join('\n') +
+    (domainNote ? `\n\n${domainNote}` : '');
   const plural = orders.length > 1;
   let title;
   let body;
@@ -1816,6 +1819,10 @@ async function emailInvoice(req, invoiceId, opts = {}) {
   const issued = billing.prettyDate(inv.issue_date || billing.today());
   const lineName = (it) => [it.inbox_type === 'other' ? '' : label(it.inbox_type), it.batch_name, it.description].filter(Boolean).join(' · ') || 'Item';
   const paid = inv.status === 'paid';
+  // The domains this invoice's batches cover, as a note.
+  const { rows: invOrders } = await query('SELECT id FROM orders WHERE id = $1 OR from_invoice_id = $2', [inv.order_id || 0, inv.id]);
+  const doms = await billing.subscriptionDomains(inv.user_id, invOrders.map((o) => o.id));
+  const domainNote = billing.domainsLine(doms);
 
   const td = `padding:10px 8px;border-bottom:1px solid ${C.line};font-size:14px;color:${C.text};vertical-align:top`;
   const num = `${td};text-align:right;white-space:nowrap`;
@@ -1835,6 +1842,7 @@ async function emailInvoice(req, invoiceId, opts = {}) {
       ${row(paid ? 'Total paid' : 'Total due', money(inv.amount), true)}
     </table>
     <div style="clear:both"></div>
+    ${doms.domains.length ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Domains${doms.mailboxes ? ` · ${doms.mailboxes} mailbox${doms.mailboxes === 1 ? '' : 'es'}` : ''}</div>${esc(doms.domains.slice(0, 15).join(', '))}${doms.domains.length > 15 ? ` and ${doms.domains.length - 15} more` : ''}</div>` : ''}
     ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${emailTemplate.linkify(esc(inv.notes)).replace(/\n/g, '<br>')}</div>` : ''}
     ${brand ? '' : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px"><tr>
       <td style="font-size:12px;color:${C.faint};padding-right:8px;vertical-align:middle">Payments powered by</td>
@@ -1859,6 +1867,7 @@ async function emailInvoice(req, invoiceId, opts = {}) {
     inv.items.map((it) => `• ${lineName(it)}: ${qty(it.quantity)} × ${money(it.unit_price)} = ${money(it.quantity * it.unit_price)}`).join('\n'),
     `${inv.discount ? `Discount: −${money(inv.discount)}\n` : ''}${paid ? 'Total paid' : 'Total due'}: ${money(inv.amount)}${paid ? '' : ` (due ${due})`}`,
     inv.payLinks.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n'),
+    domainNote,
     inv.notes ? `Notes:\n${inv.notes}` : '',
     confirm,
     link ? `View your invoice: ${link}` : '',

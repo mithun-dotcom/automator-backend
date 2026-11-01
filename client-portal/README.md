@@ -26,6 +26,12 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Domains in client emails
+
+Renewal reminders (7/3/1-day, including the critical one), invoice emails, urgent reminders, cancellation emails (Cancel subscription and setting a batch to cancelled), and your unpaid-invoice alerts all include the domains on that subscription and how many mailboxes they have. For example: "Domains on this batch: acme.com, getacme.com (24 mailboxes)". Invoice emails show it as a **Domains** note box.
+
+The domains come from the batch's domains on the Domains page, else the ones written on the batch, else (if it's the client's only batch) all of the client's domains. Up to 15 are listed, then "and N more".
+
 ## Upload guides and sample CSVs
 
 The admin **Mailboxes** and **Domains** pages have a **How to upload** guide with steps, what each column means, a preview of the sample file, and **Download sample CSV**. The guide starts expanded when nothing has been uploaded yet. The samples are at `/api/mailboxes-template.csv` (email, password, admin, type, created: six mailboxes on two domains) and `/api/domains-template.csv` (domain, type). On a client's Domains page you can also load a CSV file into the box instead of pasting.

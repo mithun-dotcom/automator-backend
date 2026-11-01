@@ -219,6 +219,7 @@ async function runBilling() {
     let body =
       `Your batch #${order.id} (${order.inbox_type === 'other' ? whatLabel(order) : `${order.label}, ${order.quantity} mailboxes`}) will renew in ${dayWord}, ` +
       `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
+    const domainNote = domainsLine(await subscriptionDomains(order.user_id, [order.id]), 'Domains on this batch');
     const paid = invoice && invoice.status === 'paid';
     const user = { id: order.user_id, email: order.email, name: order.name };
     const brand = paid || !invoice ? null : await brands.forClient(order.user_id);
@@ -230,6 +231,7 @@ async function runBilling() {
       const amount = money(invoice ? invoice.amount : cycleAmount(order));
       body += ' Please make the payment if not made. Today is the last day to renew: if payment is not made by today, ' +
         'your accounts will be cancelled tomorrow. To keep your mailboxes active, please complete the payment now.';
+      if (domainNote) body += `\n\n${domainNote}`;
       await notify(user, `Critical: batch #${order.id} will be deactivated tomorrow`, body, {
         always: true,
         buttons,
@@ -242,6 +244,7 @@ async function runBilling() {
       sent += 1;
       continue;
     }
+    if (domainNote) body += `\n\n${domainNote}`;
     await notify(user, `Your batch will renew in ${dayWord}`, body, {
       always: true,
       buttons,
@@ -274,7 +277,7 @@ async function alertUnpaidRenewals(now) {
   const { rows } = await query(
     `SELECT * FROM (
        SELECT i.id AS invoice_id, i.amount, i.sent_at, i.order_id, o.batch_name, o.quantity, o.inbox_type, p.label,
-              u.email, u.name, u.company, u.sold_by,
+              u.id AS user_id, u.email, u.name, u.company, u.sold_by,
               (SELECT COALESCE(NULLIF(r.brand_name, ''), ru.email) FROM resellers r JOIN users ru ON ru.id = r.user_id WHERE r.user_id = u.reseller_id) AS reseller,
               ${IS_RENEWAL} AS renewal,
               CASE WHEN ${IS_RENEWAL} THEN i.period_start ELSE COALESCE(i.issue_date, i.created_at::date) END AS since
@@ -295,6 +298,7 @@ async function alertUnpaidRenewals(now) {
     const what = !r.order_id ? 'invoice' : r.inbox_type === 'other' ? (r.batch_name || 'Other service') : `${r.quantity} × ${r.label} mailboxes`;
     const batch = !r.order_id ? `Invoice #${r.invoice_id}` : r.batch_name ? `${r.batch_name} (batch #${r.order_id})` : `Batch #${r.order_id}`;
     const late = daysBetween(r.since, now);
+    const domainNote = domainsLine(await subscriptionDomains(r.user_id, [r.order_id]));
     const ago = late === 1 ? '1 day' : `${late} days`;
     const link = APP_URL ? `${APP_URL}/#/admin/invoice/${r.invoice_id}` : '';
     const when = r.renewal
@@ -312,6 +316,7 @@ async function alertUnpaidRenewals(now) {
       text: `${who} (${r.email}) hasn't paid for ${batch}${r.order_id ? `: ${what}` : ''}.\n\n` +
         when +
         `• Unpaid invoice: #${r.invoice_id}, ${money(r.amount)}\n` +
+        `${domainNote ? `• ${domainNote}\n` : ''}` +
         `${r.reseller ? `• Reseller's client: ${r.reseller}\n` : ''}${r.sold_by ? `• Sold by: ${r.sold_by}\n` : ''}` +
         `\n${history}, so you may want to cancel this subscription: ` +
         `open the invoice and click Cancel subscription (choose "No payment made" to email the client).${link ? `\n\nOpen the invoice: ${link}` : ''}\n\nMithmill`,
@@ -330,6 +335,36 @@ async function alertUnpaidRenewals(now) {
   return sent;
 }
 
+// The domains (and mailbox count) on a client's batches, for the notes in
+// renewal, due and cancellation emails: the domains linked to those batches,
+// else the ones written on them, else (when they're the client's only
+// batches) all of the client's domains.
+async function subscriptionDomains(userId, orderIds = []) {
+  const ids = orderIds.filter(Boolean).map(Number);
+  let { rows } = await query('SELECT domain FROM domains WHERE user_id = $1 AND order_id = ANY($2) ORDER BY domain', [userId, ids]);
+  let list = rows.map((r) => r.domain);
+  if (!list.length && ids.length) {
+    ({ rows } = await query('SELECT domains FROM orders WHERE id = ANY($1)', [ids]));
+    list = [...new Set(rows.flatMap((r) => String(r.domains || '').split(/[\s,;]+/))
+      .map((d) => d.trim().toLowerCase().replace(/^www\./, '')).filter((d) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d)))].sort();
+  }
+  if (!list.length) {
+    const { rows: [{ n }] } = await query("SELECT count(*)::int AS n FROM orders WHERE user_id = $1 AND status <> 'cancelled' AND NOT (id = ANY($2))", [userId, ids]);
+    if (!n) list = (await query('SELECT domain FROM domains WHERE user_id = $1 ORDER BY domain', [userId])).rows.map((r) => r.domain);
+  }
+  if (!list.length) return { domains: [], mailboxes: 0 };
+  const { rows: [{ m }] } = await query(
+    "SELECT count(*)::int AS m FROM mailboxes WHERE user_id = $1 AND lower(split_part(email, '@', 2)) = ANY($2)", [userId, list]);
+  return { domains: list, mailboxes: m };
+}
+// "Domains: a.com, b.com (12 mailboxes)", or '' when there are none.
+function domainsLine(info, label = 'Domains') {
+  if (!info || !info.domains.length) return '';
+  const shown = info.domains.slice(0, 15).join(', ');
+  const more = info.domains.length > 15 ? ` and ${info.domains.length - 15} more` : '';
+  return `${label}: ${shown}${more}${info.mailboxes ? ` (${info.mailboxes} mailbox${info.mailboxes === 1 ? '' : 'es'})` : ''}`;
+}
+
 const UPDATE_HINT = 'Your subscription renews automatically on your card. If your card has expired or the payment ' +
   'didn\'t go through (for example, not enough funds), update your payment method so the renewal can be charged.';
 
@@ -346,7 +381,7 @@ const payButtons = (inv, fallbackNote = '') => {
 };
 
 module.exports = {
-  payButtons, whatLabel, periodsSince, resellerCost,
+  payButtons, whatLabel, periodsSince, resellerCost, subscriptionDomains, domainsLine,
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
   cycleMonths, cycleLabel, cycleAmount,
 };
