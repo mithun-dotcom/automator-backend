@@ -100,4 +100,4 @@ function decrypt(buf) {
   return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString('utf8');
 }
 
-module.exports = { COLUMNS, TEMPLATE, toCsv, validate, encrypt, decrypt };
+module.exports = { COLUMNS, TEMPLATE, toCsv, parseCsv, validate, encrypt, decrypt };

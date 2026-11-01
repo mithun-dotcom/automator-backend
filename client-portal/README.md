@@ -26,6 +26,20 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Mailboxes (logins for clients)
+
+**Admin side:** go to **Mailboxes** (also the **Mailboxes** button on each client) → choose the client → upload a CSV.
+- Columns are `email`, `password`, `admin`. Write `yes` in `admin` for the admin mailbox and leave it empty for the others. The header row is optional, and common names such as "Email address" or "Role: admin" are understood.
+- You can link the upload to one of the client's batches.
+- Ticking "Email them" sends the client a "Your mailboxes are ready" email and notification.
+- Logins with the same email are updated. **Replace** removes the client's logins that aren't in the file.
+- You can mark or unmark admin mailboxes, delete logins, and download them all as a CSV.
+- The Mailboxes list shows clients whose uploaded logins are fewer than the mailboxes they bought ("Missing logins").
+
+**Client side:** the client portal has a **Mailboxes** page listing each email with the password hidden. **Show password** reveals it, the copy buttons copy the email or password, and **Download CSV** gets them all.
+
+Passwords are stored encrypted (AES-256-GCM, same key as onboarding CSVs). They're only sent to the browser when someone clicks Show, Copy or Download. Team members (separated ones only for their own clients) and resellers (for their clients) can manage mailboxes too. Every upload and delete-all is in the Activity log.
+
 ## Watch (open someone's dashboard)
 
 The owner can open any client's, reseller's or team member's dashboard as them with the **Watch** button. It's on the **Clients & invites**, **Resellers**, **Team** and **Locations** lists. You see exactly what they see and can make changes there. An orange bar at the bottom shows who you're watching, with **Back to my account**; logging out also takes you back.

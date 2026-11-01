@@ -9,6 +9,7 @@ const { pool, query, migrate } = require('./db');
 const { sendMail, enabled: mailEnabled } = require('./mailer');
 const billing = require('./billing');
 const onboarding = require('./onboarding');
+const mailboxes = require('./mailboxes');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
@@ -608,7 +609,8 @@ shared.get('/overview', asyncRoute(async (req, res) => {
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
              count(o.id)::int AS batch_count,
-             (SELECT count(*) FROM invoices i WHERE i.user_id = u.id)::int AS invoice_count
+             (SELECT count(*) FROM invoices i WHERE i.user_id = u.id)::int AS invoice_count,
+             (SELECT count(*) FROM mailboxes mb WHERE mb.user_id = u.id)::int AS mailbox_count
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
            WHERE u.role = 'client' AND ${scope} GROUP BY u.id ORDER BY u.created_at DESC`),
     reseller ? { rows: [] } : query(`SELECT id, email, name, company, expires_at, created_at FROM invites
@@ -982,6 +984,135 @@ shared.delete('/clients/:id', audited('deleted', 'user', byParam, async (req, re
   await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [client.email]);
   await query('DELETE FROM users WHERE id = $1', [id]);
   res.json({ ok: true });
+}));
+
+// ---- Mailboxes: the logins delivered to a client, uploaded as a CSV.
+
+const MAILBOX_LIST = `SELECT m.id, m.email, m.is_admin, m.order_id, o.batch_name, m.created_at, m.updated_at
+  FROM mailboxes m LEFT JOIN orders o ON o.id = m.order_id WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`;
+const mailboxCsv = (rows) => mailboxes.toCsv([['email', 'password', 'admin'],
+  ...rows.map((m) => [m.email, onboarding.decrypt(m.password), m.is_admin ? 'yes' : ''])]);
+async function assertMailbox(req, id) {
+  const { rows: [m] } = await query('SELECT * FROM mailboxes WHERE id = $1', [Number(id) || 0]);
+  if (!m) throw new HttpError(404, 'Mailbox not found');
+  await assertClient(req, m.user_id);
+  return m;
+}
+
+app.get('/api/mailboxes-template.csv', (req, res) => {
+  res.attachment('mailboxes-template.csv').type('text/csv').send(mailboxes.TEMPLATE);
+});
+
+shared.get('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const { rows } = await query(MAILBOX_LIST, [client.id]);
+  const { rows: batches } = await query(
+    `SELECT o.id, o.batch_name, o.quantity, o.status, p.label FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+      WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [client.id]);
+  res.json({ client: { id: client.id, email: client.email, name: client.name, company: client.company, password_set: client.password_set }, mailboxes: rows, batches });
+}));
+
+// Upload: adds the CSV's mailboxes, updating any already there (same email);
+// replace: true first removes the client's others (or that batch's, if one is chosen).
+shared.post('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  let list;
+  try {
+    list = mailboxes.parse(req.body.csv);
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+  const orderId = req.body.order_id ? Number(req.body.order_id) : null;
+  if (orderId) {
+    const { rows: [o] } = await query('SELECT id FROM orders WHERE id = $1 AND user_id = $2', [orderId, client.id]);
+    if (!o) throw new HttpError(400, 'That batch isn\'t this client\'s');
+  }
+  const result = await inTransaction(async (db) => {
+    let removed = 0;
+    if (req.body.replace === true) {
+      const r = await db.query(
+        `DELETE FROM mailboxes WHERE user_id = $1 AND NOT (email = ANY($2))${orderId ? ' AND order_id = $3' : ''}`,
+        orderId ? [client.id, list.map((m) => m.email), orderId] : [client.id, list.map((m) => m.email)]);
+      removed = r.rowCount;
+    }
+    let added = 0;
+    let updated = 0;
+    for (const m of list) {
+      const { rows: [row] } = await db.query(
+        `INSERT INTO mailboxes (user_id, order_id, email, password, is_admin) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, email) DO UPDATE SET password = EXCLUDED.password, is_admin = EXCLUDED.is_admin,
+           order_id = COALESCE(EXCLUDED.order_id, mailboxes.order_id), updated_at = now()
+         RETURNING (xmax = 0) AS inserted`,
+        [client.id, orderId, m.email, onboarding.encrypt(m.password), m.is_admin]);
+      if (row.inserted) added += 1; else updated += 1;
+    }
+    return { added, updated, removed };
+  });
+  const { rows: [{ total }] } = await query('SELECT count(*)::int AS total FROM mailboxes WHERE user_id = $1', [client.id]);
+  const admins = list.filter((m) => m.is_admin).length;
+  await audit.record(req.user, 'added', `${list.length} mailbox login${list.length === 1 ? '' : 's'} for ${client.company || client.name || client.email} <${client.email}>`,
+    [{ field: 'Uploaded', from: '', to: `${result.added} new, ${result.updated} updated${result.removed ? `, ${result.removed} removed` : ''}${admins ? `, ${admins} admin` : ''}` }],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  let notified = false;
+  if (req.body.notify === true && (result.added || result.updated)) {
+    await billing.notify(client, 'Your mailboxes are ready',
+      `Your mailbox logins are ready: ${total} mailbox${total === 1 ? '' : 'es'}. Open the Mailboxes page in your portal to see each email and password.`,
+      { paymentNote: false });
+    notified = Boolean(client.password_set);
+  }
+  res.json({ ...result, total, notified });
+}));
+
+shared.get('/clients/:id/mailboxes.csv', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const { rows } = await query('SELECT * FROM mailboxes WHERE user_id = $1 ORDER BY is_admin DESC, email', [client.id]);
+  res.attachment(`mailboxes-${client.email.split('@')[0]}.csv`).type('text/csv').send(mailboxCsv(rows));
+}));
+
+shared.get('/mailboxes/:id/password', asyncRoute(async (req, res) => {
+  const m = await assertMailbox(req, req.params.id);
+  res.json({ password: onboarding.decrypt(m.password) });
+}));
+
+shared.patch('/mailboxes/:id', asyncRoute(async (req, res) => {
+  const m = await assertMailbox(req, req.params.id);
+  if (typeof req.body.is_admin === 'boolean') await query('UPDATE mailboxes SET is_admin = $2, updated_at = now() WHERE id = $1', [m.id, req.body.is_admin]);
+  if (typeof req.body.password === 'string') {
+    const pw = req.body.password.trim();
+    if (!pw) throw new HttpError(400, 'Enter a password');
+    await query('UPDATE mailboxes SET password = $2, updated_at = now() WHERE id = $1', [m.id, onboarding.encrypt(pw.slice(0, 500))]);
+  }
+  res.json({ ok: true });
+}));
+
+shared.delete('/mailboxes/:id', asyncRoute(async (req, res) => {
+  const m = await assertMailbox(req, req.params.id);
+  await query('DELETE FROM mailboxes WHERE id = $1', [m.id]);
+  res.json({ ok: true });
+}));
+
+shared.delete('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const { rowCount } = await query('DELETE FROM mailboxes WHERE user_id = $1', [client.id]);
+  await audit.record(req.user, 'deleted', `all ${rowCount} mailbox logins for ${client.company || client.name || client.email} <${client.email}>`, [],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ ok: true, removed: rowCount });
+}));
+
+// The client's own mailbox logins.
+const clientRole = (req, res, next) => (req.user.role === 'client' ? next() : next(new HttpError(403, 'Clients only')));
+app.get('/api/mailboxes', auth, clientRole, asyncRoute(async (req, res) => {
+  const { rows } = await query(MAILBOX_LIST, [req.user.id]);
+  res.json({ mailboxes: rows });
+}));
+app.get('/api/mailboxes.csv', auth, clientRole, asyncRoute(async (req, res) => {
+  const { rows } = await query('SELECT * FROM mailboxes WHERE user_id = $1 ORDER BY is_admin DESC, email', [req.user.id]);
+  res.attachment('my-mailboxes.csv').type('text/csv').send(mailboxCsv(rows));
+}));
+app.get('/api/mailboxes/:id/password', auth, clientRole, asyncRoute(async (req, res) => {
+  const { rows: [m] } = await query('SELECT password FROM mailboxes WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
+  if (!m) throw new HttpError(404, 'Mailbox not found');
+  res.json({ password: onboarding.decrypt(m.password) });
 }));
 
 // Adds a batch on a client's behalf: an existing purchase (with its billing

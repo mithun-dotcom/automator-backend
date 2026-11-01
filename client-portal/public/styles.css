@@ -523,3 +523,20 @@ tr.vpn-row td { background: #fef2f2; }
 .loc-history > td { background: var(--surface-2); }
 .sub-table { width: 100%; font-size: 13px; }
 .sub-table th, .sub-table td { padding: 6px 8px; }
+
+/* Mailboxes */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.mb-email, .mb-pw { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.mb-pw-val { min-width: 110px; letter-spacing: .02em; word-break: break-all; }
+.icon-btn { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface, #fff); color: var(--muted); cursor: pointer; flex-shrink: 0; }
+.icon-btn:hover { color: var(--text); border-color: var(--brand-500); }
+.icon-btn .ico { width: 14px; height: 14px; }
+.mb-search { max-width: 260px; }
+.filter-bar .mb-search { max-width: 420px; }
+@media (max-width: 640px) {
+  .mb-table thead { display: none; }
+  .mb-table, .mb-table tbody, .mb-table tr, .mb-table td { display: block; width: 100%; }
+  .mb-table tr { padding: 12px 16px; border-bottom: 1px solid var(--border-soft); }
+  .mb-table td { padding: 3px 0; border: 0; }
+  .mb-table .mb-email .mono { word-break: break-all; }
+}

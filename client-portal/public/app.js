@@ -229,11 +229,13 @@ const ICONS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
-  '#/dashboard': 'dashboard', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
+  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
   '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
 };
 
@@ -446,7 +448,7 @@ function renderPassword() {
 
 // ------------------------------------------------------------------ client
 
-const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/order', 'New order'], ['#/billing', 'Billing']];
+const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/order', 'New order'], ['#/billing', 'Billing']];
 
 async function renderClient(page, arg, sub) {
   state.dash = await api('GET', '/api/dashboard');
@@ -459,6 +461,7 @@ async function renderClient(page, arg, sub) {
   if (page === 'order') return renderOrder();
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
+  if (page === 'mailboxes') return renderMyMailboxes((await api('GET', '/api/mailboxes')).mailboxes);
   return renderDashboard();
 }
 
@@ -921,10 +924,10 @@ const ADMIN_TABS = [];
 function setAdminTabs() {
   ADMIN_TABS.length = 0;
   if (isReseller()) {
-    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
+    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
     return;
   }
-  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/invoices', 'Invoices']);
+  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/invoices', 'Invoices']);
   if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
   if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/locations', 'Locations'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
@@ -941,6 +944,7 @@ async function renderAdmin(page, arg, sub) {
     if (page === 'payouts') return resellerPayouts(await api('GET', '/api/reseller/payouts'));
     if (['team', 'analytics', 'resellers'].includes(page)) return go('#/admin/orders');
   }
+  if (page === 'mailboxes') return arg ? adminMailboxClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/mailboxes`)) : adminMailboxes();
   if (page === 'locations') return isOwner() ? renderLocations(await api('GET', '/api/admin/locations')) : go('#/admin/orders');
   if (page === 'resellers') {
     if (!isOwner()) return go('#/admin/orders');
@@ -1465,7 +1469,7 @@ function adminClients() {
                 : c.access_blocked ? '<div class="small access-off">Access blocked</div>' : ''}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
-            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button>${watchBtn(c.id)}${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
+            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button><a class="btn btn-sm" href="#/admin/mailboxes/${c.id}">Mailboxes${c.mailbox_count ? ` (${c.mailbox_count})` : ''}</a>${watchBtn(c.id)}${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
           </tr>
           <tr class="price-row" id="prices-${c.id}" data-for="${c.id}" hidden><td colspan="7">
             <form class="client-prices" data-id="${c.id}">
@@ -2977,4 +2981,145 @@ function deviceOf(ua) {
   const browser = /Edg\//.test(s) ? 'Edge' : /OPR\//.test(s) ? 'Opera' : /Chrome\//.test(s) ? 'Chrome' : /Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : '';
   const os = /Windows/.test(s) ? 'Windows' : /iPhone|iPad/.test(s) ? 'iOS' : /Android/.test(s) ? 'Android' : /Mac OS X/.test(s) ? 'macOS' : /Linux/.test(s) ? 'Linux' : '';
   return [browser, os].filter(Boolean).join(' on ') || '—';
+}
+
+// ------------------------------------------------------------------ mailboxes
+
+// Mailbox logins with the password hidden until Show. pwUrl(id) fetches one
+// password; admin adds the batch column and Delete / admin switch.
+function mailboxTable(rows, { pwUrl, admin = false }) {
+  if (!rows.length) return '';
+  return `<div class="table-wrap"><table class="mb-table">
+    <thead><tr><th>Email</th><th>Password</th>${admin ? '<th>Batch</th><th>Admin</th><th>Updated</th><th></th>' : ''}</tr></thead>
+    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}">
+      <td><div class="mb-email"><span class="mono">${esc(m.email)}</span>
+        <button class="icon-btn" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button>
+        ${m.is_admin ? '<span class="badge b-in_progress">Admin</span>' : ''}</div></td>
+      <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
+        <button class="btn btn-sm" data-show-pw="${m.id}">Show password</button>
+        <button class="icon-btn" data-copy-pw="${m.id}" title="Copy password" aria-label="Copy password for ${esc(m.email)}">${icon('copy')}</button></div></td>
+      ${admin ? `<td class="small">${m.order_id ? esc(m.batch_name || `#${m.order_id}`) : '<span class="muted">—</span>'}</td>
+        <td><label class="switch switch-sm" title="Admin mailbox"><input type="checkbox" data-mb-admin="${m.id}" aria-label="Admin: ${esc(m.email)}" ${m.is_admin ? 'checked' : ''}><span></span></label></td>
+        <td class="small">${fmtDate(m.updated_at)}</td>
+        <td><button class="btn btn-sm btn-ghost" data-mb-del="${m.id}" data-email="${esc(m.email)}">Delete</button></td>` : ''}
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function wireMailboxTable(pwUrl) {
+  const cache = {};
+  const getPw = async (id) => (cache[id] = cache[id] || (await api('GET', pwUrl(id))).password);
+  const copy = async (text, what) => {
+    try { await navigator.clipboard.writeText(text); toast(`${what} copied`); } catch { toast(`Couldn't copy. Select it and copy it yourself.`); }
+  };
+  document.querySelectorAll('[data-show-pw]').forEach((b) => {
+    b.onclick = async () => {
+      const val = b.parentElement.querySelector('.mb-pw-val');
+      if (b.dataset.shown) { val.textContent = '••••••••••'; b.textContent = 'Show password'; delete b.dataset.shown; return; }
+      try { val.textContent = await getPw(b.dataset.showPw); b.textContent = 'Hide'; b.dataset.shown = '1'; } catch (ex) { toast(ex.message); }
+    };
+  });
+  document.querySelectorAll('[data-copy-pw]').forEach((b) => {
+    b.onclick = async () => { try { await copy(await getPw(b.dataset.copyPw), 'Password'); } catch (ex) { toast(ex.message); } };
+  });
+  document.querySelectorAll('[data-copy-text]').forEach((b) => { b.onclick = () => copy(b.dataset.copyText, 'Email'); });
+  const search = document.getElementById('mb-search');
+  if (search) {
+    search.oninput = () => {
+      const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+      document.querySelectorAll('tr[data-mb]').forEach((tr) => { tr.hidden = !words.every((w) => tr.dataset.search.includes(w)); });
+    };
+  }
+}
+
+// Client: their mailbox logins.
+function renderMyMailboxes(rows) {
+  const admins = rows.filter((m) => m.is_admin).length;
+  shell(CLIENT_TABS, '#/mailboxes', `
+    <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p></div>
+      ${rows.length ? '<div class="row"><a class="btn" href="/api/mailboxes.csv">⬇ Download CSV</a></div>' : ''}</div>
+    <div class="stack">
+      ${rows.length ? `<div class="card">
+        <div class="card-head"><div><h2>${rows.length} mailbox${rows.length === 1 ? '' : 'es'}</h2>${admins ? `<div class="muted small">${admins === 1 ? 'The admin mailbox is' : 'Admin mailboxes are'} marked <strong>Admin</strong>.</div>` : ''}</div>
+          ${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}</div>
+        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password` })}
+      </div>` : '<div class="card"><div class="empty">Your mailboxes will appear here once they\'re set up. We\'ll let you know when they\'re ready.</div></div>'}
+    </div>`);
+  wireMailboxTable((id) => `/api/mailboxes/${id}/password`);
+}
+
+// Admin: clients and how many mailbox logins each has.
+function adminMailboxes() {
+  const clients = state.admin.clients;
+  shell(ADMIN_TABS, '#/admin/mailboxes', `
+    <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Upload each client's mailbox logins as a CSV (email, password, admin). Clients see them on their Mailboxes page, with the password hidden until they click Show.</p></div>
+      <div class="row"><a class="btn" href="/api/mailboxes-template.csv">⬇ Sample CSV</a></div></div>
+    <div class="card">
+      ${clients.length ? `<div class="filter-bar"><input id="mb-search" class="mb-search" type="search" placeholder="Search name, email, company…"></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Client</th><th class="num">Mailboxes bought</th><th class="num">Logins uploaded</th><th></th></tr></thead>
+        <tbody>${clients.map((c) => `<tr data-mb="${c.id}" data-search="${searchText(c.name, c.company, c.email)}">
+          <td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td>
+          <td class="num">${c.active_mailboxes || '<span class="muted">0</span>'}</td>
+          <td class="num">${c.mailbox_count ? `<strong>${c.mailbox_count}</strong>` : '<span class="muted">0</span>'}${c.active_mailboxes && c.mailbox_count < c.active_mailboxes ? '<div class="small access-off">Missing logins</div>' : ''}</td>
+          <td><a class="btn btn-sm ${c.mailbox_count ? '' : 'btn-primary'}" href="#/admin/mailboxes/${c.id}">${c.mailbox_count ? 'Manage' : 'Upload logins'}</a></td>
+        </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
+    </div>`);
+  wireMailboxTable(() => '');
+}
+
+// Admin: one client's mailbox logins, with the CSV upload.
+function adminMailboxClient({ client, mailboxes: rows, batches }) {
+  const who = client.company || client.name || client.email;
+  const pwUrl = (id) => `${API()}/mailboxes/${id}/password`;
+  shell(ADMIN_TABS, '#/admin/mailboxes', `
+    <div class="page-head"><div><p class="muted small" style="margin:0 0 4px"><a href="#/admin/mailboxes">← Mailboxes</a></p><h1>${esc(who)}</h1><p class="muted">${esc(client.email)} · ${rows.length} mailbox login${rows.length === 1 ? '' : 's'}</p></div>
+      <div class="row">${rows.length ? `<a class="btn" href="${API()}/clients/${client.id}/mailboxes.csv">⬇ Download CSV</a>` : ''}${watchBtn(client.id)}</div></div>
+    <div class="stack">
+      <form class="card card-pad" id="mb-upload">
+        <h2 style="margin-bottom:4px">Upload mailbox logins</h2>
+        <p class="muted small" style="margin:0 0 14px">CSV columns: <span class="mono">email</span>, <span class="mono">password</span>, <span class="mono">admin</span> (write <strong>yes</strong> for the admin mailbox, leave it empty for the others). <a href="/api/mailboxes-template.csv">Download the sample</a>.</p>
+        <div class="grid-2">
+          <div class="field"><label for="mb-file">CSV file</label><input id="mb-file" type="file" accept=".csv,text/csv" required></div>
+          <div class="field"><label for="mb-batch">Batch (optional)</label><select id="mb-batch" name="order_id"><option value="">Not linked to a batch</option>
+            ${batches.map((o) => `<option value="${o.id}">${esc(o.batch_name || `Batch #${o.id}`)} · ${o.quantity} × ${esc(o.label)}${o.status === 'cancelled' ? ' (cancelled)' : ''}</option>`).join('')}</select></div>
+        </div>
+        <label class="check"><input type="checkbox" name="notify" checked> Email ${esc(who)} that their mailboxes are ready${client.password_set ? '' : ' <span class="muted small">(they haven\'t joined yet, so it waits in their notifications)</span>'}</label>
+        <label class="check"><input type="checkbox" name="replace"> Replace: remove this client's logins that aren't in the file${batches.length ? ' (only the chosen batch\'s, if one is chosen)' : ''}</label>
+        <div class="row" style="margin-top:12px"><button class="btn btn-primary" type="submit">Upload</button><span class="muted small">Logins already here with the same email are updated.</span></div>
+        <div class="error"></div>
+      </form>
+      <div class="card">
+        <div class="card-head"><h2>Mailbox logins</h2>${rows.length ? `<div class="row">${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}<button class="btn btn-sm btn-danger" id="mb-del-all">Delete all</button></div>` : ''}</div>
+        ${rows.length ? mailboxTable(rows, { pwUrl, admin: true }) : '<div class="empty">No logins uploaded yet.</div>'}
+      </div>
+    </div>`);
+  wireMailboxTable(pwUrl);
+  onSubmit(document.getElementById('mb-upload'), async (d) => {
+    const file = document.getElementById('mb-file').files[0];
+    if (!file) throw new Error('Choose the CSV file');
+    if (file.size > 2 * 1024 * 1024) throw new Error('The file is too big (2 MB max)');
+    const r = await api('POST', `${API()}/clients/${client.id}/mailboxes`, {
+      csv: await file.text(), order_id: d.order_id || null, notify: d.notify === 'on', replace: d.replace === 'on',
+    });
+    toast(`Uploaded: ${r.added} new, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ''}${r.notified ? '. Client emailed.' : ''}`);
+    route();
+  });
+  document.querySelectorAll('[data-mb-admin]').forEach((c) => {
+    c.onchange = async () => {
+      try { await api('PATCH', `${API()}/mailboxes/${c.dataset.mbAdmin}`, { is_admin: c.checked }); route(); } catch (ex) { c.checked = !c.checked; toast(ex.message); }
+    };
+  });
+  document.querySelectorAll('[data-mb-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Delete the login for ${b.dataset.email}? The client won't see it any more.`)) return;
+      try { await api('DELETE', `${API()}/mailboxes/${b.dataset.mbDel}`); route(); } catch (ex) { toast(ex.message); }
+    };
+  });
+  const all = document.getElementById('mb-del-all');
+  if (all) {
+    all.onclick = async () => {
+      if (!confirm(`Delete all ${rows.length} mailbox logins for ${who}? The client won't see them any more.`)) return;
+      try { await api('DELETE', `${API()}/clients/${client.id}/mailboxes`); toast('All logins deleted'); route(); } catch (ex) { toast(ex.message); }
+    };
+  }
 }

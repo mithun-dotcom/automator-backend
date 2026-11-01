@@ -341,3 +341,17 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT '';
+
+-- Mailbox logins delivered to a client (uploaded as a CSV). Passwords are
+-- encrypted like the onboarding CSVs.
+CREATE TABLE IF NOT EXISTS mailboxes (
+  id         SERIAL PRIMARY KEY,
+  user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  order_id   INT REFERENCES orders(id) ON DELETE SET NULL,
+  email      TEXT NOT NULL,
+  password   BYTEA NOT NULL,
+  is_admin   BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_user_email ON mailboxes (user_id, email);
