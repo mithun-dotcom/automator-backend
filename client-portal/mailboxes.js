@@ -6,10 +6,20 @@ const { parseCsv, toCsv } = require('./onboarding');
 
 const MAX_ROWS = 10000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const TEMPLATE = toCsv([['email', 'password', 'admin', 'type', 'created'],
-  ['admin@yourdomain.com', 'Example#Pass1', 'yes', 'Google Workspace', '2026-11-01'],
-  ['john@yourdomain.com', 'Example#Pass2', '', 'Google Workspace', '2026-11-01'],
-  ['sarah@otherdomain.com', 'Example#Pass3', '', 'Microsoft 365 (Admin)', '2026-11-02']]);
+// The sample the team downloads (and the guide previews): two domains on
+// different mailbox types, one admin mailbox each.
+const SAMPLE = [['email', 'password', 'admin', 'type', 'created'],
+  ['admin@acmegrowth.com', 'Ag#7kQ2m!vX', 'yes', 'Google Workspace', '2026-11-01'],
+  ['john@acmegrowth.com', 'Jd$4pL9w@zR', '', 'Google Workspace', '2026-11-01'],
+  ['sarah@acmegrowth.com', 'Sm!8tN3q#bK', '', 'Google Workspace', '2026-11-01'],
+  ['admin@tryacmegrowth.com', 'Ta@5hV1r$eW', 'yes', 'Microsoft 365 (Admin)', '2026-11-02'],
+  ['mike@tryacmegrowth.com', 'Mk#2xC6j!uP', '', 'Microsoft 365 (Admin)', '2026-11-02'],
+  ['emma@tryacmegrowth.com', 'Em$9yF4s@gT', '', 'Microsoft 365 (Admin)', '2026-11-02']];
+const TEMPLATE = toCsv(SAMPLE);
+const DOMAIN_SAMPLE = [['domain', 'type'],
+  ['acmegrowth.com', 'Google Workspace'], ['getacmegrowth.com', 'Google Workspace'],
+  ['tryacmegrowth.com', 'Microsoft 365 (Admin)'], ['acmegrowthhq.com', '']];
+const DOMAIN_TEMPLATE = toCsv(DOMAIN_SAMPLE);
 
 const norm = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, '');
 const EMAIL_COLS = ['email', 'emailaddress', 'mailbox', 'username', 'user', 'login', 'address', 'upn', 'userprincipalname'];
@@ -88,4 +98,4 @@ function parse(text) {
   });
 }
 
-module.exports = { parse, parseDate, TEMPLATE, toCsv };
+module.exports = { parse, parseDate, SAMPLE, TEMPLATE, DOMAIN_SAMPLE, DOMAIN_TEMPLATE, toCsv };

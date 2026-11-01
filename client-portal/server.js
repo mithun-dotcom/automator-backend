@@ -1026,8 +1026,13 @@ async function assertMailbox(req, id) {
 }
 
 app.get('/api/mailboxes-template.csv', (req, res) => {
-  res.attachment('mailboxes-template.csv').type('text/csv').send(mailboxes.TEMPLATE);
+  res.attachment('mailboxes-sample.csv').type('text/csv').send(mailboxes.TEMPLATE);
 });
+app.get('/api/domains-template.csv', (req, res) => {
+  res.attachment('domains-sample.csv').type('text/csv').send(mailboxes.DOMAIN_TEMPLATE);
+});
+// The samples' rows, for the upload guides in the admin panel.
+app.get('/api/upload-samples', (req, res) => res.json({ mailboxes: mailboxes.SAMPLE, domains: mailboxes.DOMAIN_SAMPLE }));
 
 shared.get('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
   const client = await assertClient(req, req.params.id);

@@ -946,6 +946,7 @@ async function renderAdmin(page, arg, sub) {
     if (page === 'payouts') return resellerPayouts(await api('GET', '/api/reseller/payouts'));
     if (['team', 'analytics', 'resellers'].includes(page)) return go('#/admin/orders');
   }
+  if ((page === 'domains' || page === 'mailboxes') && !state.samples) state.samples = await api('GET', '/api/upload-samples');
   if (page === 'domains') return arg ? adminDomainClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/domains`)) : adminDomains();
   if (page === 'mailboxes') return arg ? adminMailboxClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/mailboxes`)) : adminMailboxes();
   if (page === 'locations') return isOwner() ? renderLocations(await api('GET', '/api/admin/locations')) : go('#/admin/orders');
@@ -3058,8 +3059,10 @@ function renderMyMailboxes(rows) {
 function adminMailboxes() {
   const clients = state.admin.clients;
   shell(ADMIN_TABS, '#/admin/mailboxes', `
-    <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Upload each client's mailbox logins as a CSV (email, password, admin). Clients see them on their Mailboxes page, with the password hidden until they click Show.</p></div>
+    <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Upload each client's mailbox logins as a CSV. Clients see them on their Mailboxes page, with the password hidden until they click Show.</p></div>
       <div class="row"><a class="btn" href="/api/mailboxes-template.csv">⬇ Sample CSV</a></div></div>
+    <div class="stack">
+    ${uploadGuide('mailboxes', !clients.some((c) => c.mailbox_count))}
     <div class="card">
       ${clients.length ? `<div class="filter-bar"><input id="mb-search" class="mb-search" type="search" placeholder="Search name, email, company…"></div>
       <div class="table-wrap"><table>
@@ -3070,6 +3073,7 @@ function adminMailboxes() {
           <td class="num">${c.mailbox_count ? `<strong>${c.mailbox_count}</strong>` : '<span class="muted">0</span>'}${c.active_mailboxes && c.mailbox_count < c.active_mailboxes ? '<div class="small access-off">Missing logins</div>' : ''}</td>
           <td><a class="btn btn-sm ${c.mailbox_count ? '' : 'btn-primary'}" href="#/admin/mailboxes/${c.id}">${c.mailbox_count ? 'Manage' : 'Upload logins'}</a></td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
+    </div>
     </div>`);
   wireMailboxTable(() => '');
 }
@@ -3095,9 +3099,10 @@ function adminMailboxClient({ client, mailboxes: rows, batches, types }) {
         </div>
         <label class="check"><input type="checkbox" name="notify" checked> Email ${esc(who)} that their mailboxes are ready${client.password_set ? '' : ' <span class="muted small">(they haven\'t joined yet, so it waits in their notifications)</span>'}</label>
         <label class="check"><input type="checkbox" name="replace"> Replace: remove this client's logins that aren't in the file${batches.length ? ' (only the chosen batch\'s, if one is chosen)' : ''}</label>
-        <div class="row" style="margin-top:12px"><button class="btn btn-primary" type="submit">Upload</button><span class="muted small">Logins already here with the same email are updated.</span></div>
+        <div class="row" style="margin-top:12px"><button class="btn btn-primary" type="submit">Upload</button><a class="btn" href="/api/mailboxes-template.csv">⬇ Sample CSV</a><span class="muted small">Logins already here with the same email are updated.</span></div>
         <div class="error"></div>
       </form>
+      ${uploadGuide('mailboxes', !rows.length)}
       <div class="card">
         <div class="card-head"><h2>Mailbox logins</h2>${rows.length ? `<div class="row">${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}<button class="btn btn-sm btn-danger" id="mb-del-all">Delete all</button></div>` : ''}</div>
         ${rows.length ? mailboxTable(rows, { pwUrl, admin: true, types }) : '<div class="empty">No logins uploaded yet.</div>'}
@@ -3180,7 +3185,10 @@ function renderMyDomains(rows) {
 function adminDomains() {
   const clients = state.admin.clients;
   shell(ADMIN_TABS, '#/admin/domains', `
-    <div class="page-head"><div><h1>Domains</h1><p class="muted">Each client's sending domains and the mailbox type on each. DNS (MX, SPF, DMARC, DKIM) is checked when a domain is added and again every day.</p></div></div>
+    <div class="page-head"><div><h1>Domains</h1><p class="muted">Each client's sending domains and the mailbox type on each. DNS (MX, SPF, DMARC, DKIM) is checked when a domain is added and again every day.</p></div>
+      <div class="row"><a class="btn" href="/api/domains-template.csv">⬇ Sample CSV</a></div></div>
+    <div class="stack">
+    ${uploadGuide('domains', false)}
     <div class="card">
       ${clients.length ? `<div class="filter-bar"><input id="mb-search" class="mb-search" type="search" placeholder="Search name, email, company…"></div>
       <div class="table-wrap"><table>
@@ -3191,6 +3199,7 @@ function adminDomains() {
           <td>${!c.domain_count ? '<span class="muted">—</span>' : c.domain_issues ? `<span class="badge dns-st dns-warn">${c.domain_issues} need${c.domain_issues === 1 ? 's' : ''} attention</span>` : '<span class="badge b-active">All OK</span>'}</td>
           <td><a class="btn btn-sm ${c.domain_count ? '' : 'btn-primary'}" href="#/admin/domains/${c.id}">${c.domain_count ? 'Manage' : 'Add domains'}</a></td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
+    </div>
     </div>`);
   wireMailboxTable(() => '');
 }
@@ -3207,7 +3216,8 @@ function adminDomainClient({ client, domains, batches, types }) {
       <form class="card card-pad" id="dom-add">
         <h2 style="margin-bottom:4px">Add domains</h2>
         <p class="muted small" style="margin:0 0 14px">Domains are also added automatically from uploaded <a href="#/admin/mailboxes/${client.id}">mailboxes</a> and from batches. One domain per line. To give a domain its own mailbox type, write <span class="mono">domain, type</span> (e.g. <span class="mono">acme.com, Google Workspace</span>). DNS is checked right away.</p>
-        <div class="field"><label for="dom-text">Domains</label><textarea id="dom-text" name="text" rows="5" placeholder="acme.com&#10;getacme.com&#10;tryacme.com, Microsoft 365 (Admin)" required></textarea></div>
+        <div class="field"><label for="dom-text">Domains</label><textarea id="dom-text" name="text" rows="5" placeholder="acme.com&#10;getacme.com&#10;tryacme.com, Microsoft 365 (Admin)" required></textarea>
+          <div class="hint">Or load a CSV (columns <span class="mono">domain</span>, <span class="mono">type</span>): <input id="dom-file" type="file" accept=".csv,text/csv,text/plain" class="inline-file"> <a href="/api/domains-template.csv">Download the sample CSV</a></div></div>
         <div class="grid-2">
           <div class="field"><label for="dom-type">Mailbox type</label><select id="dom-type" name="inbox_type"><option value="auto">Detect from DNS (or the batch's type)</option>${typeOptions(null)}</select></div>
           <div class="field"><label for="dom-batch">Batch (optional)</label><select id="dom-batch" name="order_id"><option value="">Not linked to a batch</option>
@@ -3216,6 +3226,7 @@ function adminDomainClient({ client, domains, batches, types }) {
         <div class="row"><button class="btn btn-primary" type="submit">Add & check DNS</button><button class="btn" type="button" id="dom-import">Import from batches</button><span class="muted small">Import adds the domains written on this client's batches.</span></div>
         <div class="error"></div>
       </form>
+      ${uploadGuide('domains', !domains.length)}
       <div class="card">
         <div class="card-head"><h2>Domains</h2>${domains.length ? `<div class="row">${domains.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search domain…">' : ''}<button class="btn btn-sm" id="dom-check-all">Recheck all DNS</button></div>` : ''}</div>
         ${domains.length ? `<div class="table-wrap"><table class="dom-table">
@@ -3240,6 +3251,15 @@ function adminDomainClient({ client, domains, batches, types }) {
     toast(`${r.added} added${r.updated ? `, ${r.updated} updated` : ''}. DNS: ${st.ok || 0} OK${st.warning ? `, ${st.warning} need attention` : ''}${st.error ? `, ${st.error} with problems` : ''}`);
     route();
   });
+  document.getElementById('dom-file').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 1024 * 1024) { toast('The file is too big (1 MB max)'); return; }
+    // The server reads "domain, type" lines and skips the header.
+    const text = (await file.text()).replace(/^\uFEFF/, '').replace(/"/g, '');
+    document.getElementById('dom-text').value = text.trim();
+    toast(`${text.trim().split(/\r?\n/).length - 1} rows loaded. Check them, then click Add & check DNS.`);
+  };
   document.getElementById('dom-import').onclick = async (e) => {
     busy(e.target, 'Importing…');
     try { const r = await api('POST', `${API()}/clients/${client.id}/domains/import`); toast(r.added ? `${r.added} domain${r.added === 1 ? '' : 's'} imported and checked` : 'No new domains on the batches'); route(); } catch (ex) { toast(ex.message); route(); }
@@ -3262,4 +3282,42 @@ function adminDomainClient({ client, domains, batches, types }) {
       try { await api('DELETE', `${API()}/domains/${b.dataset.domDel}`); route(); } catch (ex) { toast(ex.message); }
     };
   });
+}
+
+// ------------------------------------------------------------------ upload guides
+
+// "How to upload" for the team: the columns, steps and a preview of the
+// sample file, with a download. open: shown expanded.
+function uploadGuide(kind, open) {
+  const sample = (state.samples || {})[kind] || [];
+  const g = kind === 'mailboxes' ? {
+    title: 'How to upload mailboxes',
+    file: '/api/mailboxes-template.csv',
+    cols: [
+      ['email', 'The mailbox address. Required.'],
+      ['password', 'Its password. Required. The client sees it hidden until they click Show.'],
+      ['admin', '<strong>yes</strong> for the admin mailbox; leave empty for the others.'],
+      ['type', `Mailbox type, e.g. ${(state.admin && state.admin.pricing || []).slice(0, 3).map((p) => esc(p.label)).join(', ') || 'Google Workspace'}. Empty: the type chosen on the upload form, or the batch's.`],
+      ['created', 'Date the mailbox was created, e.g. 2026-11-01 (also 01/11/2026 or 1 Nov 2026). Optional.'],
+    ],
+    steps: ['Download the sample CSV and open it in Google Sheets or Excel.', 'Replace the example rows with the client\'s mailboxes: one row per mailbox. Keep the header row.',
+      'Save it as CSV (Google Sheets: File → Download → CSV. Excel: Save As → CSV UTF-8).', 'Open the client below, choose the file and click Upload. Their domains are added to Domains automatically.'],
+  } : {
+    title: 'How to add domains',
+    file: '/api/domains-template.csv',
+    cols: [['domain', 'The domain, e.g. acmegrowth.com. Required.'], ['type', 'Mailbox type on that domain. Empty: the type chosen on the form, the batch\'s, or detected from DNS.']],
+    steps: ['Paste domains (one per line, optionally "domain, type"), or download the sample CSV, fill it in and upload it.',
+      'Domains also come in automatically from uploaded mailboxes and from batches.', 'DNS (MX, SPF, DMARC, DKIM) is checked right away and every day.'],
+  };
+  return `<details class="card upload-guide"${open ? ' open' : ''}>
+    <summary><span>${icon('invoices')} <strong>${g.title}</strong></span><span class="muted small">Sample CSV, columns and steps</span></summary>
+    <div class="ug-body">
+      <ol class="ug-steps">${g.steps.map((x) => `<li>${x}</li>`).join('')}</ol>
+      <div class="ug-cols">${g.cols.map(([c, d]) => `<div><span class="mono ug-col">${c}</span><span class="small">${d}</span></div>`).join('')}</div>
+      ${sample.length ? `<div class="muted small" style="margin:14px 0 6px">Sample file:</div>
+      <div class="table-wrap ug-sample"><table><thead><tr>${sample[0].map((h) => `<th class="mono">${esc(h)}</th>`).join('')}</tr></thead>
+        <tbody>${sample.slice(1).map((r) => `<tr>${r.map((v) => `<td class="mono">${v ? esc(v) : '<span class="muted">(empty)</span>'}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
+      <div class="row" style="margin-top:14px"><a class="btn btn-primary" href="${g.file}">⬇ Download sample CSV</a></div>
+    </div>
+  </details>`;
 }

@@ -555,3 +555,19 @@ tr.vpn-row td { background: #fef2f2; }
 .dns-warn { background: #fffbeb; color: #b45309; border-color: #fcd34d; }
 .dns-err { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
 .dom-table td:first-child .mono { white-space: nowrap; }
+
+/* Upload guides */
+.upload-guide summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 20px; cursor: pointer; list-style: none; }
+.upload-guide summary::-webkit-details-marker { display: none; }
+.upload-guide summary > span:first-child { display: flex; align-items: center; gap: 8px; }
+.upload-guide summary::after { content: '▾'; color: var(--muted); margin-left: 8px; transition: transform .15s; }
+.upload-guide[open] summary::after { transform: rotate(180deg); }
+.upload-guide summary span.muted { margin-left: auto; }
+.ug-body { padding: 0 20px 20px; border-top: 1px solid var(--border-soft); padding-top: 16px; }
+.ug-steps { margin: 0 0 14px; padding-left: 20px; line-height: 1.7; }
+.ug-cols { display: grid; gap: 6px; }
+.ug-cols > div { display: flex; gap: 10px; align-items: baseline; }
+.ug-col { min-width: 78px; font-weight: 600; color: var(--brand-700, #211c5c); }
+.ug-sample table td, .ug-sample table th { font-size: 12px; padding: 6px 10px; white-space: nowrap; }
+.inline-file { width: auto; display: inline-block; padding: 0; border: 0; font-size: 12px; }
+@media (max-width: 640px) { .upload-guide summary span.muted { display: none; } .ug-cols > div { flex-direction: column; gap: 2px; } }

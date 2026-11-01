@@ -26,6 +26,10 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Upload guides and sample CSVs
+
+The admin **Mailboxes** and **Domains** pages have a **How to upload** guide with steps, what each column means, a preview of the sample file, and **Download sample CSV**. The guide starts expanded when nothing has been uploaded yet. The samples are at `/api/mailboxes-template.csv` (email, password, admin, type, created: six mailboxes on two domains) and `/api/domains-template.csv` (domain, type). On a client's Domains page you can also load a CSV file into the box instead of pasting.
+
 ## Domains
 
 **Admin side:** go to **Domains** → choose a client.
