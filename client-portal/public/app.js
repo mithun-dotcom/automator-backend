@@ -229,13 +229,14 @@ const ICONS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
   mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const NAV_ICONS = {
-  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
+  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
   '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
 };
 
@@ -448,7 +449,7 @@ function renderPassword() {
 
 // ------------------------------------------------------------------ client
 
-const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/order', 'New order'], ['#/billing', 'Billing']];
+const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/domains', 'Domains'], ['#/order', 'New order'], ['#/billing', 'Billing']];
 
 async function renderClient(page, arg, sub) {
   state.dash = await api('GET', '/api/dashboard');
@@ -462,6 +463,7 @@ async function renderClient(page, arg, sub) {
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
   if (page === 'mailboxes') return renderMyMailboxes((await api('GET', '/api/mailboxes')).mailboxes);
+  if (page === 'domains') return renderMyDomains((await api('GET', '/api/domains')).domains);
   return renderDashboard();
 }
 
@@ -924,10 +926,10 @@ const ADMIN_TABS = [];
 function setAdminTabs() {
   ADMIN_TABS.length = 0;
   if (isReseller()) {
-    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
+    ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
     return;
   }
-  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/invoices', 'Invoices']);
+  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/invoices', 'Invoices']);
   if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
   if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/locations', 'Locations'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
@@ -944,6 +946,7 @@ async function renderAdmin(page, arg, sub) {
     if (page === 'payouts') return resellerPayouts(await api('GET', '/api/reseller/payouts'));
     if (['team', 'analytics', 'resellers'].includes(page)) return go('#/admin/orders');
   }
+  if (page === 'domains') return arg ? adminDomainClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/domains`)) : adminDomains();
   if (page === 'mailboxes') return arg ? adminMailboxClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/mailboxes`)) : adminMailboxes();
   if (page === 'locations') return isOwner() ? renderLocations(await api('GET', '/api/admin/locations')) : go('#/admin/orders');
   if (page === 'resellers') {
@@ -3122,4 +3125,126 @@ function adminMailboxClient({ client, mailboxes: rows, batches }) {
       try { await api('DELETE', `${API()}/clients/${client.id}/mailboxes`); toast('All logins deleted'); route(); } catch (ex) { toast(ex.message); }
     };
   }
+}
+
+// ------------------------------------------------------------------ domains
+
+const DNS_BADGE = { ok: ['dns-st dns-ok', 'DNS OK'], warning: ['dns-st dns-warn', 'Needs attention'], error: ['dns-st dns-err', 'DNS problem'] };
+const PROVIDER_NAME = { google: 'Google Workspace', microsoft: 'Microsoft 365', zoho: 'Zoho', other: 'Other provider', none: 'No MX' };
+
+// MX / SPF / DMARC / DKIM chips from a domain's last DNS check.
+function dnsChips(d) {
+  const r = d.dns;
+  if (!r) return '<span class="muted small">Checking…</span>';
+  const has = (re) => r.issues.some((i) => re.test(i));
+  const chip = (label, ok, title) => `<span class="dns-chip ${ok === null ? 'dc-na' : ok ? 'dc-ok' : 'dc-bad'}" title="${esc(title || '')}">${ok === null ? '–' : ok ? '✓' : '✗'} ${label}</span>`;
+  return `<div class="dns-chips">${chip('MX', r.mx.length > 0 && !has(/^MX points/), r.mx.join(', ') || 'No MX records')}${chip('SPF', Boolean(r.spf) && !has(/^SPF/), r.spf || 'No SPF record')}${chip('DMARC', Boolean(r.dmarc), r.dmarc || 'No DMARC record')}${chip('DKIM', r.dkim, r.dkim === null ? 'Not checked for this provider' : r.dkim ? 'DKIM found' : 'DKIM not found')}</div>`;
+}
+const dnsBadge = (d) => (d.dns_status ? `<span class="badge ${DNS_BADGE[d.dns_status][0]}">${DNS_BADGE[d.dns_status][1]}</span>` : '<span class="badge b-in_progress">Checking</span>');
+const dnsIssues = (d) => (d.dns && d.dns.issues.length ? `<ul class="dns-issues">${d.dns.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '');
+
+// Client: their domains and DNS health.
+function renderMyDomains(rows) {
+  const problems = rows.filter((d) => d.dns_status && d.dns_status !== 'ok').length;
+  shell(CLIENT_TABS, '#/domains', `
+    <div class="page-head"><div><h1>Domains</h1><p class="muted">Your sending domains, the mailbox type on each, and their DNS health (checked daily).</p></div></div>
+    <div class="card">
+      ${rows.length ? `<div class="card-head"><div><h2>${rows.length} domain${rows.length === 1 ? '' : 's'}</h2>${problems ? `<div class="small access-off">${problems} need${problems === 1 ? 's' : ''} attention. We're on it; we'll contact you if we need anything.</div>` : '<div class="muted small">All DNS records look good.</div>'}</div></div>
+      <div class="table-wrap"><table class="dom-table">
+        <thead><tr><th>Domain</th><th>Mailbox type</th><th class="num">Mailboxes</th><th>DNS</th><th>Last checked</th></tr></thead>
+        <tbody>${rows.map((d) => `<tr>
+          <td><strong class="mono">${esc(d.domain)}</strong></td>
+          <td>${d.inbox_label ? esc(d.inbox_label) : '<span class="muted">—</span>'}</td>
+          <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
+          <td>${dnsBadge(d)}${dnsChips(d)}</td>
+          <td class="small">${d.dns_checked_at ? fmtWhen(d.dns_checked_at) : '—'}</td>
+        </tr>`).join('')}</tbody></table></div>` : '<div class="empty">Your domains will appear here once they\'re added.</div>'}
+    </div>`);
+}
+
+// Admin: clients and their domains.
+function adminDomains() {
+  const clients = state.admin.clients;
+  shell(ADMIN_TABS, '#/admin/domains', `
+    <div class="page-head"><div><h1>Domains</h1><p class="muted">Each client's sending domains and the mailbox type on each. DNS (MX, SPF, DMARC, DKIM) is checked when a domain is added and again every day.</p></div></div>
+    <div class="card">
+      ${clients.length ? `<div class="filter-bar"><input id="mb-search" class="mb-search" type="search" placeholder="Search name, email, company…"></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Client</th><th class="num">Domains</th><th>DNS</th><th></th></tr></thead>
+        <tbody>${clients.map((c) => `<tr data-mb="${c.id}" data-search="${searchText(c.name, c.company, c.email)}">
+          <td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td>
+          <td class="num">${c.domain_count || '<span class="muted">0</span>'}</td>
+          <td>${!c.domain_count ? '<span class="muted">—</span>' : c.domain_issues ? `<span class="badge dns-st dns-warn">${c.domain_issues} need${c.domain_issues === 1 ? 's' : ''} attention</span>` : '<span class="badge b-active">All OK</span>'}</td>
+          <td><a class="btn btn-sm ${c.domain_count ? '' : 'btn-primary'}" href="#/admin/domains/${c.id}">${c.domain_count ? 'Manage' : 'Add domains'}</a></td>
+        </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
+    </div>`);
+  wireMailboxTable(() => '');
+}
+
+// Admin: one client's domains.
+function adminDomainClient({ client, domains, batches, types }) {
+  const who = client.company || client.name || client.email;
+  const typeOptions = (sel, blank) => `${blank ? `<option value="">${blank}</option>` : ''}${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === sel ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}`;
+  const issues = domains.filter((d) => d.dns_status && d.dns_status !== 'ok').length;
+  shell(ADMIN_TABS, '#/admin/domains', `
+    <div class="page-head"><div><p class="muted small" style="margin:0 0 4px"><a href="#/admin/domains">← Domains</a></p><h1>${esc(who)}</h1><p class="muted">${esc(client.email)} · ${domains.length} domain${domains.length === 1 ? '' : 's'}${issues ? ` · <span class="access-off">${issues} need${issues === 1 ? 's' : ''} attention</span>` : ''}</p></div>
+      <div class="row"><a class="btn" href="#/admin/mailboxes/${client.id}">Mailboxes</a>${watchBtn(client.id)}</div></div>
+    <div class="stack">
+      <form class="card card-pad" id="dom-add">
+        <h2 style="margin-bottom:4px">Add domains</h2>
+        <p class="muted small" style="margin:0 0 14px">One domain per line. To give a domain its own mailbox type, write <span class="mono">domain, type</span> (e.g. <span class="mono">acme.com, Google Workspace</span>). DNS is checked right away.</p>
+        <div class="field"><label for="dom-text">Domains</label><textarea id="dom-text" name="text" rows="5" placeholder="acme.com&#10;getacme.com&#10;tryacme.com, Microsoft 365 (Admin)" required></textarea></div>
+        <div class="grid-2">
+          <div class="field"><label for="dom-type">Mailbox type</label><select id="dom-type" name="inbox_type"><option value="auto">Detect from DNS (or the batch's type)</option>${typeOptions(null)}</select></div>
+          <div class="field"><label for="dom-batch">Batch (optional)</label><select id="dom-batch" name="order_id"><option value="">Not linked to a batch</option>
+            ${batches.map((o) => `<option value="${o.id}">${esc(o.batch_name || `Batch #${o.id}`)} · ${o.quantity} × ${esc(o.label)}${o.status === 'cancelled' ? ' (cancelled)' : ''}</option>`).join('')}</select></div>
+        </div>
+        <div class="row"><button class="btn btn-primary" type="submit">Add & check DNS</button><button class="btn" type="button" id="dom-import">Import from batches</button><span class="muted small">Import adds the domains written on this client's batches.</span></div>
+        <div class="error"></div>
+      </form>
+      <div class="card">
+        <div class="card-head"><h2>Domains</h2>${domains.length ? `<div class="row">${domains.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search domain…">' : ''}<button class="btn btn-sm" id="dom-check-all">Recheck all DNS</button></div>` : ''}</div>
+        ${domains.length ? `<div class="table-wrap"><table class="dom-table">
+          <thead><tr><th>Domain</th><th>Mailbox type</th><th>Detected</th><th>DNS</th><th class="num">Mailboxes</th><th>Checked</th><th></th></tr></thead>
+          <tbody>${domains.map((d) => `<tr data-mb="${d.id}" data-search="${searchText(d.domain, d.inbox_label, d.batch_name)}">
+            <td><strong class="mono">${esc(d.domain)}</strong>${d.order_id ? `<div class="muted small">${esc(d.batch_name || `Batch #${d.order_id}`)}</div>` : ''}</td>
+            <td><select class="dom-type" data-dom-type="${d.id}" aria-label="Mailbox type for ${esc(d.domain)}">${typeOptions(d.inbox_type, 'Not set')}</select></td>
+            <td class="small">${d.dns ? `${esc(PROVIDER_NAME[d.dns.detected] || d.dns.detected)}${d.dns.mx[0] ? `<div class="muted mono" style="font-size:11px">${esc(d.dns.mx[0])}</div>` : ''}` : '—'}</td>
+            <td>${dnsBadge(d)}${dnsChips(d)}${dnsIssues(d)}</td>
+            <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
+            <td class="small">${d.dns_checked_at ? fmtWhen(d.dns_checked_at) : '—'}</td>
+            <td><div class="row" style="flex-wrap:nowrap;gap:6px"><button class="btn btn-sm" data-dom-check="${d.id}">Recheck</button><button class="btn btn-sm btn-ghost" data-dom-del="${d.id}" data-domain="${esc(d.domain)}">Delete</button></div></td>
+          </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No domains yet. Add them above, or import the ones written on this client\'s batches.</div>'}
+      </div>
+    </div>`);
+  wireMailboxTable(() => '');
+  const busy = (b, text) => { b.disabled = true; b.textContent = text; };
+  onSubmit(document.getElementById('dom-add'), async (d) => {
+    const r = await api('POST', `${API()}/clients/${client.id}/domains`, { text: d.text, inbox_type: d.inbox_type, order_id: d.order_id || null });
+    const st = r.status || {};
+    toast(`${r.added} added${r.updated ? `, ${r.updated} updated` : ''}. DNS: ${st.ok || 0} OK${st.warning ? `, ${st.warning} need attention` : ''}${st.error ? `, ${st.error} with problems` : ''}`);
+    route();
+  });
+  document.getElementById('dom-import').onclick = async (e) => {
+    busy(e.target, 'Importing…');
+    try { const r = await api('POST', `${API()}/clients/${client.id}/domains/import`); toast(r.added ? `${r.added} domain${r.added === 1 ? '' : 's'} imported and checked` : 'No new domains on the batches'); route(); } catch (ex) { toast(ex.message); route(); }
+  };
+  const all = document.getElementById('dom-check-all');
+  if (all) all.onclick = async () => { busy(all, 'Checking…'); try { await api('POST', `${API()}/clients/${client.id}/domains/check`); toast('DNS rechecked'); } catch (ex) { toast(ex.message); } route(); };
+  document.querySelectorAll('[data-dom-check]').forEach((b) => {
+    b.onclick = async () => { busy(b, 'Checking…'); try { await api('POST', `${API()}/domains/${b.dataset.domCheck}/check`); } catch (ex) { toast(ex.message); } route(); };
+  });
+  document.querySelectorAll('[data-dom-type]').forEach((s) => {
+    s.onchange = async () => {
+      s.disabled = true;
+      try { await api('PATCH', `${API()}/domains/${s.dataset.domType}`, { inbox_type: s.value || null }); toast('Mailbox type saved, DNS rechecked'); } catch (ex) { toast(ex.message); }
+      route();
+    };
+  });
+  document.querySelectorAll('[data-dom-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Remove ${b.dataset.domain} from this client's domains?`)) return;
+      try { await api('DELETE', `${API()}/domains/${b.dataset.domDel}`); route(); } catch (ex) { toast(ex.message); }
+    };
+  });
 }

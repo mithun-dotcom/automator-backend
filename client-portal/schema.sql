@@ -355,3 +355,18 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_user_email ON mailboxes (user_id, email);
+
+-- A client's sending domains, the mailbox type each is set up on, and the
+-- latest DNS check (MX/SPF/DMARC/DKIM, see dnscheck.js).
+CREATE TABLE IF NOT EXISTS domains (
+  id             SERIAL PRIMARY KEY,
+  user_id        INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  order_id       INT REFERENCES orders(id) ON DELETE SET NULL,
+  domain         TEXT NOT NULL,
+  inbox_type     TEXT,
+  dns            JSONB,
+  dns_status     TEXT,
+  dns_checked_at TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS domains_user_domain ON domains (user_id, domain);

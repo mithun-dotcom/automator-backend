@@ -26,6 +26,22 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Domains
+
+**Admin side:** go to **Domains** → choose a client.
+- Paste domains, one per line. Write `domain, type` (e.g. `acme.com, Google Workspace`) to give one domain its own mailbox type. Links and `www.` are cleaned up.
+- Pick a mailbox type for the whole list, or **Detect from DNS** (uses the chosen batch's type, or what the MX records point to). You can link the list to a batch, and change any domain's type later from its dropdown.
+- **Import from batches** adds the domains written on the client's batches. That also happens automatically when a batch is added or its domains change. On first start, all existing batches' domains were imported.
+- DNS is checked when a domain is added, when its type changes, with **Recheck** / **Recheck all DNS**, and every day.
+- Each check shows the detected provider, MX / SPF / DMARC / DKIM chips, and the exact issues (e.g. "MX points to Microsoft 365, not Google Workspace", "No DMARC record").
+- The status is:
+  - **DNS OK**: everything matches the domain's mailbox type.
+  - **Needs attention**: something is missing.
+  - **DNS problem**: no MX, or MX on the wrong provider.
+- Google types expect `include:_spf.google.com` and DKIM at `google._domainkey`. Azure/Microsoft 365 types expect `include:spf.protection.outlook.com` and DKIM at `selector1._domainkey`.
+
+**Client side:** the client portal has a read-only **Domains** page with each domain, its mailbox type, how many of their mailboxes use it, and its DNS status.
+
 ## Mailboxes (logins for clients)
 
 **Admin side:** go to **Mailboxes** (also the **Mailboxes** button on each client) → choose the client → upload a CSV.

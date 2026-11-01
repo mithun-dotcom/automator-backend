@@ -10,6 +10,7 @@ const { sendMail, enabled: mailEnabled } = require('./mailer');
 const billing = require('./billing');
 const onboarding = require('./onboarding');
 const mailboxes = require('./mailboxes');
+const dnscheck = require('./dnscheck');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
@@ -492,6 +493,7 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
       reason: 'You receive this because you are on the MithMill new-order notification list (Settings).',
     });
   }
+  syncBatchDomains(order.id);
   res.status(201).json({ id: order.id });
 }));
 
@@ -610,7 +612,9 @@ shared.get('/overview', asyncRoute(async (req, res) => {
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
              count(o.id)::int AS batch_count,
              (SELECT count(*) FROM invoices i WHERE i.user_id = u.id)::int AS invoice_count,
-             (SELECT count(*) FROM mailboxes mb WHERE mb.user_id = u.id)::int AS mailbox_count
+             (SELECT count(*) FROM mailboxes mb WHERE mb.user_id = u.id)::int AS mailbox_count,
+             (SELECT count(*) FROM domains dm WHERE dm.user_id = u.id)::int AS domain_count,
+             (SELECT count(*) FROM domains dm WHERE dm.user_id = u.id AND dm.dns_status IN ('warning', 'error'))::int AS domain_issues
            FROM users u LEFT JOIN orders o ON o.user_id = u.id
            WHERE u.role = 'client' AND ${scope} GROUP BY u.id ORDER BY u.created_at DESC`),
     reseller ? { rows: [] } : query(`SELECT id, email, name, company, expires_at, created_at FROM invites
@@ -645,6 +649,7 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
 
   if (typeof req.body.domains === 'string') {
     await query('UPDATE orders SET domains = $1 WHERE id = $2', [str(req.body.domains, 20000), id]);
+    syncBatchDomains(id);
   }
   if (typeof req.body.usernames === 'string') {
     await query('UPDATE orders SET usernames = $1 WHERE id = $2', [str(req.body.usernames, 20000), id]);
@@ -1099,6 +1104,191 @@ shared.delete('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
   res.json({ ok: true, removed: rowCount });
 }));
 
+// ---- Domains: a client's sending domains, the mailbox type each is on, and
+// an automatic DNS check (MX/SPF/DMARC/DKIM) when added and once a day.
+
+const DOMAIN_LIST = `SELECT d.id, d.domain, d.inbox_type, p.label AS inbox_label, d.order_id, o.batch_name, d.dns, d.dns_status, d.dns_checked_at, d.created_at,
+    (SELECT count(*) FROM mailboxes m WHERE m.user_id = d.user_id AND m.email LIKE '%@' || d.domain)::int AS mailbox_count
+  FROM domains d LEFT JOIN pricing p ON p.inbox_type = d.inbox_type LEFT JOIN orders o ON o.id = d.order_id
+  WHERE d.user_id = $1 ORDER BY d.domain`;
+
+// Checks these domains' DNS (a few at a time). A domain with no mailbox type
+// yet gets one from what its MX records point to.
+async function checkDomains(ids) {
+  if (!ids.length) return;
+  const { rows } = await query('SELECT d.id, d.domain, d.inbox_type, p.label FROM domains d LEFT JOIN pricing p ON p.inbox_type = d.inbox_type WHERE d.id = ANY($1)', [ids]);
+  const { rows: types } = await query("SELECT inbox_type, label FROM pricing WHERE active AND inbox_type <> 'other' ORDER BY sort_order");
+  const work = [...rows];
+  await Promise.all(Array.from({ length: Math.min(6, work.length) }, async () => {
+    for (let d = work.shift(); d; d = work.shift()) {
+      const expected = d.inbox_type ? dnscheck.providerOf(d) : null;
+      const result = await dnscheck.check(d.domain, expected);
+      let type = d.inbox_type;
+      if (!type && dnscheck.PROVIDERS[result.detected]) {
+        // The plainest type on that provider (Google Workspace, not "Google Pre Warmed").
+        const match = types.filter((t) => dnscheck.providerOf(t) === result.detected).sort((a, b) => a.label.length - b.label.length)[0];
+        if (match) type = match.inbox_type;
+      }
+      const final = type && type !== d.inbox_type ? await dnscheck.check(d.domain, dnscheck.providerOf(types.find((t) => t.inbox_type === type))) : result;
+      await query('UPDATE domains SET dns = $2, dns_status = $3, dns_checked_at = now(), inbox_type = $4 WHERE id = $1',
+        [d.id, final, final.status, type]);
+    }
+  }));
+}
+
+// Adds the domains written on batches (orders.domains) that aren't listed yet.
+// Returns the new domain ids.
+async function importBatchDomains(where, params) {
+  const { rows: orders } = await query(`SELECT id, user_id, inbox_type, domains FROM orders WHERE status <> 'cancelled' AND ${where}`, params);
+  const ids = [];
+  for (const o of orders) {
+    const names = [...new Set(String(o.domains || '').split(/[\s,;]+/).map(dnscheck.clean).filter(Boolean))];
+    for (const name of names) {
+      const { rows: [d] } = await query(
+        `INSERT INTO domains (user_id, order_id, domain, inbox_type) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, domain) DO NOTHING RETURNING id`, [o.user_id, o.id, name, o.inbox_type === 'other' ? null : o.inbox_type]);
+      if (d) ids.push(d.id);
+    }
+  }
+  return ids;
+}
+// After a batch is added or its domains change: list them and check their DNS.
+function syncBatchDomains(orderId) {
+  importBatchDomains('id = $1', [orderId]).then(checkDomains).catch((err) => console.error('Domain sync failed:', err));
+}
+
+async function domainTypes() {
+  return (await query("SELECT inbox_type, label FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order")).rows;
+}
+async function assertDomain(req, id) {
+  const { rows: [d] } = await query('SELECT * FROM domains WHERE id = $1', [Number(id) || 0]);
+  if (!d) throw new HttpError(404, 'Domain not found');
+  await assertClient(req, d.user_id);
+  return d;
+}
+
+shared.get('/clients/:id/domains', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const [{ rows }, { rows: batches }, types] = await Promise.all([
+    query(DOMAIN_LIST, [client.id]),
+    query(`SELECT o.id, o.batch_name, o.quantity, o.status, o.inbox_type, p.label FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+            WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [client.id]),
+    domainTypes(),
+  ]);
+  res.json({ client: { id: client.id, email: client.email, name: client.name, company: client.company }, domains: rows, batches, types });
+}));
+
+// Adds domains: one per line, optionally "domain, mailbox type". The type is
+// the line's, else the form's, else the chosen batch's, else detected from DNS.
+shared.post('/clients/:id/domains', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const types = await domainTypes();
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const typeOf = (s) => (s ? (types.find((t) => norm(t.inbox_type) === norm(s) || norm(t.label) === norm(s)) || {}).inbox_type : undefined);
+  const orderId = req.body.order_id ? Number(req.body.order_id) : null;
+  let batchType = null;
+  if (orderId) {
+    const { rows: [o] } = await query('SELECT inbox_type FROM orders WHERE id = $1 AND user_id = $2', [orderId, client.id]);
+    if (!o) throw new HttpError(400, 'That batch isn\'t this client\'s');
+    batchType = o.inbox_type === 'other' ? null : o.inbox_type;
+  }
+  const formType = req.body.inbox_type && req.body.inbox_type !== 'auto' ? typeOf(req.body.inbox_type) : null;
+  if (req.body.inbox_type && req.body.inbox_type !== 'auto' && !formType) throw new HttpError(400, 'Choose a mailbox type');
+  const entries = new Map();
+  const bad = [];
+  String(req.body.text || '').split(/\r?\n/).forEach((line) => {
+    const parts = line.split(/[,;\t]/).map((p) => p.trim()).filter(Boolean);
+    if (!parts.length || /^domain/i.test(parts[0])) return;
+    // "a.com b.com" on one line, or "a.com, Google Workspace".
+    const second = parts[1] && !dnscheck.clean(parts[1]) ? typeOf(parts[1]) : undefined;
+    if (parts[1] && !dnscheck.clean(parts[1]) && !second) { bad.push(`"${parts[1]}" isn't a mailbox type`); return; }
+    const names = second !== undefined ? [parts[0]] : parts.flatMap((p) => p.split(/\s+/));
+    if (names.some((raw) => !dnscheck.clean(raw))) { bad.push(`"${line.trim()}"`); return; }
+    names.forEach((raw) => entries.set(dnscheck.clean(raw), second || formType || batchType || null));
+  });
+  if (bad.length) throw new HttpError(400, `Not valid: ${bad.slice(0, 5).join(', ')}${bad.length > 5 ? ` and ${bad.length - 5} more` : ''}`);
+  if (!entries.size) throw new HttpError(400, 'Enter at least one domain');
+  if (entries.size > 300) throw new HttpError(400, 'Add at most 300 domains at a time');
+  const ids = [];
+  let added = 0;
+  for (const [domain, type] of entries) {
+    const { rows: [d] } = await query(
+      `INSERT INTO domains (user_id, order_id, domain, inbox_type) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, domain) DO UPDATE SET inbox_type = COALESCE($5, domains.inbox_type), order_id = COALESCE(EXCLUDED.order_id, domains.order_id)
+       RETURNING id, (xmax = 0) AS inserted`, [client.id, orderId, domain, type, type]);
+    ids.push(d.id);
+    if (d.inserted) added += 1;
+  }
+  await checkDomains(ids);
+  await audit.record(req.user, 'added', `${entries.size} domain${entries.size === 1 ? '' : 's'} for ${client.company || client.name || client.email} <${client.email}>`,
+    [{ field: 'Domains', from: '', to: [...entries.keys()].join('\n') }], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  const { rows: checked } = await query('SELECT dns_status, count(*)::int AS n FROM domains WHERE id = ANY($1) GROUP BY dns_status', [ids]);
+  res.json({ added, updated: entries.size - added, status: Object.fromEntries(checked.map((r) => [r.dns_status, r.n])) });
+}));
+
+shared.post('/clients/:id/domains/import', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const ids = await importBatchDomains('user_id = $1', [client.id]);
+  await checkDomains(ids);
+  res.json({ added: ids.length });
+}));
+
+shared.post('/clients/:id/domains/check', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  const { rows } = await query('SELECT id FROM domains WHERE user_id = $1', [client.id]);
+  await checkDomains(rows.map((r) => r.id));
+  res.json({ checked: rows.length });
+}));
+
+shared.post('/domains/:id/check', asyncRoute(async (req, res) => {
+  const d = await assertDomain(req, req.params.id);
+  await checkDomains([d.id]);
+  res.json({ ok: true });
+}));
+
+shared.patch('/domains/:id', asyncRoute(async (req, res) => {
+  const d = await assertDomain(req, req.params.id);
+  if (req.body.inbox_type !== undefined) {
+    const types = await domainTypes();
+    const type = req.body.inbox_type ? (types.find((t) => t.inbox_type === req.body.inbox_type) || {}).inbox_type : null;
+    if (req.body.inbox_type && !type) throw new HttpError(400, 'Choose a mailbox type');
+    await query('UPDATE domains SET inbox_type = $2 WHERE id = $1', [d.id, type]);
+  }
+  if (req.body.order_id !== undefined) {
+    const orderId = req.body.order_id ? Number(req.body.order_id) : null;
+    if (orderId) {
+      const { rows: [o] } = await query('SELECT id FROM orders WHERE id = $1 AND user_id = $2', [orderId, d.user_id]);
+      if (!o) throw new HttpError(400, 'That batch isn\'t this client\'s');
+    }
+    await query('UPDATE domains SET order_id = $2 WHERE id = $1', [d.id, orderId]);
+  }
+  // The DNS expectations depend on the mailbox type.
+  await checkDomains([d.id]);
+  res.json({ ok: true });
+}));
+
+shared.delete('/domains/:id', asyncRoute(async (req, res) => {
+  const d = await assertDomain(req, req.params.id);
+  await query('DELETE FROM domains WHERE id = $1', [d.id]);
+  res.json({ ok: true });
+}));
+
+app.get('/api/domains', auth, (req, res, next) => (req.user.role === 'client' ? next() : next(new HttpError(403, 'Clients only'))), asyncRoute(async (req, res) => {
+  const { rows } = await query(DOMAIN_LIST, [req.user.id]);
+  res.json({ domains: rows });
+}));
+
+// Once a day per domain (checked hourly, a few at a time).
+async function recheckDomains() {
+  try {
+    const { rows } = await query(
+      "SELECT id FROM domains WHERE dns_checked_at IS NULL OR dns_checked_at < now() - interval '24 hours' ORDER BY dns_checked_at NULLS FIRST LIMIT 60");
+    await checkDomains(rows.map((r) => r.id));
+  } catch (err) {
+    console.error('Domain DNS recheck failed:', err);
+  }
+}
+
 // The client's own mailbox logins.
 const clientRole = (req, res, next) => (req.user.role === 'client' ? next() : next(new HttpError(403, 'Clients only')));
 app.get('/api/mailboxes', auth, clientRole, asyncRoute(async (req, res) => {
@@ -1168,6 +1358,7 @@ shared.post('/orders', audited('added', 'order', (req, body) => (body ? body.id 
     await billing.notify(client, `New batch added: ${quantity} ${type.label} mailboxes`,
       `Batch #${order.id} has been added to your account.`);
   }
+  syncBatchDomains(order.id);
   res.status(201).json({ id: order.id, invoiceId, invoices: created.length });
 }));
 
@@ -2512,9 +2703,15 @@ async function scheduledBilling() {
   ).then(async (r) => {
     if (r.rowCount) await query("UPDATE settings SET value = 'support@mithmill.com' WHERE key = 'support_email'");
   });
+  // One-time: list the domains already written on batches.
+  await query(`INSERT INTO settings (key, value) VALUES ('domains_imported_v1', now()::text) ON CONFLICT (key) DO NOTHING`).then(async (r) => {
+    if (r.rowCount) console.log(`Domains: imported ${(await importBatchDomains('true', [])).length} from batches`);
+  });
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
+  recheckDomains();
+  setInterval(recheckDomains, 60 * 60 * 1000);
 })().catch((err) => {
   console.error(err);
   process.exit(1);
