@@ -1348,6 +1348,26 @@ app.get('/api/domains', auth, (req, res, next) => (req.user.role === 'client' ? 
   res.json({ domains: rows });
 }));
 
+// Catch-up: the domains of mailboxes already uploaded (e.g. before uploads
+// filled in Domains) that aren't listed yet, with their mailboxes' most
+// common type and batch. Their DNS is checked by the next recheck.
+async function domainsFromAllMailboxes() {
+  const { rows } = await query(`SELECT user_id, lower(split_part(email, '@', 2)) AS domain,
+      mode() WITHIN GROUP (ORDER BY inbox_type) FILTER (WHERE inbox_type IS NOT NULL) AS inbox_type,
+      min(order_id) AS order_id
+    FROM mailboxes GROUP BY 1, 2`);
+  let added = 0;
+  for (const r of rows) {
+    const domain = dnscheck.clean(r.domain);
+    if (!domain) continue;
+    const { rowCount } = await query(
+      'INSERT INTO domains (user_id, order_id, domain, inbox_type) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, domain) DO NOTHING',
+      [r.user_id, r.order_id, domain, r.inbox_type]);
+    added += rowCount;
+  }
+  return added;
+}
+
 // Once a day per domain (checked hourly, a few at a time).
 async function recheckDomains() {
   try {
@@ -2777,6 +2797,8 @@ async function scheduledBilling() {
   await query(`INSERT INTO settings (key, value) VALUES ('domains_imported_v1', now()::text) ON CONFLICT (key) DO NOTHING`).then(async (r) => {
     if (r.rowCount) console.log(`Domains: imported ${(await importBatchDomains('true', [])).length} from batches`);
   });
+  const fromMailboxes = await domainsFromAllMailboxes();
+  if (fromMailboxes) console.log(`Domains: added ${fromMailboxes} from uploaded mailboxes`);
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
