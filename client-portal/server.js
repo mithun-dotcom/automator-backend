@@ -993,10 +993,31 @@ shared.delete('/clients/:id', audited('deleted', 'user', byParam, async (req, re
 
 // ---- Mailboxes: the logins delivered to a client, uploaded as a CSV.
 
-const MAILBOX_LIST = `SELECT m.id, m.email, m.is_admin, m.order_id, o.batch_name, m.created_at, m.updated_at
-  FROM mailboxes m LEFT JOIN orders o ON o.id = m.order_id WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`;
-const mailboxCsv = (rows) => mailboxes.toCsv([['email', 'password', 'admin'],
-  ...rows.map((m) => [m.email, onboarding.decrypt(m.password), m.is_admin ? 'yes' : ''])]);
+const MAILBOX_LIST = `SELECT m.id, m.email, m.is_admin, m.order_id, o.batch_name, m.inbox_type, p.label AS inbox_label, m.created_on, m.created_at, m.updated_at
+  FROM mailboxes m LEFT JOIN orders o ON o.id = m.order_id LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
+  WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`;
+const MAILBOX_ROWS = `SELECT m.*, p.label AS inbox_label FROM mailboxes m LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
+  WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`;
+const isoDate = (d) => (d ? new Date(d).toISOString().slice(0, 10) : '');
+const mailboxCsv = (rows) => mailboxes.toCsv([['email', 'password', 'admin', 'type', 'created'],
+  ...rows.map((m) => [m.email, onboarding.decrypt(m.password), m.is_admin ? 'yes' : '', m.inbox_label || '', isoDate(m.created_on)])]);
+
+// "Google Workspace", "google_workspace", "gws"… -> a mailbox type key, or
+// undefined. Exact key/label first, then a label containing it, then the
+// plainest type on the provider it names (Google / Microsoft).
+function matchType(raw, types) {
+  const n = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const r = n(raw);
+  if (!r) return undefined;
+  const plain = (list) => [...list].sort((a, b) => a.label.length - b.label.length)[0];
+  const exact = types.find((t) => n(t.inbox_type) === r || n(t.label) === r);
+  if (exact) return exact.inbox_type;
+  const partial = types.filter((t) => n(t.label).includes(r) || r.includes(n(t.label)));
+  if (partial.length) return plain(partial).inbox_type;
+  const provider = dnscheck.providerOf({ inbox_type: raw, label: /^(gws|gsuite)$/.test(r) ? 'google' : raw });
+  const same = provider && types.filter((t) => dnscheck.providerOf(t) === provider);
+  return same && same.length ? plain(same).inbox_type : undefined;
+}
 async function assertMailbox(req, id) {
   const { rows: [m] } = await query('SELECT * FROM mailboxes WHERE id = $1', [Number(id) || 0]);
   if (!m) throw new HttpError(404, 'Mailbox not found');
@@ -1014,7 +1035,7 @@ shared.get('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
   const { rows: batches } = await query(
     `SELECT o.id, o.batch_name, o.quantity, o.status, p.label FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
       WHERE o.user_id = $1 ORDER BY o.created_at DESC`, [client.id]);
-  res.json({ client: { id: client.id, email: client.email, name: client.name, company: client.company, password_set: client.password_set }, mailboxes: rows, batches });
+  res.json({ client: { id: client.id, email: client.email, name: client.name, company: client.company, password_set: client.password_set }, mailboxes: rows, batches, types: await domainTypes() });
 }));
 
 // Upload: adds the CSV's mailboxes, updating any already there (same email);
@@ -1028,10 +1049,18 @@ shared.post('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
     throw new HttpError(400, err.message);
   }
   const orderId = req.body.order_id ? Number(req.body.order_id) : null;
+  let batchType = null;
   if (orderId) {
-    const { rows: [o] } = await query('SELECT id FROM orders WHERE id = $1 AND user_id = $2', [orderId, client.id]);
+    const { rows: [o] } = await query('SELECT id, inbox_type FROM orders WHERE id = $1 AND user_id = $2', [orderId, client.id]);
     if (!o) throw new HttpError(400, 'That batch isn\'t this client\'s');
+    batchType = o.inbox_type === 'other' ? null : o.inbox_type;
   }
+  // Each mailbox's type: the CSV's, else the form's, else the batch's.
+  const types = await domainTypes();
+  const formType = req.body.inbox_type && req.body.inbox_type !== 'csv' ? matchType(req.body.inbox_type, types) : null;
+  const unknown = [...new Set(list.filter((m) => m.type && !matchType(m.type, types)).map((m) => m.type))];
+  if (unknown.length) throw new HttpError(400, `Unknown mailbox type: ${unknown.slice(0, 3).map((t) => `"${t}"`).join(', ')}. Use one of: ${types.map((t) => t.label).join(', ')}`);
+  list.forEach((m) => { m.inbox_type = (m.type && matchType(m.type, types)) || formType || batchType || null; });
   const result = await inTransaction(async (db) => {
     let removed = 0;
     if (req.body.replace === true) {
@@ -1044,16 +1073,18 @@ shared.post('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
     let updated = 0;
     for (const m of list) {
       const { rows: [row] } = await db.query(
-        `INSERT INTO mailboxes (user_id, order_id, email, password, is_admin) VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO mailboxes (user_id, order_id, email, password, is_admin, inbox_type, created_on) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (user_id, email) DO UPDATE SET password = EXCLUDED.password, is_admin = EXCLUDED.is_admin,
-           order_id = COALESCE(EXCLUDED.order_id, mailboxes.order_id), updated_at = now()
+           order_id = COALESCE(EXCLUDED.order_id, mailboxes.order_id), inbox_type = COALESCE(EXCLUDED.inbox_type, mailboxes.inbox_type),
+           created_on = COALESCE(EXCLUDED.created_on, mailboxes.created_on), updated_at = now()
          RETURNING (xmax = 0) AS inserted`,
-        [client.id, orderId, m.email, onboarding.encrypt(m.password), m.is_admin]);
+        [client.id, orderId, m.email, onboarding.encrypt(m.password), m.is_admin, m.inbox_type, m.created]);
       if (row.inserted) added += 1; else updated += 1;
     }
     return { added, updated, removed };
   });
   const { rows: [{ total }] } = await query('SELECT count(*)::int AS total FROM mailboxes WHERE user_id = $1', [client.id]);
+  const domainSync = await domainsFromMailboxes(client.id, list, orderId);
   const admins = list.filter((m) => m.is_admin).length;
   await audit.record(req.user, 'added', `${list.length} mailbox login${list.length === 1 ? '' : 's'} for ${client.company || client.name || client.email} <${client.email}>`,
     [{ field: 'Uploaded', from: '', to: `${result.added} new, ${result.updated} updated${result.removed ? `, ${result.removed} removed` : ''}${admins ? `, ${admins} admin` : ''}` }],
@@ -1065,12 +1096,41 @@ shared.post('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
       { paymentNote: false });
     notified = Boolean(client.password_set);
   }
-  res.json({ ...result, total, notified });
+  res.json({ ...result, total, notified, domains: domainSync });
 }));
+
+// The domains of uploaded mailboxes go on the client's Domains list, with
+// the mailbox type most of that domain's mailboxes have, then get a DNS check.
+async function domainsFromMailboxes(userId, list, orderId) {
+  const byDomain = new Map();
+  for (const m of list) {
+    const d = dnscheck.clean(m.email.split('@')[1]);
+    if (!d) continue;
+    const e = byDomain.get(d) || { counts: {} };
+    if (m.inbox_type) e.counts[m.inbox_type] = (e.counts[m.inbox_type] || 0) + 1;
+    byDomain.set(d, e);
+  }
+  const ids = [];
+  let added = 0;
+  for (const [domain, { counts }] of byDomain) {
+    const type = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    const { rows: [row] } = await query(
+      `INSERT INTO domains (user_id, order_id, domain, inbox_type) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, domain) DO UPDATE SET inbox_type = COALESCE(EXCLUDED.inbox_type, domains.inbox_type),
+         order_id = COALESCE(EXCLUDED.order_id, domains.order_id)
+       RETURNING id, (xmax = 0) AS inserted`, [userId, orderId, domain, type ? type[0] : null]);
+    ids.push(row.id);
+    if (row.inserted) added += 1;
+  }
+  // A big upload doesn't wait for every DNS lookup; the Domains page shows "Checking" meanwhile.
+  if (ids.length > 30) checkDomains(ids).catch((err) => console.error('Domain check failed:', err));
+  else await checkDomains(ids);
+  return { total: ids.length, added };
+}
 
 shared.get('/clients/:id/mailboxes.csv', asyncRoute(async (req, res) => {
   const client = await assertClient(req, req.params.id);
-  const { rows } = await query('SELECT * FROM mailboxes WHERE user_id = $1 ORDER BY is_admin DESC, email', [client.id]);
+  const { rows } = await query(MAILBOX_ROWS, [client.id]);
   res.attachment(`mailboxes-${client.email.split('@')[0]}.csv`).type('text/csv').send(mailboxCsv(rows));
 }));
 
@@ -1082,6 +1142,11 @@ shared.get('/mailboxes/:id/password', asyncRoute(async (req, res) => {
 shared.patch('/mailboxes/:id', asyncRoute(async (req, res) => {
   const m = await assertMailbox(req, req.params.id);
   if (typeof req.body.is_admin === 'boolean') await query('UPDATE mailboxes SET is_admin = $2, updated_at = now() WHERE id = $1', [m.id, req.body.is_admin]);
+  if (req.body.inbox_type !== undefined) {
+    const type = req.body.inbox_type ? matchType(req.body.inbox_type, await domainTypes()) : null;
+    if (req.body.inbox_type && !type) throw new HttpError(400, 'Choose a mailbox type');
+    await query('UPDATE mailboxes SET inbox_type = $2, updated_at = now() WHERE id = $1', [m.id, type]);
+  }
   if (typeof req.body.password === 'string') {
     const pw = req.body.password.trim();
     if (!pw) throw new HttpError(400, 'Enter a password');
@@ -1108,7 +1173,8 @@ shared.delete('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
 // an automatic DNS check (MX/SPF/DMARC/DKIM) when added and once a day.
 
 const DOMAIN_LIST = `SELECT d.id, d.domain, d.inbox_type, p.label AS inbox_label, d.order_id, o.batch_name, d.dns, d.dns_status, d.dns_checked_at, d.created_at,
-    (SELECT count(*) FROM mailboxes m WHERE m.user_id = d.user_id AND m.email LIKE '%@' || d.domain)::int AS mailbox_count
+    (SELECT count(*) FROM mailboxes m WHERE m.user_id = d.user_id AND m.email LIKE '%@' || d.domain)::int AS mailbox_count,
+    (SELECT min(m.created_on) FROM mailboxes m WHERE m.user_id = d.user_id AND m.email LIKE '%@' || d.domain) AS created_on
   FROM domains d LEFT JOIN pricing p ON p.inbox_type = d.inbox_type LEFT JOIN orders o ON o.id = d.order_id
   WHERE d.user_id = $1 ORDER BY d.domain`;
 
@@ -1183,8 +1249,7 @@ shared.get('/clients/:id/domains', asyncRoute(async (req, res) => {
 shared.post('/clients/:id/domains', asyncRoute(async (req, res) => {
   const client = await assertClient(req, req.params.id);
   const types = await domainTypes();
-  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const typeOf = (s) => (s ? (types.find((t) => norm(t.inbox_type) === norm(s) || norm(t.label) === norm(s)) || {}).inbox_type : undefined);
+  const typeOf = (s) => matchType(s, types);
   const orderId = req.body.order_id ? Number(req.body.order_id) : null;
   let batchType = null;
   if (orderId) {
@@ -1296,7 +1361,7 @@ app.get('/api/mailboxes', auth, clientRole, asyncRoute(async (req, res) => {
   res.json({ mailboxes: rows });
 }));
 app.get('/api/mailboxes.csv', auth, clientRole, asyncRoute(async (req, res) => {
-  const { rows } = await query('SELECT * FROM mailboxes WHERE user_id = $1 ORDER BY is_admin DESC, email', [req.user.id]);
+  const { rows } = await query(MAILBOX_ROWS, [req.user.id]);
   res.attachment('my-mailboxes.csv').type('text/csv').send(mailboxCsv(rows));
 }));
 app.get('/api/mailboxes/:id/password', auth, clientRole, asyncRoute(async (req, res) => {

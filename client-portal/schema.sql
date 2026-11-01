@@ -355,6 +355,9 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_user_email ON mailboxes (user_id, email);
+-- The mailbox type and the date it was created, from the upload.
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS inbox_type TEXT;
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS created_on DATE;
 
 -- A client's sending domains, the mailbox type each is set up on, and the
 -- latest DNS check (MX/SPF/DMARC/DKIM, see dnscheck.js).

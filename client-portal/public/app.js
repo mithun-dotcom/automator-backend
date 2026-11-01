@@ -2990,10 +2990,13 @@ function deviceOf(ua) {
 
 // Mailbox logins with the password hidden until Show. pwUrl(id) fetches one
 // password; admin adds the batch column and Delete / admin switch.
-function mailboxTable(rows, { pwUrl, admin = false }) {
+function mailboxTable(rows, { pwUrl, admin = false, types = [] }) {
   if (!rows.length) return '';
+  const typeCell = (m) => (admin
+    ? `<select class="dom-type" data-mb-type="${m.id}" aria-label="Mailbox type for ${esc(m.email)}"><option value="">Not set</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === m.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`
+    : (m.inbox_label ? esc(m.inbox_label) : '<span class="muted">—</span>'));
   return `<div class="table-wrap"><table class="mb-table">
-    <thead><tr><th>Email</th><th>Password</th>${admin ? '<th>Batch</th><th>Admin</th><th>Updated</th><th></th>' : ''}</tr></thead>
+    <thead><tr><th>Email</th><th>Password</th><th>Mailbox type</th><th>Created</th>${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
     <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}">
       <td><div class="mb-email"><span class="mono">${esc(m.email)}</span>
         <button class="icon-btn" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button>
@@ -3001,9 +3004,10 @@ function mailboxTable(rows, { pwUrl, admin = false }) {
       <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
         <button class="btn btn-sm" data-show-pw="${m.id}">Show password</button>
         <button class="icon-btn" data-copy-pw="${m.id}" title="Copy password" aria-label="Copy password for ${esc(m.email)}">${icon('copy')}</button></div></td>
+      <td class="mb-type">${typeCell(m)}</td>
+      <td class="small mb-created">${m.created_on ? fmtDate(String(m.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
       ${admin ? `<td class="small">${m.order_id ? esc(m.batch_name || `#${m.order_id}`) : '<span class="muted">—</span>'}</td>
         <td><label class="switch switch-sm" title="Admin mailbox"><input type="checkbox" data-mb-admin="${m.id}" aria-label="Admin: ${esc(m.email)}" ${m.is_admin ? 'checked' : ''}><span></span></label></td>
-        <td class="small">${fmtDate(m.updated_at)}</td>
         <td><button class="btn btn-sm btn-ghost" data-mb-del="${m.id}" data-email="${esc(m.email)}">Delete</button></td>` : ''}
     </tr>`).join('')}</tbody></table></div>`;
 }
@@ -3071,7 +3075,7 @@ function adminMailboxes() {
 }
 
 // Admin: one client's mailbox logins, with the CSV upload.
-function adminMailboxClient({ client, mailboxes: rows, batches }) {
+function adminMailboxClient({ client, mailboxes: rows, batches, types }) {
   const who = client.company || client.name || client.email;
   const pwUrl = (id) => `${API()}/mailboxes/${id}/password`;
   shell(ADMIN_TABS, '#/admin/mailboxes', `
@@ -3080,9 +3084,12 @@ function adminMailboxClient({ client, mailboxes: rows, batches }) {
     <div class="stack">
       <form class="card card-pad" id="mb-upload">
         <h2 style="margin-bottom:4px">Upload mailbox logins</h2>
-        <p class="muted small" style="margin:0 0 14px">CSV columns: <span class="mono">email</span>, <span class="mono">password</span>, <span class="mono">admin</span> (write <strong>yes</strong> for the admin mailbox, leave it empty for the others). <a href="/api/mailboxes-template.csv">Download the sample</a>.</p>
+        <p class="muted small" style="margin:0 0 14px">CSV columns: <span class="mono">email</span>, <span class="mono">password</span>, <span class="mono">admin</span> (<strong>yes</strong> for the admin mailbox), <span class="mono">type</span> (mailbox type, e.g. Google Workspace) and <span class="mono">created</span> (creation date, e.g. 2026-11-01). The mailboxes' domains are added to <a href="#/admin/domains/${client.id}">Domains</a> with their type, and DNS is checked. <a href="/api/mailboxes-template.csv">Download the sample</a>.</p>
         <div class="grid-2">
           <div class="field"><label for="mb-file">CSV file</label><input id="mb-file" type="file" accept=".csv,text/csv" required></div>
+          <div class="field"><label for="mb-type">Mailbox type</label><select id="mb-type" name="inbox_type"><option value="csv">From the CSV's type column (or the batch's)</option>${types.map((t) => `<option value="${esc(t.inbox_type)}">${esc(t.label)} (rows without a type)</option>`).join('')}</select></div>
+        </div>
+        <div class="grid-2">
           <div class="field"><label for="mb-batch">Batch (optional)</label><select id="mb-batch" name="order_id"><option value="">Not linked to a batch</option>
             ${batches.map((o) => `<option value="${o.id}">${esc(o.batch_name || `Batch #${o.id}`)} · ${o.quantity} × ${esc(o.label)}${o.status === 'cancelled' ? ' (cancelled)' : ''}</option>`).join('')}</select></div>
         </div>
@@ -3093,7 +3100,7 @@ function adminMailboxClient({ client, mailboxes: rows, batches }) {
       </form>
       <div class="card">
         <div class="card-head"><h2>Mailbox logins</h2>${rows.length ? `<div class="row">${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}<button class="btn btn-sm btn-danger" id="mb-del-all">Delete all</button></div>` : ''}</div>
-        ${rows.length ? mailboxTable(rows, { pwUrl, admin: true }) : '<div class="empty">No logins uploaded yet.</div>'}
+        ${rows.length ? mailboxTable(rows, { pwUrl, admin: true, types }) : '<div class="empty">No logins uploaded yet.</div>'}
       </div>
     </div>`);
   wireMailboxTable(pwUrl);
@@ -3102,10 +3109,16 @@ function adminMailboxClient({ client, mailboxes: rows, batches }) {
     if (!file) throw new Error('Choose the CSV file');
     if (file.size > 2 * 1024 * 1024) throw new Error('The file is too big (2 MB max)');
     const r = await api('POST', `${API()}/clients/${client.id}/mailboxes`, {
-      csv: await file.text(), order_id: d.order_id || null, notify: d.notify === 'on', replace: d.replace === 'on',
+      csv: await file.text(), order_id: d.order_id || null, inbox_type: d.inbox_type, notify: d.notify === 'on', replace: d.replace === 'on',
     });
-    toast(`Uploaded: ${r.added} new, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ''}${r.notified ? '. Client emailed.' : ''}`);
+    const dom = r.domains && r.domains.total ? ` ${r.domains.total} domain${r.domains.total === 1 ? '' : 's'} on Domains${r.domains.added ? ` (${r.domains.added} new)` : ''}, DNS checked.` : '';
+    toast(`Uploaded: ${r.added} new, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ''}.${dom}${r.notified ? ' Client emailed.' : ''}`);
     route();
+  });
+  document.querySelectorAll('[data-mb-type]').forEach((s) => {
+    s.onchange = async () => {
+      try { await api('PATCH', `${API()}/mailboxes/${s.dataset.mbType}`, { inbox_type: s.value || null }); toast('Mailbox type saved'); } catch (ex) { toast(ex.message); route(); }
+    };
   });
   document.querySelectorAll('[data-mb-admin]').forEach((c) => {
     c.onchange = async () => {
@@ -3151,11 +3164,12 @@ function renderMyDomains(rows) {
     <div class="card">
       ${rows.length ? `<div class="card-head"><div><h2>${rows.length} domain${rows.length === 1 ? '' : 's'}</h2>${problems ? `<div class="small access-off">${problems} need${problems === 1 ? 's' : ''} attention. We're on it; we'll contact you if we need anything.</div>` : '<div class="muted small">All DNS records look good.</div>'}</div></div>
       <div class="table-wrap"><table class="dom-table">
-        <thead><tr><th>Domain</th><th>Mailbox type</th><th class="num">Mailboxes</th><th>DNS</th><th>Last checked</th></tr></thead>
+        <thead><tr><th>Domain</th><th>Mailbox type</th><th class="num">Mailboxes</th><th>Created</th><th>DNS</th><th>Last checked</th></tr></thead>
         <tbody>${rows.map((d) => `<tr>
           <td><strong class="mono">${esc(d.domain)}</strong></td>
           <td>${d.inbox_label ? esc(d.inbox_label) : '<span class="muted">—</span>'}</td>
           <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
+          <td class="small">${d.created_on ? fmtDate(String(d.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
           <td>${dnsBadge(d)}${dnsChips(d)}</td>
           <td class="small">${d.dns_checked_at ? fmtWhen(d.dns_checked_at) : '—'}</td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="empty">Your domains will appear here once they\'re added.</div>'}
@@ -3192,7 +3206,7 @@ function adminDomainClient({ client, domains, batches, types }) {
     <div class="stack">
       <form class="card card-pad" id="dom-add">
         <h2 style="margin-bottom:4px">Add domains</h2>
-        <p class="muted small" style="margin:0 0 14px">One domain per line. To give a domain its own mailbox type, write <span class="mono">domain, type</span> (e.g. <span class="mono">acme.com, Google Workspace</span>). DNS is checked right away.</p>
+        <p class="muted small" style="margin:0 0 14px">Domains are also added automatically from uploaded <a href="#/admin/mailboxes/${client.id}">mailboxes</a> and from batches. One domain per line. To give a domain its own mailbox type, write <span class="mono">domain, type</span> (e.g. <span class="mono">acme.com, Google Workspace</span>). DNS is checked right away.</p>
         <div class="field"><label for="dom-text">Domains</label><textarea id="dom-text" name="text" rows="5" placeholder="acme.com&#10;getacme.com&#10;tryacme.com, Microsoft 365 (Admin)" required></textarea></div>
         <div class="grid-2">
           <div class="field"><label for="dom-type">Mailbox type</label><select id="dom-type" name="inbox_type"><option value="auto">Detect from DNS (or the batch's type)</option>${typeOptions(null)}</select></div>
@@ -3205,13 +3219,14 @@ function adminDomainClient({ client, domains, batches, types }) {
       <div class="card">
         <div class="card-head"><h2>Domains</h2>${domains.length ? `<div class="row">${domains.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search domain…">' : ''}<button class="btn btn-sm" id="dom-check-all">Recheck all DNS</button></div>` : ''}</div>
         ${domains.length ? `<div class="table-wrap"><table class="dom-table">
-          <thead><tr><th>Domain</th><th>Mailbox type</th><th>Detected</th><th>DNS</th><th class="num">Mailboxes</th><th>Checked</th><th></th></tr></thead>
+          <thead><tr><th>Domain</th><th>Mailbox type</th><th>Detected</th><th>DNS</th><th class="num">Mailboxes</th><th>Created</th><th>Checked</th><th></th></tr></thead>
           <tbody>${domains.map((d) => `<tr data-mb="${d.id}" data-search="${searchText(d.domain, d.inbox_label, d.batch_name)}">
             <td><strong class="mono">${esc(d.domain)}</strong>${d.order_id ? `<div class="muted small">${esc(d.batch_name || `Batch #${d.order_id}`)}</div>` : ''}</td>
             <td><select class="dom-type" data-dom-type="${d.id}" aria-label="Mailbox type for ${esc(d.domain)}">${typeOptions(d.inbox_type, 'Not set')}</select></td>
             <td class="small">${d.dns ? `${esc(PROVIDER_NAME[d.dns.detected] || d.dns.detected)}${d.dns.mx[0] ? `<div class="muted mono" style="font-size:11px">${esc(d.dns.mx[0])}</div>` : ''}` : '—'}</td>
             <td>${dnsBadge(d)}${dnsChips(d)}${dnsIssues(d)}</td>
             <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
+            <td class="small">${d.created_on ? fmtDate(String(d.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
             <td class="small">${d.dns_checked_at ? fmtWhen(d.dns_checked_at) : '—'}</td>
             <td><div class="row" style="flex-wrap:nowrap;gap:6px"><button class="btn btn-sm" data-dom-check="${d.id}">Recheck</button><button class="btn btn-sm btn-ghost" data-dom-del="${d.id}" data-domain="${esc(d.domain)}">Delete</button></div></td>
           </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No domains yet. Add them above, or import the ones written on this client\'s batches.</div>'}

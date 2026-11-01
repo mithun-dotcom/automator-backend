@@ -45,7 +45,10 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 ## Mailboxes (logins for clients)
 
 **Admin side:** go to **Mailboxes** (also the **Mailboxes** button on each client) → choose the client → upload a CSV.
-- Columns are `email`, `password`, `admin`. Write `yes` in `admin` for the admin mailbox and leave it empty for the others. The header row is optional, and common names such as "Email address" or "Role: admin" are understood.
+- Columns are `email`, `password`, `admin`, `type` and `created`. Write `yes` in `admin` for the admin mailbox and leave it empty for the others. The header row is optional, and common names such as "Email address", "Mailbox type" or "Creation date" are understood.
+- `type` is the mailbox type, e.g. "Google Workspace" or "Microsoft 365 (Admin)". Loose spellings like "google workspace", "gws" or "m365 admin" also match. Rows without a type use the type chosen on the form, then the batch's.
+- `created` is the date the mailbox was created: 2026-11-01, 01/11/2026 (day first unless it can't be), "1 Nov 2026" or "Nov 1, 2026".
+- **Domains are filled in from the upload:** each mailbox's domain is added to the client's Domains with the type most of its mailboxes have, linked to the chosen batch, and its DNS is checked. The Domains page shows each domain's mailbox count and the earliest creation date.
 - You can link the upload to one of the client's batches.
 - Ticking "Email them" sends the client a "Your mailboxes are ready" email and notification.
 - Logins with the same email are updated. **Replace** removes the client's logins that aren't in the file.
