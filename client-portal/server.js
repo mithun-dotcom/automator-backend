@@ -2841,7 +2841,11 @@ async function scheduledBilling() {
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
-  repairGluedDomains().catch((err) => console.error('Glued domain repair failed:', err)).then(recheckDomains);
+  // After repairs, domains with problems are rechecked right away (the checks may have improved).
+  repairGluedDomains().catch((err) => console.error('Glued domain repair failed:', err))
+    .then(async () => checkDomains((await query("SELECT id FROM domains WHERE dns_status = 'error'")).rows.map((r) => r.id)))
+    .catch((err) => console.error('Domain recheck failed:', err))
+    .then(recheckDomains);
   setInterval(recheckDomains, 60 * 60 * 1000);
 })().catch((err) => {
   console.error(err);
