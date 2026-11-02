@@ -1216,7 +1216,8 @@ async function importBatchDomains(where, params) {
   const { rows: orders } = await query(`SELECT id, user_id, inbox_type, domains FROM orders WHERE status <> 'cancelled' AND ${where}`, params);
   const ids = [];
   for (const o of orders) {
-    const names = [...new Set(String(o.domains || '').split(/[\s,;]+/).map(dnscheck.clean).filter(Boolean))];
+    const raw = [...new Set(String(o.domains || '').split(/[\s,;]+/).map(dnscheck.clean).filter(Boolean))];
+    const names = [...new Set((await Promise.all(raw.map(dnscheck.splitGlued))).flat())];
     for (const name of names) {
       const { rows: [d] } = await query(
         `INSERT INTO domains (user_id, order_id, domain, inbox_type) VALUES ($1, $2, $3, $4)
@@ -1280,6 +1281,10 @@ shared.post('/clients/:id/domains', asyncRoute(async (req, res) => {
     names.forEach((raw) => entries.set(dnscheck.clean(raw), second || formType || batchType || null));
   });
   if (bad.length) throw new HttpError(400, `Not valid: ${bad.slice(0, 5).join(', ')}${bad.length > 5 ? ` and ${bad.length - 5} more` : ''}`);
+  for (const [name, type] of [...entries]) {
+    const parts = await dnscheck.splitGlued(name);
+    if (parts.length > 1) { entries.delete(name); parts.forEach((p) => entries.set(p, type)); }
+  }
   if (!entries.size) throw new HttpError(400, 'Enter at least one domain');
   if (entries.size > 300) throw new HttpError(400, 'Add at most 300 domains at a time');
   const ids = [];
@@ -1369,6 +1374,31 @@ async function domainsFromAllMailboxes() {
     added += rowCount;
   }
   return added;
+}
+
+// Repairs domains that were two domains typed together (see dnscheck.splitGlued):
+// the glued row becomes the two real domains, and the batch's text is fixed.
+async function repairGluedDomains() {
+  const { rows } = await query("SELECT * FROM domains WHERE dns_status = 'error'");
+  let fixed = 0;
+  for (const d of rows) {
+    const parts = await dnscheck.splitGlued(d.domain);
+    if (parts.length < 2) continue;
+    const ids = [];
+    for (const p of parts) {
+      const { rows: [n] } = await query(
+        `INSERT INTO domains (user_id, order_id, domain, inbox_type) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, domain) DO UPDATE SET order_id = COALESCE(domains.order_id, EXCLUDED.order_id),
+           inbox_type = COALESCE(domains.inbox_type, EXCLUDED.inbox_type) RETURNING id`, [d.user_id, d.order_id, p, d.inbox_type]);
+      ids.push(n.id);
+    }
+    await query('DELETE FROM domains WHERE id = $1', [d.id]);
+    if (d.order_id) await query('UPDATE orders SET domains = replace(domains, $2, $3) WHERE id = $1', [d.order_id, d.domain, parts.join('\n')]);
+    await checkDomains(ids);
+    console.log(`Domains: split "${d.domain}" into ${parts.join(' + ')}`);
+    fixed += 1;
+  }
+  return fixed;
 }
 
 // Once a day per domain (checked hourly, a few at a time).
@@ -2811,7 +2841,7 @@ async function scheduledBilling() {
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
-  recheckDomains();
+  repairGluedDomains().catch((err) => console.error('Glued domain repair failed:', err)).then(recheckDomains);
   setInterval(recheckDomains, 60 * 60 * 1000);
 })().catch((err) => {
   console.error(err);

@@ -34,19 +34,47 @@ function clean(raw) {
   return DOMAIN_RE.test(d) ? d : null;
 }
 
+// "No such record" answers are null; a failed lookup (server error, timeout)
+// is retried once and then thrown, so it's never reported as a missing record.
 const quiet = async (fn) => {
-  try { return await fn(); } catch (err) {
-    if (['ENOTFOUND', 'ENODATA', 'NXDOMAIN', 'ESERVFAIL'].includes(err.code)) return null;
-    throw err;
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await fn(); } catch (err) {
+      if (['ENOTFOUND', 'ENODATA', 'NXDOMAIN'].includes(err.code)) return null;
+      if (attempt >= 1) throw err;
+    }
   }
 };
+// Does the domain exist in DNS at all? (NXDOMAIN = not registered, or its
+// nameservers aren't set up.) null when that can't be told.
+async function exists(domain) {
+  try {
+    await api.txt(domain);
+    return true;
+  } catch (err) {
+    if (err.code === 'ENODATA') return true;
+    if (err.code === 'ENOTFOUND' || err.code === 'NXDOMAIN') return false;
+    return null;
+  }
+}
+
+// Two domains typed with no space between them, e.g.
+// "gettopscale.comtopscaleagency.com" -> ["gettopscale.com", "topscaleagency.com"].
+// Only split when the glued name doesn't exist in DNS and the second part does.
+const GLUED = /^([a-z0-9-]+\.(?:com|net|org|co|io|ai|biz|info|us|uk|ca|au|in|live|online|site|xyz|agency|tech|pro|app|me|store|shop|studio|digital|media|group|solutions|cloud|email|marketing))([a-z0-9-]{3,}\.[a-z.]{2,})$/;
+async function splitGlued(name) {
+  const m = name.match(GLUED);
+  if (!m || !clean(m[1]) || !clean(m[2])) return [name];
+  if ((await exists(name)) !== false) return [name];
+  return (await exists(m[2])) ? [m[1], m[2]] : [name];
+}
 const txtOf = (recs) => (recs || []).map((r) => r.join(''));
 
 // -> { status: ok|warning|error, detected, mx, spf, dmarc, dkim, issues: [] }
 async function check(domain, expected) {
   const out = { detected: 'none', mx: [], spf: null, dmarc: null, dkim: null, issues: [] };
   try {
-    const mx = await quiet(() => api.mx(domain));
+    const there = await exists(domain);
+    const mx = there === false ? null : await quiet(() => api.mx(domain));
     out.mx = (mx || []).sort((a, b) => a.priority - b.priority).map((r) => r.exchange.toLowerCase());
     const found = Object.entries(PROVIDERS).find(([, p]) => out.mx.some((h) => p.mx.test(h)));
     out.detected = found ? found[0] : out.mx.length ? 'other' : 'none';
@@ -60,7 +88,8 @@ async function check(domain, expected) {
     }
 
     const wrongMx = Boolean(out.mx.length && expected && out.detected !== expected);
-    if (!out.mx.length) out.issues.push('No MX records: the domain can\'t receive email');
+    if (there === false) out.issues.push('Domain not found in DNS: it isn\'t registered, or its nameservers aren\'t set up yet');
+    else if (!out.mx.length) out.issues.push('No MX records: the domain can\'t receive email');
     else if (wrongMx) {
       out.issues.push(`MX points to ${PROVIDERS[out.detected] ? PROVIDERS[out.detected].name : 'another provider'}, not ${PROVIDERS[expected].name}`);
     }
@@ -71,9 +100,9 @@ async function check(domain, expected) {
     out.status = !out.mx.length || wrongMx ? 'error' : out.issues.length ? 'warning' : 'ok';
   } catch (err) {
     out.status = 'error';
-    out.issues.push(`DNS lookup failed (${err.code || err.message})`);
+    out.issues.push(`DNS lookup failed (${err.code || err.message}); it will be checked again`);
   }
   return out;
 }
 
-module.exports = { check, clean, providerOf, PROVIDERS, api };
+module.exports = { check, clean, splitGlued, providerOf, PROVIDERS, api };
