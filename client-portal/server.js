@@ -1476,21 +1476,23 @@ async function refreshZones(ids) {
 
 admin.get('/cloudflare', ownerOnly, asyncRoute(async (req, res) => {
   const cfg = await cloudflare.config();
-  res.json({ accountId: cfg.accountId, tokenSet: Boolean(cfg.token), tokenHint: registrars.mask(cfg.token) });
+  res.json({ accountId: cfg.accountId, email: cfg.email, tokenSet: Boolean(cfg.token), tokenHint: registrars.mask(cfg.token) });
 }));
 admin.put('/cloudflare', ownerOnly, asyncRoute(async (req, res) => {
   const accountId = str(req.body.account_id, 64);
-  const token = str(req.body.api_token, 300);
+  const token = str(req.body.api_token, 300).replace(/^Bearer\s+/i, '').replace(/\s+/g, '');
+  const email = str(req.body.email, 200).toLowerCase();
+  if (email && !isEmail(email)) throw new HttpError(400, 'Enter a valid email, or leave it empty for an API token');
   if (!/^[0-9a-f]{32}$/i.test(accountId)) throw new HttpError(400, 'The Account ID is 32 letters and numbers (Cloudflare dashboard → your account → Overview, right side)');
   const current = await cloudflare.config();
   if (!token && !current.token) throw new HttpError(400, 'Enter the API token');
   let result;
   try {
-    result = await cloudflare.test({ accountId, token: token || current.token });
+    result = await cloudflare.test({ accountId, token: token || current.token, email });
   } catch (err) {
     throw new HttpError(400, `${err.message}. Nothing was saved.`);
   }
-  await cloudflare.save({ accountId, token });
+  await cloudflare.save({ accountId, token, email });
   await audit.record(req.user, 'edited', 'Cloudflare connection', [{ field: 'Account', from: '', to: result.account }]);
   res.json({ ok: true, account: result.account });
 }));

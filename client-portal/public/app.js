@@ -3516,9 +3516,11 @@ async function cloudflareCard() {
     <div class="grid-2">
       <div class="field"><label for="cf-acc">Account ID</label><input id="cf-acc" name="account_id" class="mono" required value="${esc(cf.accountId)}" placeholder="32 characters">
         <div class="hint">Cloudflare dashboard → your account → Overview (right side) → Account ID.</div></div>
-      <div class="field"><label for="cf-token">API token</label><input id="cf-token" name="api_token" type="password" autocomplete="off" placeholder="${cf.tokenSet ? `Saved (${esc(cf.tokenHint)}). Leave empty to keep it` : 'Paste the token'}" ${cf.tokenSet ? '' : 'required'}>
+      <div class="field"><label for="cf-token">API token or Global API Key</label><input id="cf-token" name="api_token" type="password" autocomplete="off" placeholder="${cf.tokenSet ? `Saved (${esc(cf.tokenHint)}). Leave empty to keep it` : 'Paste the token'}" ${cf.tokenSet ? '' : 'required'}>
         <div class="hint">My Profile → API Tokens → Create Token → Custom token with: <strong>Zone → Zone → Edit</strong> and <strong>Zone → DNS → Edit</strong>; Account resources: <strong>Include → your account</strong>; Zone resources: <strong>Include → All zones from that account</strong>.</div></div>
     </div>
+    <div class="field"><label for="cf-email">Cloudflare login email <span class="muted small">(only if you use the Global API Key)</span></label><input id="cf-email" name="email" type="email" value="${esc(cf.email || '')}" placeholder="Leave empty for an API token">
+      <div class="hint">API tokens work on their own. The Global API Key (My Profile → API Tokens → Global API Key → View) also needs the email you log in to Cloudflare with.</div></div>
     <div class="row"><button class="btn btn-primary" type="submit">${cf.tokenSet ? 'Save & test' : 'Connect Cloudflare'}</button>${cf.tokenSet ? '<button class="btn" type="button" id="cf-test">Test connection</button>' : ''}<span class="muted small">The token is checked first, then stored encrypted. It's never shown again.</span></div>
     <div class="error"></div>
   </form>`;

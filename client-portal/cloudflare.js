@@ -7,16 +7,22 @@ const onboarding = require('./onboarding');
 
 const API = (process.env.CLOUDFLARE_API_URL || 'https://api.cloudflare.com/client/v4').replace(/\/$/, '');
 
+// email is set when the key is the Global API Key (sent as X-Auth-Email /
+// X-Auth-Key); without it the key is an API token (sent as a Bearer token).
 async function config() {
-  const { rows } = await query("SELECT key, value FROM settings WHERE key IN ('cf_account_id', 'cf_api_token')");
+  const { rows } = await query("SELECT key, value FROM settings WHERE key IN ('cf_account_id', 'cf_api_token', 'cf_email')");
   const v = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   let token = '';
   try { token = v.cf_api_token ? onboarding.decrypt(Buffer.from(v.cf_api_token, 'base64')) : ''; } catch { token = ''; }
-  return { accountId: v.cf_account_id || '', token };
+  return { accountId: v.cf_account_id || '', token, email: v.cf_email || '' };
 }
 
-async function save({ accountId, token }) {
+// A Global API Key is 37 hex characters; API tokens are longer and mixed.
+const looksGlobal = (key) => /^[0-9a-f]{37}$/i.test(key || '');
+
+async function save({ accountId, token, email = '' }) {
   await query("INSERT INTO settings (key, value) VALUES ('cf_account_id', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [accountId]);
+  await query("INSERT INTO settings (key, value) VALUES ('cf_email', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [email]);
   if (token) {
     await query("INSERT INTO settings (key, value) VALUES ('cf_api_token', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
       [onboarding.encrypt(token).toString('base64')]);
@@ -33,7 +39,10 @@ async function call(cfg, method, path, body) {
   try {
     res = await fetch(`${API}${path}`, {
       method,
-      headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+      headers: {
+        ...(cfg.email ? { 'X-Auth-Email': cfg.email, 'X-Auth-Key': cfg.token } : { Authorization: `Bearer ${cfg.token}` }),
+        'Content-Type': 'application/json',
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(15000),
     });
@@ -43,6 +52,7 @@ async function call(cfg, method, path, body) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.success === false) {
     const e = (data.errors || [])[0] || {};
+    console.warn(`[cloudflare] ${method} ${path.split('?')[0]} -> ${res.status} ${JSON.stringify((data.errors || []).map((x) => [x.code, x.message]))}`);
     throw new CfError(e.message ? `Cloudflare: ${e.message}` : `Cloudflare answered ${res.status}`, e.code);
   }
   return data.result;
@@ -54,12 +64,19 @@ async function call(cfg, method, path, body) {
 async function test(cfg) {
   const c = cfg || await config();
   if (!c.accountId || !c.token) throw new CfError('Enter the Account ID and API token');
-  // 1. Is the token valid at all?
+  if (looksGlobal(c.token) && !c.email) throw new CfError('This looks like the Global API Key: also enter the email you log in to Cloudflare with');
+  // 1. Is the key valid at all?
   let valid = false;
-  for (const path of ['/user/tokens/verify', `/accounts/${encodeURIComponent(c.accountId)}/tokens/verify`]) {
-    try { await call(c, 'GET', path); valid = true; break; } catch { /* try the other kind of token */ }
+  let why = '';
+  const checks = c.email ? ['/user'] : ['/user/tokens/verify', `/accounts/${encodeURIComponent(c.accountId)}/tokens/verify`];
+  for (const path of checks) {
+    try { await call(c, 'GET', path); valid = true; break; } catch (err) { why = why || err.message.replace(/^Cloudflare: /, ''); }
   }
-  if (!valid) throw new CfError('Cloudflare says this API token isn\'t valid (check it was copied in full, and that it isn\'t expired or restricted to other IP addresses)');
+  if (!valid) {
+    throw new CfError(c.email
+      ? `Cloudflare didn't accept this email + Global API Key (${why})`
+      : `Cloudflare says this API token isn't valid (${why}). If it's your Global API Key, also enter your Cloudflare login email`);
+  }
   // 2. Can it see zones in this account? (Needs Zone permissions on this account.)
   let zones;
   try {
@@ -101,4 +118,4 @@ async function activationCheck(id) {
   try { await call(await config(), 'PUT', `/zones/${encodeURIComponent(id)}/activation_check`); } catch { /* rate-limited or already active */ }
 }
 
-module.exports = { config, save, test, addZone, getZone, activationCheck, CfError };
+module.exports = { config, save, test, addZone, getZone, activationCheck, looksGlobal, CfError };
