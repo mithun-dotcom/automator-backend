@@ -2085,69 +2085,133 @@ admin.put('/clients/:id/pricing', audited('edited', 'clientPricing', byParam, as
 // the Resellers page. Month-by-month figures for the last 12 months in
 // BILLING_TZ, plus this month to date against the same days of last month.
 // "Active" means activated before the end of that month and not cancelled by then.
+// Analytics for any period (from..to, inclusive; default this month to date),
+// compared with the period before it, with a day-by-day (up to 62 days) or
+// month-by-month breakdown. Mailboxes sold = mailboxes on batches added in the
+// period (not "Other" services; batches cancelled before they started don't count).
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const daysIn = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+// The period to compare with: the same days of the previous month(s) when the
+// period starts on the 1st, else the same number of days just before it.
+function previousPeriod(from, to) {
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  // From 1 January: the same dates a year earlier ("this year" vs "last year").
+  if (fm === 1 && fd === 1) {
+    const back = (d) => { const [y, m, dd] = d.split('-').map(Number); return `${y - 1}-${String(m).padStart(2, '0')}-${String(Math.min(dd, daysIn(y - 1, m))).padStart(2, '0')}`; };
+    return [back(from), back(to)];
+  }
+  if (fd === 1) {
+    const months = (ty - fy) * 12 + (tm - fm) + 1;
+    const pStart = new Date(Date.UTC(fy, fm - 1 - months, 1));
+    const py = pStart.getUTCFullYear();
+    const pm = pStart.getUTCMonth() + 1;
+    const lastMonth = new Date(Date.UTC(py, pm - 1 + months - 1, 1));
+    const ly = lastMonth.getUTCFullYear();
+    const lm = lastMonth.getUTCMonth() + 1;
+    const fullEnd = td === daysIn(ty, tm);
+    const endDay = fullEnd ? daysIn(ly, lm) : Math.min(td, daysIn(ly, lm));
+    return [pStart.toISOString().slice(0, 10), `${ly}-${String(lm).padStart(2, '0')}-${String(endDay).padStart(2, '0')}`];
+  }
+  const len = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
+  return [addDays(from, -len), addDays(from, -1)];
+}
+
 admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
   const tz = process.env.BILLING_TZ || 'Asia/Dhaka';
   const today = billing.today();
-  const local = (col) => `(${col} AT TIME ZONE $2)::date`;
+  let from = String(req.query.from || '');
+  let to = String(req.query.to || '');
+  if (!ISO_DAY.test(from) || Number.isNaN(Date.parse(from))) from = `${today.slice(0, 8)}01`;
+  if (!ISO_DAY.test(to) || Number.isNaN(Date.parse(to))) to = today;
+  if (to < from) [from, to] = [to, from];
+  if (Date.parse(to) - Date.parse(from) > 5 * 366 * 86400000) throw new HttpError(400, 'Choose a period of 5 years or less');
+  const [pFrom, pTo] = previousPeriod(from, to);
+  const bucket = (Date.parse(to) - Date.parse(from)) / 86400000 < 62 ? 'day' : 'month';
+
+  const local = (col) => `(${col} AT TIME ZONE '${tz.replace(/'/g, '')}')::date`;
+  const sold = `o.inbox_type <> 'other' AND NOT (o.status = 'cancelled' AND o.activated_at IS NULL)`;
+  // Flow figures between s (inclusive) and e (exclusive), as SQL date expressions.
+  const flow = (sd, ed) => `
+    (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= ${sd} AND ${local('paid_at')} < ${ed}) AS payments,
+    (SELECT count(*) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= ${sd} AND ${local('paid_at')} < ${ed})::int AS payment_count,
+    (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= ${sd} AND COALESCE(issue_date, ${local('created_at')}) < ${ed}) AS invoiced,
+    (SELECT count(*) FROM users WHERE role = 'client' AND reseller_id IS NULL AND ${local('created_at')} >= ${sd} AND ${local('created_at')} < ${ed})::int AS new_clients,
+    (SELECT count(*) FROM direct_orders o WHERE ${local('o.created_at')} >= ${sd} AND ${local('o.created_at')} < ${ed})::int AS new_batches,
+    (SELECT COALESCE(SUM(o.quantity), 0) FROM direct_orders o WHERE ${sold} AND ${local('o.created_at')} >= ${sd} AND ${local('o.created_at')} < ${ed})::int AS mailboxes_sold,
+    (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM direct_orders o WHERE ${sold} AND ${local('o.created_at')} >= ${sd} AND ${local('o.created_at')} < ${ed}) AS sold_value,
+    (SELECT count(*) FROM direct_orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= ${sd} AND ${local('o.cancelled_at')} < ${ed})::int AS cancellations,
+    (SELECT COALESCE(SUM(o.quantity), 0) FROM direct_orders o WHERE o.inbox_type <> 'other' AND o.status = 'cancelled' AND ${local('o.cancelled_at')} >= ${sd} AND ${local('o.cancelled_at')} < ${ed})::int AS mailboxes_cancelled`;
+  // Standing figures at the end of day before `cut` (exclusive).
   const activeAt = (cut) => `o.activated_at IS NOT NULL AND ${local('o.activated_at')} < ${cut}
     AND (o.status = 'active' OR (o.status = 'cancelled' AND ${local('o.cancelled_at')} >= ${cut}))`;
-  const [months, compare, outstanding, byType, topClients, recent, bySeller] = await Promise.all([
-    query(`WITH m AS (
-             SELECT ms::date AS ms, (ms + interval '1 month')::date AS me,
-                    LEAST((ms + interval '1 month')::date, $1::date + 1) AS cut
-               FROM generate_series(date_trunc('month', $1::date) - interval '11 months', date_trunc('month', $1::date), interval '1 month') ms)
-           SELECT to_char(m.ms, 'YYYY-MM') AS month,
-             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me) AS payments,
-             (SELECT count(*) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= m.ms AND ${local('paid_at')} < m.me)::int AS payment_count,
-             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= m.ms AND COALESCE(issue_date, ${local('created_at')}) < m.me) AS invoiced,
-             (SELECT count(*) FROM users WHERE role = 'client' AND reseller_id IS NULL AND ${local('created_at')} >= m.ms AND ${local('created_at')} < m.me)::int AS new_clients,
-             (SELECT count(DISTINCT o.user_id) FROM direct_orders o WHERE ${activeAt('m.cut')})::int AS active_clients,
-             (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM direct_orders o WHERE ${activeAt('m.cut')}) AS mrr,
-             (SELECT COALESCE(SUM(o.quantity), 0) FROM direct_orders o WHERE o.inbox_type <> 'other' AND ${activeAt('m.cut')})::int AS mailboxes,
-             (SELECT count(*) FROM direct_orders o WHERE ${local('o.created_at')} >= m.ms AND ${local('o.created_at')} < m.me)::int AS new_batches,
-             (SELECT count(*) FROM direct_orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= m.ms AND ${local('o.cancelled_at')} < m.me)::int AS cancellations
-           FROM m ORDER BY m.ms`, [today, tz]),
-    // Last month up to the same day of the month as today (clamped to its length).
-    query(`WITH r AS (
-             SELECT (date_trunc('month', $1::date) - interval '1 month')::date AS ps, date_trunc('month', $1::date)::date AS ts)
-           SELECT
-             LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts) AS pe,
-             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS payments,
-             (SELECT count(*) FROM direct_invoices WHERE status = 'paid' AND ${local('paid_at')} >= r.ps AND ${local('paid_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS payment_count,
-             (SELECT COALESCE(SUM(amount), 0) FROM direct_invoices WHERE status <> 'void' AND COALESCE(issue_date, ${local('created_at')}) >= r.ps AND COALESCE(issue_date, ${local('created_at')}) < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts)) AS invoiced,
-             (SELECT count(*) FROM users WHERE role = 'client' AND reseller_id IS NULL AND ${local('created_at')} >= r.ps AND ${local('created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_clients,
-             (SELECT count(*) FROM direct_orders o WHERE ${local('o.created_at')} >= r.ps AND ${local('o.created_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS new_batches,
-             (SELECT count(*) FROM direct_orders o WHERE o.status = 'cancelled' AND ${local('o.cancelled_at')} >= r.ps AND ${local('o.cancelled_at')} < LEAST(r.ps + (extract(day FROM $1::date)::int), r.ts))::int AS cancellations
-           FROM r`, [today, tz]),
+  const standing = (cut) => `
+    (SELECT count(DISTINCT o.user_id) FROM direct_orders o WHERE ${activeAt(cut)})::int AS active_clients,
+    (SELECT COALESCE(SUM(o.quantity * o.price_per_mailbox), 0) FROM direct_orders o WHERE ${activeAt(cut)}) AS mrr,
+    (SELECT COALESCE(SUM(o.quantity), 0) FROM direct_orders o WHERE o.inbox_type <> 'other' AND ${activeAt(cut)})::int AS mailboxes`;
+  const cutOf = (d, t = '$3') => `LEAST(${d}::date + 1, ${t}::date + 1)`;
+  const step = bucket === 'day' ? "interval '1 day'" : "interval '1 month'";
+
+  const [series, period, prev, outstanding, byType, topClients, recent, bySeller] = await Promise.all([
+    query(`WITH b AS (
+             SELECT g::date AS bs, LEAST((g + ${step})::date, $2::date + 1) AS be
+               FROM generate_series(${bucket === 'day' ? '$1::date' : "date_trunc('month', $1::date)"}, $2::date, ${step}) g)
+           SELECT to_char(b.bs, '${bucket === 'day' ? 'YYYY-MM-DD' : 'YYYY-MM'}') AS key, GREATEST(b.bs, $1::date) AS bs, b.be,
+             ${flow('GREATEST(b.bs, $1::date)', 'b.be')}, ${standing('LEAST(b.be, $3::date + 1)')}
+           FROM b ORDER BY b.bs`, [from, to, today]),
+    query(`SELECT ${flow('$1::date', '$2::date + 1')}, ${standing(cutOf('$2'))}`, [from, to, today]),
+    query(`SELECT ${flow('$1::date', '$2::date + 1')}, ${standing(cutOf('$2'))}`, [pFrom, pTo, today]),
     query(`SELECT COALESCE(SUM(amount), 0) AS unpaid, count(*)::int AS unpaid_count,
              COALESCE(SUM(amount) FILTER (WHERE due_date < $1), 0) AS overdue,
              (count(*) FILTER (WHERE due_date < $1))::int AS overdue_count
            FROM direct_invoices WHERE status = 'unpaid'`, [today]),
-    query(`SELECT p.label, SUM(o.quantity * o.price_per_mailbox) AS mrr, SUM(o.quantity)::int AS quantity
+    // Per mailbox type: sold in the period and the one before, and active at the end of the period.
+    query(`SELECT p.label, p.sort_order,
+             COALESCE(SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2), 0)::int AS sold,
+             COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2), 0) AS sold_value,
+             COALESCE(SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $3 AND $4), 0)::int AS prev_sold,
+             COALESCE(SUM(o.quantity) FILTER (WHERE ${activeAt(cutOf('$2', '$5'))}), 0)::int AS active,
+             COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE ${activeAt(cutOf('$2', '$5'))}), 0) AS mrr
            FROM direct_orders o JOIN pricing p ON p.inbox_type = o.inbox_type
-           WHERE o.status = 'active' GROUP BY p.label, p.sort_order ORDER BY mrr DESC`),
+           WHERE ${sold} GROUP BY p.label, p.sort_order
+           HAVING SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2 OR ${local('o.created_at')} BETWEEN $3 AND $4 OR (${activeAt(cutOf('$2', '$5'))})) > 0
+           ORDER BY sold DESC, active DESC, p.sort_order`, [from, to, pFrom, pTo, today]),
     query(`SELECT u.id, u.email, u.name, u.company,
-             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)), 0) AS this_month,
-             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
-                                             AND ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month
+             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $1 AND $2), 0) AS this_period,
+             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $3 AND $4), 0) AS prev_period
            FROM direct_invoices i JOIN users u ON u.id = i.user_id
-           WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
-           GROUP BY u.id ORDER BY this_month DESC, last_month DESC LIMIT 10`, [today, tz]),
+           WHERE i.status = 'paid' AND (${local('i.paid_at')} BETWEEN $1 AND $2 OR ${local('i.paid_at')} BETWEEN $3 AND $4)
+           GROUP BY u.id ORDER BY this_period DESC, prev_period DESC LIMIT 10`, [from, to, pFrom, pTo]),
     query(`SELECT i.id, i.amount, i.paid_at, i.description, u.email, u.company
            FROM direct_invoices i JOIN users u ON u.id = i.user_id
-           WHERE i.status = 'paid' AND i.paid_at IS NOT NULL ORDER BY i.paid_at DESC, i.id DESC LIMIT 10`),
-    // Commission view: payments received per seller, this month and last.
-    query(`SELECT u.sold_by AS seller,
-             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)), 0) AS this_month,
-             (count(*) FILTER (WHERE ${local('i.paid_at')} >= date_trunc('month', $1::date)))::int AS this_count,
-             COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)), 0) AS last_month,
-             (count(*) FILTER (WHERE ${local('i.paid_at')} < date_trunc('month', $1::date)))::int AS last_count
-           FROM direct_invoices i JOIN users u ON u.id = i.user_id
-           WHERE i.status = 'paid' AND ${local('i.paid_at')} >= date_trunc('month', $1::date) - interval '1 month'
-           GROUP BY 1 ORDER BY this_month DESC, last_month DESC`, [today, tz]),
+           WHERE i.status = 'paid' AND i.paid_at IS NOT NULL AND ${local('i.paid_at')} BETWEEN $1 AND $2
+           ORDER BY i.paid_at DESC, i.id DESC LIMIT 15`, [from, to]),
+    // Commission view: payments received and mailboxes sold per seller.
+    query(`WITH pay AS (
+             SELECT COALESCE(u.sold_by, '') AS seller,
+               COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $1 AND $2), 0) AS this_period,
+               (count(*) FILTER (WHERE ${local('i.paid_at')} BETWEEN $1 AND $2))::int AS this_count,
+               COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $3 AND $4), 0) AS prev_period,
+               (count(*) FILTER (WHERE ${local('i.paid_at')} BETWEEN $3 AND $4))::int AS prev_count
+             FROM direct_invoices i JOIN users u ON u.id = i.user_id
+             WHERE i.status = 'paid' AND (${local('i.paid_at')} BETWEEN $1 AND $2 OR ${local('i.paid_at')} BETWEEN $3 AND $4) GROUP BY 1),
+           mb AS (
+             SELECT COALESCE(u.sold_by, '') AS seller,
+               COALESCE(SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2), 0)::int AS sold,
+               COALESCE(SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $3 AND $4), 0)::int AS prev_sold
+             FROM direct_orders o JOIN users u ON u.id = o.user_id
+             WHERE ${sold} AND (${local('o.created_at')} BETWEEN $1 AND $2 OR ${local('o.created_at')} BETWEEN $3 AND $4) GROUP BY 1)
+           SELECT COALESCE(pay.seller, mb.seller) AS seller,
+             COALESCE(pay.this_period, 0) AS this_period, COALESCE(pay.this_count, 0) AS this_count,
+             COALESCE(pay.prev_period, 0) AS prev_period, COALESCE(pay.prev_count, 0) AS prev_count,
+             COALESCE(mb.sold, 0) AS sold, COALESCE(mb.prev_sold, 0) AS prev_sold
+           FROM pay FULL JOIN mb ON pay.seller = mb.seller
+           ORDER BY this_period DESC, sold DESC`, [from, to, pFrom, pTo]),
   ]);
   res.json({
-    today, months: months.rows, lastMonthToDate: compare.rows[0], outstanding: outstanding.rows[0],
+    today, from, to, prevFrom: pFrom, prevTo: pTo, bucket,
+    series: series.rows, period: period.rows[0], prev: prev.rows[0], outstanding: outstanding.rows[0],
     byType: byType.rows, topClients: topClients.rows, recentPayments: recent.rows, bySeller: bySeller.rows,
   });
 }));

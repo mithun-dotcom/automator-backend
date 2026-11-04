@@ -964,7 +964,7 @@ async function renderAdmin(page, arg, sub) {
     return sub === 'edit' ? invoiceEditor(inv) : renderInvoiceView(inv, true);
   }
   if (page === 'team' && isOwner()) return renderTeam(await api('GET', `${API()}/team`));
-  if (page === 'analytics') return isOwner() ? renderAnalytics(await api('GET', `${API()}/analytics`)) : go('#/admin/orders');
+  if (page === 'analytics') return isOwner() ? renderAnalytics(await loadAnalytics()) : go('#/admin/orders');
   if (page === 'settings' && !isOwner()) return go('#/admin/orders');
   const pages = { orders: adminOrders, clients: isReseller() ? resellerClients : adminClients, invoices: adminInvoices, settings: adminSettings };
   if (page === 'orders' && arg) return adminOrders(Number(arg));
@@ -2288,109 +2288,158 @@ function drawChart(el, points, { kind = 'bar', money: isMoney = false } = {}) {
   });
 }
 
-let analyticsRange = 12;
-function renderAnalytics(data) {
-  const { months, lastMonthToDate: prev, outstanding, byType, topClients, recentPayments, today, bySeller = [] } = data;
-  const cur = months[months.length - 1];
-  const last = months[months.length - 2];
-  const day = Number(today.slice(8));
-  const thisName = monthName(cur.month, { month: 'long' });
-  const lastName = monthName(last.month, { month: 'long' });
-  const prevEndDay = new Date(Date.parse(`${prev.pe}T00:00:00Z`) - 86400000).getUTCDate(); // pe is exclusive
-  const sameDays = `vs ${monthName(last.month, { month: 'short' })} 1–${prevEndDay}`;
-  const endOfLast = `vs end of ${lastName}`;
+// The chosen Analytics period: a preset, or a month / custom dates.
+const analyticsPeriod = { preset: 'this_month', month: '', from: '', to: '' };
+const isoDay = (d) => d.toISOString().slice(0, 10);
+// [from, to] for a preset, from the business "today" (YYYY-MM-DD).
+function presetRange(preset, today, p = analyticsPeriod) {
+  const [y, m] = today.split('-').map(Number);
+  const first = (yy, mm) => isoDay(new Date(Date.UTC(yy, mm - 1, 1)));
+  const lastDay = (yy, mm) => isoDay(new Date(Date.UTC(yy, mm, 0)));
+  switch (preset) {
+    case 'last_month': return [first(y, m - 1), lastDay(y, m - 1)];
+    case 'last_3': return [first(y, m - 2), today];
+    case 'last_6': return [first(y, m - 5), today];
+    case 'last_12': return [first(y, m - 11), today];
+    case 'this_year': return [`${y}-01-01`, today];
+    case 'last_year': return [`${y - 1}-01-01`, `${y - 1}-12-31`];
+    case 'month': { const [yy, mm] = (p.month || today.slice(0, 7)).split('-').map(Number); const end = lastDay(yy, mm); return [first(yy, mm), end > today ? today : end]; }
+    case 'custom': return [p.from || first(y, m), p.to || today];
+    default: return [first(y, m), today];
+  }
+}
+const PRESETS = [['this_month', 'This month'], ['last_month', 'Last month'], ['month', 'Choose a month…'], ['last_3', 'Last 3 months'], ['last_6', 'Last 6 months'],
+  ['last_12', 'Last 12 months'], ['this_year', 'This year'], ['last_year', 'Last year'], ['custom', 'Custom dates…']];
+const prettyDay = (d, year = true) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(year ? { year: 'numeric' } : {}), timeZone: 'UTC' });
+const rangeText = (a, b) => (a === b ? prettyDay(a) : a.slice(0, 4) === b.slice(0, 4) ? `${prettyDay(a, false)} – ${prettyDay(b)}` : `${prettyDay(a)} – ${prettyDay(b)}`);
 
-  // Flow figures compare with the same days of last month; standing figures
-  // (active clients, MRR, mailboxes) compare with where last month ended.
-  const tile = (label, value, d, sub) => `<div class="card kpi">
+async function loadAnalytics() {
+  const today = (state.admin && state.admin.today) || isoDay(new Date());
+  const [from, to] = presetRange(analyticsPeriod.preset, today);
+  return api('GET', `${API()}/analytics?from=${from}&to=${to}`);
+}
+
+function renderAnalytics(data) {
+  const { period: cur, prev, outstanding, byType, topClients, recentPayments, bySeller = [], series, bucket, from, to, prevFrom, prevTo, today } = data;
+  const vs = `<span class="muted">vs ${rangeText(prevFrom, prevTo)}</span>`;
+  const endVs = `<span class="muted">vs ${prettyDay(prevTo)}</span>`;
+  const tile = (label, value, d, sub, cls = '') => `<div class="card kpi ${cls}">
     <div class="kpi-label">${label}</div>
     <div class="kpi-value">${value}</div>
     <div class="kpi-delta">${d}</div>
     <div class="kpi-sub">${sub}</div>
   </div>`;
+  const plural = (n, w) => `${count(n)} ${w}${Number(n) === 1 ? '' : 's'}`;
   const kpis = [
-    tile('Payments received', money(cur.payments), `${delta(cur.payments, prev.payments)} <span class="muted">${sameDays}</span>`,
-      `${count(cur.payment_count)} payment${cur.payment_count === 1 ? '' : 's'} · ${lastName} total ${money(last.payments)}`),
-    tile('New clients', count(cur.new_clients), `${delta(cur.new_clients, prev.new_clients)} <span class="muted">${sameDays}</span>`,
-      `${lastName} total ${count(last.new_clients)}`),
-    tile('Active clients', count(cur.active_clients), `${delta(cur.active_clients, last.active_clients)} <span class="muted">${endOfLast}</span>`,
-      `${lastName}: ${count(last.active_clients)}`),
-    tile('Monthly recurring revenue', money(cur.mrr), `${delta(cur.mrr, last.mrr)} <span class="muted">${endOfLast}</span>`,
-      `${lastName}: ${money(last.mrr)}`),
-    tile('Active mailboxes', count(cur.mailboxes), `${delta(cur.mailboxes, last.mailboxes)} <span class="muted">${endOfLast}</span>`,
-      `${lastName}: ${count(last.mailboxes)}`),
-    tile('Invoiced', money(cur.invoiced), `${delta(cur.invoiced, prev.invoiced)} <span class="muted">${sameDays}</span>`,
-      `${lastName} total ${money(last.invoiced)}`),
-    tile('New batches', count(cur.new_batches), `${delta(cur.new_batches, prev.new_batches)} <span class="muted">${sameDays}</span>`,
-      `${lastName} total ${count(last.new_batches)}`),
-    tile('Cancelled batches', count(cur.cancellations), `${delta(cur.cancellations, prev.cancellations, { upIsGood: false })} <span class="muted">${sameDays}</span>`,
-      `${lastName} total ${count(last.cancellations)}`),
+    tile('Mailboxes sold', count(cur.mailboxes_sold), `${delta(cur.mailboxes_sold, prev.mailboxes_sold)} ${vs}`,
+      `${money(cur.sold_value)}/month in new batches · before: ${count(prev.mailboxes_sold)}`, 'kpi-hero'),
+    tile('Payments received', money(cur.payments), `${delta(cur.payments, prev.payments)} ${vs}`,
+      `${plural(cur.payment_count, 'payment')} · before: ${money(prev.payments)}`),
+    tile('Invoiced', money(cur.invoiced), `${delta(cur.invoiced, prev.invoiced)} ${vs}`, `Before: ${money(prev.invoiced)}`),
+    tile('New clients', count(cur.new_clients), `${delta(cur.new_clients, prev.new_clients)} ${vs}`, `Before: ${count(prev.new_clients)}`),
+    tile('New batches', count(cur.new_batches), `${delta(cur.new_batches, prev.new_batches)} ${vs}`, `Before: ${count(prev.new_batches)}`),
+    tile('Cancelled', plural(cur.cancellations, 'batch').replace('batchs', 'batches'), `${delta(cur.cancellations, prev.cancellations, { upIsGood: false })} ${vs}`,
+      `${count(cur.mailboxes_cancelled)} mailboxes · before: ${count(prev.cancellations)}`),
+    tile('Active mailboxes', count(cur.mailboxes), `${delta(cur.mailboxes, prev.mailboxes)} ${endVs}`, `On ${prettyDay(to)} · before: ${count(prev.mailboxes)}`),
+    tile('Active clients', count(cur.active_clients), `${delta(cur.active_clients, prev.active_clients)} ${endVs}`, `On ${prettyDay(to)} · before: ${count(prev.active_clients)}`),
+    tile('Monthly recurring revenue', money(cur.mrr), `${delta(cur.mrr, prev.mrr)} ${endVs}`, `On ${prettyDay(to)} · before: ${money(prev.mrr)}`),
   ].join('');
 
+  const label = (k) => (bucket === 'day' ? prettyDay(k, false) : monthName(k, { month: 'short' }));
+  const longLabel = (k) => (bucket === 'day' ? new Date(`${k}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : monthName(k, { month: 'long', year: 'numeric' }));
+  const rowLabel = (k) => (bucket === 'day' ? new Date(`${k}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }) : monthName(k, { month: 'short', year: 'numeric' }));
   const CHARTS = [
-    ['payments', 'Payments received', 'bar', true, (m) => money(m.payments), (m) => `${count(m.payment_count)} payment${m.payment_count === 1 ? '' : 's'}`],
-    ['mrr', 'Monthly recurring revenue', 'line', true, (m) => money(m.mrr), (m) => `${count(m.mailboxes)} mailboxes`],
-    ['active_clients', 'Active clients', 'line', false, (m) => count(m.active_clients), () => ''],
+    ['mailboxes_sold', 'Mailboxes sold', 'bar', false, (m) => count(m.mailboxes_sold), (m) => `${money(m.sold_value)}/month · ${plural(m.new_batches, 'batch').replace('batchs', 'batches')}`],
+    ['payments', 'Payments received', 'bar', true, (m) => money(m.payments), (m) => plural(m.payment_count, 'payment')],
+    ['mailboxes', 'Active mailboxes', 'line', false, (m) => count(m.mailboxes), (m) => `${count(m.mailboxes_cancelled)} cancelled`],
+    ['mrr', 'Monthly recurring revenue', 'line', true, (m) => money(m.mrr), (m) => `${plural(m.active_clients, 'active client')}`],
     ['new_clients', 'New clients', 'bar', false, (m) => count(m.new_clients), () => ''],
-    ['mailboxes', 'Active mailboxes', 'line', false, (m) => count(m.mailboxes), () => ''],
-    ['new_batches', 'New batches', 'bar', false, (m) => count(m.new_batches), (m) => `${count(m.cancellations)} cancelled`],
+    ['invoiced', 'Invoiced', 'bar', true, (m) => money(m.invoiced), () => ''],
   ];
-  const maxType = Math.max(...byType.map((t) => Number(t.mrr)), 0) || 1;
+  const maxSold = Math.max(...byType.map((t) => Number(t.sold)), 0) || 1;
+  const p = analyticsPeriod;
+  const [pf, pt] = presetRange(p.preset, today);
 
   shell(ADMIN_TABS, '#/admin/analytics', `
-    <div class="page-head"><div><h1>Analytics</h1><div class="muted small">${thisName} so far (1–${day}) compared with ${lastName}</div></div>
-      <div class="seg" role="group" aria-label="Chart range">${[6, 12].map((n) => `<button type="button" data-range="${n}" class="${n === analyticsRange ? 'on' : ''}">${n} months</button>`).join('')}</div></div>
+    <div class="page-head"><div><h1>Analytics</h1><div class="muted small"><strong>${rangeText(from, to)}</strong> compared with ${rangeText(prevFrom, prevTo)}</div></div></div>
     <div class="stack">
+      <form class="card an-filter" id="an-filter">
+        <div class="field"><label for="an-preset">Period</label><select id="an-preset" name="preset">${PRESETS.map(([v, l]) => `<option value="${v}" ${v === p.preset ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="field an-month" ${p.preset === 'month' ? '' : 'hidden'}><label for="an-month">Month</label><input id="an-month" name="month" type="month" max="${today.slice(0, 7)}" value="${esc(p.month || today.slice(0, 7))}"></div>
+        <div class="field an-custom" ${p.preset === 'custom' ? '' : 'hidden'}><label for="an-from">From</label><input id="an-from" name="from" type="date" max="${today}" value="${esc(p.preset === 'custom' ? pf : from)}"></div>
+        <div class="field an-custom" ${p.preset === 'custom' ? '' : 'hidden'}><label for="an-to">To</label><input id="an-to" name="to" type="date" max="${today}" value="${esc(p.preset === 'custom' ? pt : to)}"></div>
+        <button class="btn btn-primary an-custom" type="submit" ${p.preset === 'custom' ? '' : 'hidden'}>Apply</button>
+        <div class="muted small an-note">${bucket === 'day' ? 'Day by day' : 'Month by month'} below. Totals compare with the period just before; "active" figures are on the last day.</div>
+      </form>
       <div class="kpis">${kpis}</div>
-      <div class="note note-info"><span><strong>Outstanding:</strong> ${money(outstanding.unpaid)} across ${count(outstanding.unpaid_count)} unpaid invoice${outstanding.unpaid_count === 1 ? '' : 's'}${outstanding.overdue_count ? `, of which <strong>${money(outstanding.overdue)}</strong> (${count(outstanding.overdue_count)}) is past due` : ''}. <a href="#/admin/invoices">View invoices</a></span></div>
+      <div class="note note-info"><span><strong>Outstanding now:</strong> ${money(outstanding.unpaid)} across ${plural(outstanding.unpaid_count, 'unpaid invoice')}${outstanding.overdue_count ? `, of which <strong>${money(outstanding.overdue)}</strong> (${count(outstanding.overdue_count)}) is past due` : ''}. <a href="#/admin/invoices">View invoices</a></span></div>
       <div class="charts">${CHARTS.map(([key, title]) => `<div class="card chart-card"><div class="chart-head"><h2>${title}</h2><div class="chart-now" id="now-${key}"></div></div><div class="chart" id="chart-${key}"></div></div>`).join('')}</div>
       <div class="charts">
-        <div class="card"><div class="card-head"><div><h2>Recurring revenue by type</h2><div class="muted small">Active batches, per month</div></div></div>
-          <div class="card-pad">${byType.length ? byType.map((t) => `<div class="hbar"><div class="hbar-top"><span>${esc(t.label)}</span><span><strong>${money(t.mrr)}</strong> <span class="muted small">· ${count(t.quantity)}</span></span></div><div class="hbar-track"><div class="hbar-fill" style="width:${(Number(t.mrr) / maxType) * 100}%"></div></div></div>`).join('') : '<p class="muted">No active batches yet.</p>'}</div></div>
-        <div class="card"><div class="card-head"><div><h2>Top clients by payments</h2><div class="muted small">${thisName} vs ${lastName}</div></div></div>
-          ${topClients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th class="num">${monthName(cur.month, { month: 'short' })}</th><th class="num">${monthName(last.month, { month: 'short' })}</th></tr></thead><tbody>
-            ${topClients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td><td class="num">${money(c.this_month)}</td><td class="num">${money(c.last_month)}</td></tr>`).join('')}
-          </tbody></table></div>` : '<div class="card-pad muted">No payments in the last two months.</div>'}</div>
+        <div class="card"><div class="card-head"><div><h2>Mailboxes sold by type</h2><div class="muted small">${rangeText(from, to)} · active on ${prettyDay(to)}</div></div></div>
+          ${byType.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th class="num">Sold</th><th class="num">Before</th><th class="num">Active</th><th class="num">MRR</th></tr></thead><tbody>
+            ${byType.map((t) => `<tr><td><strong>${esc(t.label)}</strong><div class="hbar-track" style="margin-top:6px"><div class="hbar-fill" style="width:${(Number(t.sold) / maxSold) * 100}%"></div></div></td>
+              <td class="num"><strong>${count(t.sold)}</strong><div class="muted small">${money(t.sold_value)}/mo</div></td><td class="num">${count(t.prev_sold)}</td><td class="num">${count(t.active)}</td><td class="num">${money(t.mrr)}</td></tr>`).join('')}
+            <tr class="an-total"><td><strong>Total</strong></td><td class="num"><strong>${count(cur.mailboxes_sold)}</strong></td><td class="num">${count(prev.mailboxes_sold)}</td><td class="num">${count(cur.mailboxes)}</td><td class="num">${money(cur.mrr)}</td></tr>
+          </tbody></table></div>` : '<div class="card-pad muted">No mailboxes in this period.</div>'}</div>
+        <div class="card"><div class="card-head"><div><h2>Top clients by payments</h2><div class="muted small">${rangeText(from, to)} vs before</div></div></div>
+          ${topClients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th class="num">This period</th><th class="num">Before</th></tr></thead><tbody>
+            ${topClients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td><td class="num">${money(c.this_period)}</td><td class="num">${money(c.prev_period)}</td></tr>`).join('')}
+          </tbody></table></div>` : '<div class="card-pad muted">No payments in this period.</div>'}</div>
       </div>
-      <div class="card"><div class="card-head"><div><h2>Sales by team member</h2><div class="muted small">Payments received, by who made the sale (Sold by on the invoice or its batch)</div></div></div>
-        ${bySeller.length ? `<div class="table-wrap"><table><thead><tr><th>Sold by</th><th class="num">${monthName(cur.month, { month: 'long' })}</th><th class="num">${lastName}</th></tr></thead><tbody>
+      <div class="card"><div class="card-head"><div><h2>Sales by team member</h2><div class="muted small">Mailboxes sold and payments received, by Sold by on the client</div></div></div>
+        ${bySeller.length ? `<div class="table-wrap"><table><thead><tr><th>Sold by</th><th class="num">Mailboxes sold</th><th class="num">Before</th><th class="num">Payments</th><th class="num">Before</th></tr></thead><tbody>
           ${bySeller.map((r) => `<tr><td>${r.seller ? `<strong>${esc(r.seller)}</strong>` : '<span class="muted">Not set</span>'}</td>
-            <td class="num">${money(r.this_month)}<div class="muted small">${count(r.this_count)} payment${r.this_count === 1 ? '' : 's'}</div></td>
-            <td class="num">${money(r.last_month)}<div class="muted small">${count(r.last_count)} payment${r.last_count === 1 ? '' : 's'}</div></td></tr>`).join('')}
-        </tbody></table></div>` : '<div class="card-pad muted">No payments in the last two months.</div>'}</div>
-      <div class="card"><div class="card-head"><h2>Recent payments</h2></div>
+            <td class="num"><strong>${count(r.sold)}</strong></td><td class="num">${count(r.prev_sold)}</td>
+            <td class="num">${money(r.this_period)}<div class="muted small">${plural(r.this_count, 'payment')}</div></td>
+            <td class="num">${money(r.prev_period)}<div class="muted small">${plural(r.prev_count, 'payment')}</div></td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="card-pad muted">No sales in this period.</div>'}</div>
+      <div class="card"><div class="card-head"><div><h2>${bucket === 'day' ? 'Day by day' : 'Month by month'}</h2><div class="muted small">${rangeText(from, to)}</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>${bucket === 'day' ? 'Date' : 'Month'}</th><th class="num">Mailboxes sold</th><th class="num">New batches</th><th class="num">Payments</th><th class="num">Invoiced</th><th class="num">New clients</th><th class="num">Cancelled</th><th class="num">Active mailboxes</th><th class="num">MRR</th></tr></thead><tbody>
+          ${[...series].reverse().map((m) => `<tr${Number(m.mailboxes_sold) || Number(m.payments) ? '' : ' class="an-quiet"'}><td class="nowrap">${esc(rowLabel(m.key))}</td>
+            <td class="num"><strong>${count(m.mailboxes_sold)}</strong></td><td class="num">${count(m.new_batches)}</td><td class="num">${money(m.payments)}</td><td class="num">${money(m.invoiced)}</td>
+            <td class="num">${count(m.new_clients)}</td><td class="num">${count(m.cancellations)}${Number(m.mailboxes_cancelled) ? `<div class="muted small">${count(m.mailboxes_cancelled)} mb</div>` : ''}</td>
+            <td class="num">${count(m.mailboxes)}</td><td class="num">${money(m.mrr)}</td></tr>`).join('')}
+          <tr class="an-total"><td><strong>Total</strong></td><td class="num"><strong>${count(cur.mailboxes_sold)}</strong></td><td class="num">${count(cur.new_batches)}</td><td class="num">${money(cur.payments)}</td><td class="num">${money(cur.invoiced)}</td><td class="num">${count(cur.new_clients)}</td><td class="num">${count(cur.cancellations)}</td><td class="num">${count(cur.mailboxes)}</td><td class="num">${money(cur.mrr)}</td></tr>
+        </tbody></table></div></div>
+      <div class="card"><div class="card-head"><div><h2>Payments in this period</h2><div class="muted small">Latest 15</div></div></div>
         ${recentPayments.length ? `<div class="table-wrap"><table><thead><tr><th>Paid</th><th>Client</th><th>Invoice</th><th class="num">Amount</th></tr></thead><tbody>
-          ${recentPayments.map((p) => `<tr><td>${fmtDate(p.paid_at)}</td><td>${esc(p.company || p.email)}</td><td><a href="#/admin/invoice/${p.id}">#${p.id}</a> <span class="muted small">${esc(p.description)}</span></td><td class="num">${money(p.amount)}</td></tr>`).join('')}
-        </tbody></table></div>` : '<div class="card-pad muted">No payments recorded yet.</div>'}</div>
-      <div class="card"><div class="card-head"><div><h2>Month by month</h2><div class="muted small">${monthName(cur.month, { month: 'long' })} is to date</div></div></div>
-        <div class="table-wrap"><table><thead><tr><th>Month</th><th class="num">Payments</th><th class="num">Invoiced</th><th class="num">MRR</th><th class="num">Active clients</th><th class="num">New clients</th><th class="num">Mailboxes</th><th class="num">New batches</th><th class="num">Cancelled</th></tr></thead><tbody id="month-rows"></tbody></table></div></div>
+          ${recentPayments.map((r) => `<tr><td>${fmtDate(r.paid_at)}</td><td>${esc(r.company || r.email)}</td><td><a href="#/admin/invoice/${r.id}">#${r.id}</a> <span class="muted small">${esc(r.description)}</span></td><td class="num">${money(r.amount)}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="card-pad muted">No payments in this period.</div>'}</div>
     </div>`);
 
   const draw = () => {
-    const shown = months.slice(-analyticsRange);
-    CHARTS.forEach(([key, title, kind, isMoney, fmtV, extra]) => {
+    CHARTS.forEach(([key, , kind, isMoney, fmtV, extra]) => {
       const el = document.getElementById(`chart-${key}`);
       if (!el) return;
-      document.getElementById(`now-${key}`).innerHTML = `<span class="chart-value">${fmtV(cur)}</span> ${['payments', 'new_clients', 'new_batches'].includes(key) ? delta(cur[key], prev[key]) : delta(cur[key], last[key])}`;
-      drawChart(el, shown.map((m, i) => ({
-        label: monthName(m.month, { month: 'short' }),
+      document.getElementById(`now-${key}`).innerHTML = `<span class="chart-value">${fmtV(cur)}</span> ${delta(cur[key], prev[key], { upIsGood: true })}`;
+      drawChart(el, series.map((m) => ({
+        label: label(m.key),
         value: m[key],
-        tip: `<div class="tip-title">${monthName(m.month, { month: 'long', year: 'numeric' })}${i === shown.length - 1 ? ' (to date)' : ''}</div><div class="tip-value">${fmtV(m)}</div>${extra(m) ? `<div class="tip-sub">${extra(m)}</div>` : ''}`,
+        tip: `<div class="tip-title">${esc(longLabel(m.key))}</div><div class="tip-value">${fmtV(m)}</div>${extra(m) ? `<div class="tip-sub">${extra(m)}</div>` : ''}`,
       })), { kind, money: isMoney });
     });
-    document.getElementById('month-rows').innerHTML = [...shown].reverse().map((m) => `<tr>
-      <td>${monthName(m.month)}</td><td class="num">${money(m.payments)}</td><td class="num">${money(m.invoiced)}</td><td class="num">${money(m.mrr)}</td>
-      <td class="num">${count(m.active_clients)}</td><td class="num">${count(m.new_clients)}</td><td class="num">${count(m.mailboxes)}</td>
-      <td class="num">${count(m.new_batches)}</td><td class="num">${count(m.cancellations)}</td></tr>`).join('');
   };
   draw();
-  document.querySelectorAll('.seg button').forEach((b) => {
-    b.onclick = () => {
-      analyticsRange = Number(b.dataset.range);
-      document.querySelectorAll('.seg button').forEach((x) => x.classList.toggle('on', x === b));
-      draw();
-    };
-  });
+
+  const form = document.getElementById('an-filter');
+  const reload = async () => {
+    try { renderAnalytics(await loadAnalytics()); } catch (ex) { toast(ex.message); }
+  };
+  form.preset.onchange = () => {
+    p.preset = form.preset.value;
+    form.querySelectorAll('.an-month').forEach((x) => { x.hidden = p.preset !== 'month'; });
+    form.querySelectorAll('.an-custom').forEach((x) => { x.hidden = p.preset !== 'custom'; });
+    if (p.preset === 'custom') { p.from = form.from.value; p.to = form.to.value; return; } // wait for Apply
+    if (p.preset === 'month') p.month = form.month.value;
+    reload();
+  };
+  form.month.onchange = () => { if (form.month.value) { p.month = form.month.value; reload(); } };
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    if (!form.from.value || !form.to.value) { toast('Choose both dates'); return; }
+    p.from = form.from.value; p.to = form.to.value;
+    reload();
+  };
   let t;
   window.onresize = () => {
     clearTimeout(t);

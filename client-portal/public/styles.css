@@ -571,3 +571,14 @@ tr.vpn-row td { background: #fef2f2; }
 .ug-sample table td, .ug-sample table th { font-size: 12px; padding: 6px 10px; white-space: nowrap; }
 .inline-file { width: auto; display: inline-block; padding: 0; border: 0; font-size: 12px; }
 @media (max-width: 640px) { .upload-guide summary span.muted { display: none; } .ug-cols > div { flex-direction: column; gap: 2px; } }
+
+/* Analytics period filter */
+.an-filter { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 14px 20px; }
+.an-filter .field { margin: 0; min-width: 160px; }
+.an-filter .an-note { flex: 1 1 260px; text-align: right; padding-bottom: 8px; }
+.an-filter [hidden] { display: none !important; }
+.kpi-hero { border-color: var(--brand-500, #4f46e5); box-shadow: 0 0 0 1px var(--brand-500, #4f46e5) inset; }
+tr.an-total td { border-top: 2px solid var(--border); background: var(--surface-2, #f8fafc); }
+tr.an-quiet td { color: var(--muted); }
+@media (max-width: 640px) { .an-filter .an-note { text-align: left; } .an-filter .field { flex: 1 1 140px; } }
+.nowrap { white-space: nowrap; }
