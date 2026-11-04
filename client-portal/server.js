@@ -1912,7 +1912,7 @@ async function invoiceWithItems(id, userId) {
   const reseller = userId ? null : await brands.resellerOf(inv.user_id);
   return {
     ...inv, items, pricing, paymentNote: wl ? wl.paymentNote : billing.PAYMENT_NOTE,
-    brand: wl ? { name: wl.name, logo: wl.logoPath } : null,
+    brand: wl ? { name: wl.name, logo: wl.logoPath, mixxbee: wl.mixxbee } : null,
     resellerName: reseller ? reseller.name : null,
     payLinks: inv.status === 'unpaid' ? billing.payButtons(inv, wl ? wl.paymentNote : '') : [],
   };
@@ -2143,7 +2143,7 @@ async function emailInvoice(req, invoiceId, opts = {}) {
     <div style="clear:both"></div>
     ${doms.domains.length ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Domains${doms.mailboxes ? ` · ${doms.mailboxes} mailbox${doms.mailboxes === 1 ? '' : 'es'}` : ''}</div>${esc(doms.domains.slice(0, 15).join(', '))}${doms.domains.length > 15 ? ` and ${doms.domains.length - 15} more` : ''}</div>` : ''}
     ${inv.notes ? `<div style="margin:0 0 16px;padding:14px 16px;background:${C.bg};border:1px solid ${C.line};border-radius:10px;font-size:14px;line-height:1.6;color:${C.text}"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${C.muted};margin-bottom:6px">Notes</div>${emailTemplate.linkify(esc(inv.notes)).replace(/\n/g, '<br>')}</div>` : ''}
-    ${brand ? '' : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px"><tr>
+    ${brand && !brand.mixxbee ? '' : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px"><tr>
       <td style="font-size:12px;color:${C.faint};padding-right:8px;vertical-align:middle">Payments powered by</td>
       <td style="vertical-align:middle">${APP_URL ? `<img src="${esc(APP_URL)}/mixxbee-logo.png" alt="Mixxbee" width="60" style="display:block;width:60px;height:auto;border:0">` : '<strong>Mixxbee</strong>'}</td>
     </tr></table>`}`;
@@ -2768,6 +2768,7 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
     smtp_port: b.smtp_port === undefined ? r.smtp_port : Number(b.smtp_port) || 465,
     smtp_user: b.smtp_user === undefined ? r.smtp_user : str(b.smtp_user, 200),
     white_label: b.white_label === undefined ? r.white_label : Boolean(b.white_label),
+    use_mixxbee: b.use_mixxbee === undefined ? r.use_mixxbee : Boolean(b.use_mixxbee),
     active: b.active === undefined ? r.active : Boolean(b.active),
     monthly_commitment: b.monthly_commitment === undefined ? r.monthly_commitment
       : (b.monthly_commitment === '' || b.monthly_commitment === null ? null : Math.max(0, Math.round(Number(b.monthly_commitment)) || 0)),
@@ -2781,9 +2782,9 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
   await query(
     `UPDATE resellers SET brand_name = $1, website = $2, support_email = $3, payment_note = $4, sender_name = $5,
        sender_email = $6, reply_to = $7, smtp_host = $8, smtp_port = $9, smtp_user = $10, smtp_pass = $11,
-       white_label = $12, active = $13, monthly_commitment = $15 WHERE user_id = $14`,
+       white_label = $12, active = $13, monthly_commitment = $15, use_mixxbee = $16 WHERE user_id = $14`,
     [v.brand_name, v.website, v.support_email, v.payment_note, v.sender_name, v.sender_email, v.reply_to,
-     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id, v.monthly_commitment]);
+     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id, v.monthly_commitment, v.use_mixxbee]);
   const changes = Object.entries(v).filter(([k, val]) => String(val) !== String(r[k]))
     .map(([k, val]) => ({ field: k.replace(/_/g, ' '), from: String(r[k] ?? ''), to: String(val) }));
   if (pass !== r.smtp_pass) changes.push({ field: 'smtp password', from: '', to: pass ? '(changed)' : '(removed)' });
@@ -3000,7 +3001,7 @@ resellerRouter.use(requireAgreement);
 resellerRouter.get('/settings', asyncRoute(async (req, res) => {
   const r = await findReseller(req.user.id);
   res.json({
-    brand_name: r.brand_name, white_label: r.white_label, logo: r.logo_type ? `/brand/${r.id}/logo?v=${r.logo_version}` : null,
+    brand_name: r.brand_name, white_label: r.white_label, use_mixxbee: r.use_mixxbee, logo: r.logo_type ? `/brand/${r.id}/logo?v=${r.logo_version}` : null,
     website: r.website, support_email: r.support_email, payment_note: r.payment_note, sender_name: r.sender_name,
     reply_to: r.reply_to, sender_email: r.sender_email || (r.smtp_host ? r.smtp_user : ''), mailEnabled: mailEnabled(),
   });

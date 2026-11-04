@@ -437,3 +437,7 @@ CREATE TABLE IF NOT EXISTS connect_jobs (
   finished_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS connect_jobs_queue ON connect_jobs (status, id);
+
+-- White-label reseller whose clients pay through Mithmill's processor
+-- (Mixxbee LLC): their brand and logo, with "Payments powered by Mixxbee".
+ALTER TABLE resellers ADD COLUMN IF NOT EXISTS use_mixxbee BOOLEAN NOT NULL DEFAULT false;

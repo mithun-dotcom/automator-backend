@@ -111,7 +111,7 @@ function render({ heading, text, cta, note, preheader, reason, html, after, butt
         ${pay ? payButtons(pay) : ''}
         ${after ? textToHtml(after) : ''}
         ${cta ? button(cta, Boolean(pay)) : ''}
-        ${note ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 4px"><tr><td style="background:${C.goldBg};border:1px solid ${C.goldLine};border-radius:10px;padding:14px 16px;font-size:13px;line-height:1.55;color:${C.text}"><strong style="color:${C.gold}">${wl ? 'Payment details:' : 'Payment notice:'}</strong> ${wl ? `<br>${linkify(esc(note)).replace(/\n/g, '<br>')}` : esc(note)}</td></tr></table>` : ''}
+        ${note ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 4px"><tr><td style="background:${C.goldBg};border:1px solid ${C.goldLine};border-radius:10px;padding:14px 16px;font-size:13px;line-height:1.55;color:${C.text}"><strong style="color:${C.gold}">${wl && !wl.mixxbee ? 'Payment details:' : 'Payment notice:'}</strong> ${wl && !wl.mixxbee ? `<br>${linkify(esc(note)).replace(/\n/g, '<br>')}` : esc(note)}</td></tr></table>` : ''}
         <p style="margin:24px 0 0;line-height:1.6;color:${C.text}">Best regards,<br><strong style="color:${C.ink}">The ${esc(name)} team</strong></p>
       </td></tr>
       <tr><td align="center" style="padding:24px 12px 8px;font-size:12px;line-height:1.7;color:${C.faint}">
@@ -119,7 +119,8 @@ function render({ heading, text, cta, note, preheader, reason, html, after, butt
         ${wl ? '' : '<div>From Cold to Gold: Email Strategies That Shine</div>'}
         ${links ? `<div style="margin-top:8px">${links}</div>` : ''}
         ${support ? `<div style="margin-top:8px">Questions? <a href="mailto:${esc(support)}" style="color:${C.muted}">${esc(support)}</a></div>` : ''}
-        ${wl ? '' : '<div style="margin-top:8px">Payments are collected by Mixxbee LLC, MithMill\'s billing company.</div>'}
+        ${!wl ? '<div style="margin-top:8px">Payments are collected by Mixxbee LLC, MithMill\'s billing company.</div>'
+          : wl.mixxbee ? `<div style="margin-top:8px">Payments are processed by Mixxbee LLC on behalf of ${esc(name)}.</div>` : ''}
         <div style="margin-top:8px">${esc(reason || `You are receiving this email because you have an account with ${name}.`)}</div>
         <div style="margin-top:8px">© ${new Date().getFullYear()} ${esc(name)}. All rights reserved.</div>
       </td></tr>

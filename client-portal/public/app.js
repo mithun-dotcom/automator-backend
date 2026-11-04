@@ -1910,7 +1910,7 @@ function renderInvoiceView(inv, isAdmin) {
       </header>
       <section class="inv-meta">
         <div><div class="inv-label">Billed to</div><strong>${esc(inv.company || inv.name)}</strong>${inv.company && inv.name ? `<div>${esc(inv.name)}</div>` : ''}<div>${esc(inv.email)}</div></div>
-        <div><div class="inv-label">Payable to</div>${inv.brand ? `<strong>${esc(inv.brand.name)}</strong>` : '<strong>Mixxbee LLC</strong><div>on behalf of Mithmill</div>'}</div>
+        <div><div class="inv-label">Payable to</div>${inv.brand && !inv.brand.mixxbee ? `<strong>${esc(inv.brand.name)}</strong>` : `<strong>Mixxbee LLC</strong><div>on behalf of ${esc(inv.brand ? inv.brand.name : 'Mithmill')}</div>`}</div>
         <div class="inv-dates">
           <div><span class="inv-label">Issue date</span><span>${fmtDate(inv.issue_date || inv.created_at)}</span></div>
           <div><span class="inv-label">Due date</span><span>${fmtDate(inv.due_date)}</span></div>
@@ -1938,9 +1938,9 @@ function renderInvoiceView(inv, isAdmin) {
       ${inv.payLinks && inv.payLinks.length ? `<section class="inv-pay no-print">${inv.payLinks.map((l) => `${l.hint ? `<div class="pay-hint">${esc(l.hint)}</div>` : ''}<a class="btn btn-primary btn-pay" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}
         <div class="muted small">After paying, send us the payment screenshot by replying to the invoice email or in your WhatsApp or Slack group with us.</div></section>` : ''}
       ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${linkify(esc(inv.notes))}</div></section>` : ''}
-      ${inv.brand ? (inv.paymentNote ? `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment details:</strong><div>${linkify(esc(inv.paymentNote)).replace(/\n/g, '<br>')}</div></div></div>` : '')
+      ${inv.brand && !inv.brand.mixxbee ? (inv.paymentNote ? `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment details:</strong><div>${linkify(esc(inv.paymentNote)).replace(/\n/g, '<br>')}</div></div></div>` : '')
         : `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>`}
-      ${inv.brand ? '' : `<div class="inv-powered"><span>Payments powered by</span><img src="mixxbee-logo.png" alt="Mixxbee"></div>`}
+      ${inv.brand && !inv.brand.mixxbee ? '' : `<div class="inv-powered"><span>Payments powered by</span><img src="mixxbee-logo.png" alt="Mixxbee"></div>`}
     </article>`);
 
   document.getElementById('print').onclick = () => window.print();
@@ -2567,8 +2567,10 @@ function resellerSettings(st) {
         </div>
         ${st.sender_email ? `<p class="muted small" style="margin:-4px 0 14px">Emails are sent from <strong>${esc(st.sender_email)}</strong>.</p>` : ''}
         <div class="field"><label>Support email (in the email footer)</label><input name="support_email" type="email" value="${esc(st.support_email)}"></div>
-        <div class="field"><label>Payment details</label><textarea name="payment_note" style="min-height:110px" placeholder="e.g. bank details, or a payment link such as https://buy.stripe.com/...">${esc(st.payment_note)}</textarea>
-          <div class="hint">Shown on every invoice and reminder email. Per-invoice payment links go in the invoice's notes, where they become Pay buttons.</div></div>
+        ${st.use_mixxbee ? `<div class="note note-info" style="margin:0 0 14px"><span>Your clients pay through <strong>Mixxbee LLC</strong> (Mithmill's payment processor). Invoices and emails show your brand with "Payments powered by Mixxbee". Payment links go in each invoice's notes, where they become Pay buttons.</span></div>
+          <input type="hidden" name="payment_note" value="${esc(st.payment_note)}">`
+        : `<div class="field"><label>Payment details</label><textarea name="payment_note" style="min-height:110px" placeholder="e.g. bank details, or a payment link such as https://buy.stripe.com/...">${esc(st.payment_note)}</textarea>
+          <div class="hint">Shown on every invoice and reminder email. Per-invoice payment links go in the invoice's notes, where they become Pay buttons.</div></div>`}
         <button class="btn btn-primary" type="submit">Save</button>
         <div class="error"></div>
       </form>` : ''}
@@ -2664,6 +2666,10 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
           <div><h2>White-label</h2><div class="muted small" style="margin-top:4px">On: their clients' emails and invoices use the branding below. Off: they go out under MithMill's brand.</div></div>
           <label class="switch switch-lg"><input type="checkbox" name="white_label" ${r.white_label ? 'checked' : ''}><span></span></label>
         </div>
+        <div class="row mixxbee-row" style="justify-content:space-between;align-items:flex-start;margin:-4px 0 16px;padding:12px 14px;border:1px solid var(--border);border-radius:10px">
+          <div><strong>Use our payment processing (Mixxbee)</strong><div class="muted small" style="margin-top:4px">On: their clients pay through Mixxbee LLC, like Mithmill's clients. Invoices and emails keep their brand and logo, and show "Payments powered by Mixxbee" and "Mixxbee LLC on behalf of ${esc(r.brand_name || 'their brand')}". Their own payment details below aren't used. Payment links go in each invoice's notes, as for your own invoices.</div></div>
+          <label class="switch switch-lg"><input type="checkbox" name="use_mixxbee" ${r.use_mixxbee ? 'checked' : ''}><span></span></label>
+        </div>
         <div class="grid-2">
           <div class="field"><label>Brand name</label><input name="brand_name" required value="${esc(r.brand_name)}"></div>
           <div class="field"><label>Website</label><input name="website" value="${esc(r.website)}" placeholder="https://"></div>
@@ -2686,7 +2692,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
           <div class="field"><label>Support email (email footer)</label><input name="support_email" type="email" value="${esc(r.support_email)}"></div>
         </div>
         <div class="field"><label>Payment details</label><textarea name="payment_note" style="min-height:90px" placeholder="Their payment method: bank details, or a payment link">${esc(r.payment_note)}</textarea>
-          <div class="hint">Replaces the Mixxbee LLC notice on their clients' invoices and emails while white-label is on. The reseller can also edit this, the sender name and the reply-to.</div></div>
+          <div class="hint">Replaces the Mixxbee LLC notice on their clients' invoices and emails while white-label is on (not used when "Use our payment processing" is on). The reseller can also edit this, the sender name and the reply-to.</div></div>
         <details class="smtp-box" ${r.smtp_host ? 'open' : ''}><summary><strong>Send from their own email address</strong> <span class="muted small">(optional: their mail server)</span></summary>
           <p class="muted small">Sends through their own mail account instead of MithMill's, so no Gmail "Send mail as" step is needed. For Google Workspace: smtp.gmail.com, port 465, the sending email as the username, and an app password.</p>
           <div class="grid-2">
@@ -2765,7 +2771,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
   const f = document.getElementById('rs-brand');
   onSubmit(f, async (d) => {
     await api('PUT', `/api/admin/resellers/${r.id}`, {
-      ...d, white_label: f.white_label.checked, active: f.active.checked, smtp_port: Number(d.smtp_port) || 465,
+      ...d, white_label: f.white_label.checked, use_mixxbee: f.use_mixxbee.checked, active: f.active.checked, smtp_port: Number(d.smtp_port) || 465,
     });
     toast('Reseller saved');
     route();

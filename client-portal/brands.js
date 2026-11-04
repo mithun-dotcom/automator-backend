@@ -24,7 +24,11 @@ function toBrand(r) {
     logoUrl: r.logo_type && APP_URL ? `${APP_URL}/brand/${r.user_id}/logo?v=${r.logo_version}` : null,
     website: r.website || '',
     supportEmail: r.support_email || r.reply_to || '',
-    paymentNote: r.payment_note || '',
+    // Paying through Mixxbee LLC (Mithmill's processor): our notice instead of their payment details.
+    mixxbee: Boolean(r.use_mixxbee),
+    paymentNote: r.use_mixxbee
+      ? `Payments are processed by Mixxbee LLC on behalf of ${name}. "Mixxbee LLC" may appear on your card or bank statement.`
+      : r.payment_note || '',
     senderName: r.sender_name || name,
     senderEmail: r.sender_email || '',
     replyTo: r.reply_to || r.support_email || '',
