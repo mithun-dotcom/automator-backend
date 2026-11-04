@@ -2531,9 +2531,14 @@ function renderAnalytics(data) {
 // billed by email.
 function resellerClients() {
   const { clients, whiteLabel } = state.admin;
+  const loginLink = `${location.origin}/${whiteLabel ? `?b=${state.me.id}` : ''}#/login`;
   shell(ADMIN_TABS, '#/admin/clients', `
     <div class="page-head"><div><h1>Clients</h1><p class="muted">Your clients get their invoices and renewal reminders by email${whiteLabel ? ', under your brand' : ''}. Invite them to the client portal to see their mailboxes, domains and invoices${whiteLabel ? ' (with your logo and name)' : ''}.</p></div></div>
     <div class="stack">
+      <div class="card card-pad login-link-card">
+        <div><h2>Your clients' login link</h2><div class="muted small" style="margin-top:4px">${whiteLabel ? 'Opens the client portal with your logo and name. It\'s also in every invite email.' : 'The client portal login (under the MithMill brand while white-label is off).'}</div></div>
+        <div class="row" style="flex-wrap:nowrap;margin-top:10px"><input readonly class="mono" value="${esc(loginLink)}" id="rc-login-link"><button class="btn" type="button" id="rc-copy-link">Copy</button></div>
+      </div>
       <form class="card card-pad" id="add-client-form">
         <h2 style="margin-bottom:14px">Add a client</h2>
         <div class="grid-2">
@@ -2561,6 +2566,9 @@ function resellerClients() {
 
   wireFilterBar('rclients');
   wireClientInvites();
+  document.getElementById('rc-copy-link').onclick = async () => {
+    try { await navigator.clipboard.writeText(loginLink); toast('Login link copied'); } catch { document.getElementById('rc-login-link').select(); }
+  };
   onSubmit(document.getElementById('add-client-form'), async (d) => {
     const r = await api('POST', `${API()}/clients`, d);
     toast(`${d.email} added. Now add their batches.`);
@@ -2785,7 +2793,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
       </div>
 
       <div class="card">
-        <div class="card-head"><div><h2>Their clients</h2><div class="muted small">The reseller doesn't see that you can see these.</div></div><span class="muted small">${clients.length}</span></div>
+        <div class="card-head"><div><h2>Their clients</h2><div class="muted small">The reseller doesn't see that you can see these.${r.white_label || r.use_mixxbee ? ` Clients' login link: <span class="mono">${esc(location.origin)}/?b=${r.id}#/login</span>` : ''}</div></div><span class="muted small">${clients.length}</span></div>
         ${clients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Portal</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th class="num">Batches</th><th>Added</th></tr></thead><tbody>
           ${clients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}<a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div></td>
             <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}
