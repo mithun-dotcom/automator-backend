@@ -48,12 +48,31 @@ async function call(cfg, method, path, body) {
   return data.result;
 }
 
-// Checks the token works and can see the account. -> { account: name }
+// Checks the token is valid and can manage zones in the account: what adding
+// clients' domains needs. Works with user tokens (My Profile → API Tokens) and
+// account tokens (account → API Tokens). -> { account: name or ID }
 async function test(cfg) {
   const c = cfg || await config();
-  await call(c, 'GET', '/user/tokens/verify');
-  const account = await call(c, 'GET', `/accounts/${encodeURIComponent(c.accountId)}`);
-  return { account: account.name };
+  if (!c.accountId || !c.token) throw new CfError('Enter the Account ID and API token');
+  // 1. Is the token valid at all?
+  let valid = false;
+  for (const path of ['/user/tokens/verify', `/accounts/${encodeURIComponent(c.accountId)}/tokens/verify`]) {
+    try { await call(c, 'GET', path); valid = true; break; } catch { /* try the other kind of token */ }
+  }
+  if (!valid) throw new CfError('Cloudflare says this API token isn\'t valid (check it was copied in full, and that it isn\'t expired or restricted to other IP addresses)');
+  // 2. Can it see zones in this account? (Needs Zone permissions on this account.)
+  let zones;
+  try {
+    zones = await call(c, 'GET', `/zones?account.id=${encodeURIComponent(c.accountId)}&per_page=5`);
+  } catch (err) {
+    throw new CfError(`The token is valid, but it can't list zones in account ${c.accountId} (${err.message.replace(/^Cloudflare: /, '')}). Check the Account ID, and that the token has Zone → Zone → Edit and Zone → DNS → Edit with "All zones from" this account`);
+  }
+  // The account's name, when the token may read it (optional).
+  let name = (zones && zones[0] && zones[0].account && zones[0].account.name) || '';
+  if (!name) {
+    try { name = (await call(c, 'GET', `/accounts/${encodeURIComponent(c.accountId)}`)).name; } catch { name = ''; }
+  }
+  return { account: name || `account ${c.accountId.slice(0, 6)}…`, zones: (zones || []).length };
 }
 
 const zoneInfo = (z) => ({ id: z.id, status: z.status, nameservers: z.name_servers || [] });
