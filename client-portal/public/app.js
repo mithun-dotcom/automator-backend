@@ -2667,7 +2667,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
           <label class="switch switch-lg"><input type="checkbox" name="white_label" ${r.white_label ? 'checked' : ''}><span></span></label>
         </div>
         <div class="row mixxbee-row" style="justify-content:space-between;align-items:flex-start;margin:-4px 0 16px;padding:12px 14px;border:1px solid var(--border);border-radius:10px">
-          <div><strong>Use our payment processing (Mixxbee)</strong><div class="muted small" style="margin-top:4px">On: their clients pay through Mixxbee LLC, like Mithmill's clients. Invoices and emails keep their brand and logo, and show "Payments powered by Mixxbee" and "Mixxbee LLC on behalf of ${esc(r.brand_name || 'their brand')}". Their own payment details below aren't used. Payment links go in each invoice's notes, as for your own invoices.</div></div>
+          <div><strong>Use our payment processing (Mixxbee)</strong><div class="muted small" style="margin-top:4px">On: their clients pay through Mixxbee LLC, like Mithmill's clients (this also turns White-label on). Invoices and emails keep their brand and logo, and show "Payments powered by Mixxbee" and "Mixxbee LLC on behalf of ${esc(r.brand_name || 'their brand')}". Their own payment details below aren't used. Payment links go in each invoice's notes, as for your own invoices.</div></div>
           <label class="switch switch-lg"><input type="checkbox" name="use_mixxbee" ${r.use_mixxbee ? 'checked' : ''}><span></span></label>
         </div>
         <div class="grid-2">
@@ -2769,6 +2769,9 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
     </div>`);
 
   const f = document.getElementById('rs-brand');
+  // Mixxbee processing is white-label paid through us: switching it on switches white-label on too.
+  f.use_mixxbee.addEventListener('change', () => { if (f.use_mixxbee.checked) f.white_label.checked = true; });
+  f.white_label.addEventListener('change', () => { if (!f.white_label.checked) f.use_mixxbee.checked = false; });
   onSubmit(f, async (d) => {
     await api('PUT', `/api/admin/resellers/${r.id}`, {
       ...d, white_label: f.white_label.checked, use_mixxbee: f.use_mixxbee.checked, active: f.active.checked, smtp_port: Number(d.smtp_port) || 465,

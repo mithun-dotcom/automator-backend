@@ -637,7 +637,7 @@ shared.get('/overview', asyncRoute(async (req, res) => {
     invoices: invoices.rows, pricing: pricing.rows, clientPricing: clientPricing.rows, settings: reseller ? {} : await getSettings(),
     sellers: reseller ? [] : (await query("SELECT COALESCE(NULLIF(name, ''), email) AS name FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows.map((r) => r.name),
     mailEnabled: mailEnabled(), today: billing.today(),
-    whiteLabel: reseller ? (await query('SELECT white_label FROM resellers WHERE user_id = $1', [req.user.id])).rows[0].white_label : undefined,
+    whiteLabel: reseller ? (await query('SELECT white_label OR use_mixxbee AS wl FROM resellers WHERE user_id = $1', [req.user.id])).rows[0].wl : undefined,
   });
 }));
 
@@ -2774,6 +2774,8 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
       : (b.monthly_commitment === '' || b.monthly_commitment === null ? null : Math.max(0, Math.round(Number(b.monthly_commitment)) || 0)),
   };
   if (!v.brand_name) throw new HttpError(400, 'Give the reseller a brand name');
+  // Paying through Mixxbee is white-label with our processor: it needs their branding on.
+  if (v.use_mixxbee) v.white_label = true;
   if (v.smtp_port < 1 || v.smtp_port > 65535) throw new HttpError(400, 'SMTP port must be a number like 465 or 587');
   // A new password replaces the stored one; clearing the server removes it.
   let pass = r.smtp_pass;
@@ -3001,7 +3003,7 @@ resellerRouter.use(requireAgreement);
 resellerRouter.get('/settings', asyncRoute(async (req, res) => {
   const r = await findReseller(req.user.id);
   res.json({
-    brand_name: r.brand_name, white_label: r.white_label, use_mixxbee: r.use_mixxbee, logo: r.logo_type ? `/brand/${r.id}/logo?v=${r.logo_version}` : null,
+    brand_name: r.brand_name, white_label: r.white_label || r.use_mixxbee, use_mixxbee: r.use_mixxbee, logo: r.logo_type ? `/brand/${r.id}/logo?v=${r.logo_version}` : null,
     website: r.website, support_email: r.support_email, payment_note: r.payment_note, sender_name: r.sender_name,
     reply_to: r.reply_to, sender_email: r.sender_email || (r.smtp_host ? r.smtp_user : ''), mailEnabled: mailEnabled(),
   });
@@ -3012,7 +3014,7 @@ resellerRouter.get('/settings', asyncRoute(async (req, res) => {
 // logo and mail server are set by MithMill.
 resellerRouter.put('/settings', asyncRoute(async (req, res) => {
   const r = await findReseller(req.user.id);
-  if (!r.white_label) throw new HttpError(403, 'White-label is not turned on for your account. Please contact MithMill.');
+  if (!r.white_label && !r.use_mixxbee) throw new HttpError(403, 'White-label is not turned on for your account. Please contact MithMill.');
   const b = req.body;
   const v = {
     sender_name: str(b.sender_name, 120),

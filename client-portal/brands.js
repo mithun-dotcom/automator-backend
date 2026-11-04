@@ -38,10 +38,11 @@ function toBrand(r) {
 
 const SELECT = `SELECT r.*, u.company FROM resellers r JOIN users u ON u.id = r.user_id`;
 
-// The branding a client's emails use: their reseller's when white-label is on.
+// The branding a client's emails use: their reseller's when white-label (or
+// Mixxbee processing, which is white-label paid through us) is on.
 async function forClient(userId) {
   const { rows: [r] } = await query(
-    `${SELECT} WHERE r.white_label AND r.user_id = (SELECT reseller_id FROM users WHERE id = $1)`, [userId]);
+    `${SELECT} WHERE (r.white_label OR r.use_mixxbee) AND r.user_id = (SELECT reseller_id FROM users WHERE id = $1)`, [userId]);
   return toBrand(r);
 }
 
