@@ -32,6 +32,31 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Sequencers: connect mailboxes in one click
+
+Clients connect their sequencer on **Mailboxes → Sequencers**, then click **Connect all mailboxes** (or tick some and **Connect selected**).
+
+**How it works.** A background queue (`connector.js`) adds each Google Workspace or Microsoft 365 mailbox through the sequencer's own Google / Microsoft sign-in (OAuth), with no app passwords:
+- A headless Chromium on our server (`signin.js`) signs in as the mailbox and approves access. The client never sees a login screen.
+- It handles Google's "Welcome to your new account" screen, consent and "unverified app" screens, and Microsoft's "Stay signed in?" and consent screens.
+- Mailboxes are done one at a time, about a minute each at most. The page refreshes itself while they run.
+
+**Sequencers**
+- **Instantly** (API key, "all:all" scope): uses Instantly's OAuth-session API (`/api/v2/oauth/{google|microsoft}/init`, then `/api/v2/oauth/session/status/{id}` to confirm).
+- **Smartlead (beta)** (API key plus Smartlead login, no 2FA): Smartlead has no API for this, so the browser logs in to Smartlead and uses its connect button. The API confirms the mailbox arrived.
+- **PlusVibe (beta)** (API key plus login email): uses PlusVibe's partner OAuth-link API.
+- **Other:** a CSV download (email, password, provider, IMAP / SMTP) for the sequencer's bulk import.
+
+**What mailboxes need.** The password uploaded on Mailboxes, and a Google or Microsoft mailbox type (or a domain whose MX shows it). They also need no extra sign-in checks:
+- Google: no 2-Step Verification and no forced password change on first sign-in.
+- Microsoft: no MFA or Security defaults prompt, and the sequencer's app allowed by the tenant.
+
+When one of these blocks a sign-in, the mailbox shows **Failed** with that reason and a **Retry** button.
+
+**For the owner.** The client's Mailboxes page in the admin panel shows each mailbox's status per sequencer and a **Sequencer connection log**: the step reached, the error, and for failures the URL, headings, buttons and text on screen.
+
+**Server.** Chromium uses about 150–300 MB while a mailbox connects. If the 512 MB plan restarts during connections, move the Render service to 2 GB. Set `CONNECT_WORKER=off` to pause the queue.
+
 ## Cloudflare and client domain hosts
 
 **Owner setup** (Settings → Cloudflare)

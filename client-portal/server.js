@@ -13,6 +13,8 @@ const mailboxes = require('./mailboxes');
 const dnscheck = require('./dnscheck');
 const cloudflare = require('./cloudflare');
 const registrars = require('./registrars');
+const sequencers = require('./sequencers');
+const connector = require('./connector');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
@@ -998,7 +1000,9 @@ shared.delete('/clients/:id', audited('deleted', 'user', byParam, async (req, re
 
 // ---- Mailboxes: the logins delivered to a client, uploaded as a CSV.
 
-const MAILBOX_LIST = `SELECT m.id, m.email, m.is_admin, m.order_id, o.batch_name, m.inbox_type, p.label AS inbox_label, m.created_on, m.created_at, m.updated_at
+const MAILBOX_LIST = `SELECT m.id, m.email, m.is_admin, m.order_id, o.batch_name, m.inbox_type, p.label AS inbox_label, m.created_on, m.created_at, m.updated_at,
+    (SELECT COALESCE(json_agg(json_build_object('sequencer_id', c.sequencer_id, 'label', s.label, 'provider', s.provider, 'status', c.status, 'error', c.error, 'updated_at', c.updated_at) ORDER BY s.id), '[]')
+       FROM mailbox_connections c JOIN sequencer_accounts s ON s.id = c.sequencer_id WHERE c.mailbox_id = m.id) AS connections
   FROM mailboxes m LEFT JOIN orders o ON o.id = m.order_id LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
   WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`;
 const MAILBOX_ROWS = `SELECT m.*, p.label AS inbox_label FROM mailboxes m LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
@@ -1602,6 +1606,79 @@ app.delete('/api/domains/:id', auth, clientOnly, asyncRoute(async (req, res) => 
   if (!d.added_by_client) throw new HttpError(403, 'This domain was added by us. Ask us if it should be removed.');
   await query('DELETE FROM domains WHERE id = $1', [d.id]);
   res.json({ ok: true });
+}));
+
+// ---- Sequencers: the client connects Instantly / Smartlead / … and their
+// mailboxes are added to it in the background (connector.js).
+const SEQ_LIST = `SELECT s.id, s.provider, s.label, s.hint, s.last_ok_at, s.created_at,
+    (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status = 'connected')::int AS connected,
+    (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status IN ('queued', 'running'))::int AS pending,
+    (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status = 'failed')::int AS failed
+  FROM sequencer_accounts s WHERE s.user_id = $1 ORDER BY s.created_at`;
+
+app.get('/api/sequencers', auth, clientOnly, asyncRoute(async (req, res) => {
+  const { rows } = await query(SEQ_LIST, [req.user.id]);
+  res.json({ sequencers: rows, providers: sequencers.publicList() });
+}));
+
+app.post('/api/sequencers', auth, clientOnly, asyncRoute(async (req, res) => {
+  const provider = str(req.body.provider, 30);
+  let creds;
+  try {
+    creds = sequencers.cleanCreds(provider, req.body.creds);
+    await sequencers.PROVIDERS[provider].test(creds);
+  } catch (err) {
+    throw new HttpError(400, err instanceof sequencers.SeqError ? `${err.message}. Check and try again.` : err.message);
+  }
+  const p = sequencers.PROVIDERS[provider];
+  const secret = p.fields.find((f) => f.secret);
+  const label = str(req.body.label, 100) || (provider === 'other' ? creds.name : p.name.replace(/ \(beta\)$/, ''));
+  const { rows: [s] } = await query(
+    'INSERT INTO sequencer_accounts (user_id, provider, label, creds, hint) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+    [req.user.id, provider, label, onboarding.encrypt(JSON.stringify(creds)), secret ? registrars.mask(creds[secret.key]) : '']);
+  res.status(201).json({ id: s.id });
+}));
+
+app.delete('/api/sequencers/:id', auth, clientOnly, asyncRoute(async (req, res) => {
+  const { rowCount } = await query('DELETE FROM sequencer_accounts WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
+  if (!rowCount) throw new HttpError(404, 'Sequencer not found');
+  res.json({ ok: true });
+}));
+
+// Connect mailboxes (all of the client's, or the chosen ones) to a sequencer.
+// retry: also redo ones already connected / failed.
+app.post('/api/sequencers/:id/connect', auth, clientOnly, asyncRoute(async (req, res) => {
+  const { rows: [s] } = await query('SELECT * FROM sequencer_accounts WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
+  if (!s) throw new HttpError(404, 'Sequencer not found');
+  if (!sequencers.PROVIDERS[s.provider] || sequencers.PROVIDERS[s.provider].csvOnly) throw new HttpError(400, 'This sequencer is CSV-only: download the CSV and import it there');
+  const ids = Array.isArray(req.body.mailbox_ids) ? req.body.mailbox_ids.map(Number).filter(Boolean) : null;
+  const { rows } = ids
+    ? await query('SELECT id FROM mailboxes WHERE user_id = $1 AND id = ANY($2)', [req.user.id, ids])
+    : await query('SELECT id FROM mailboxes WHERE user_id = $1 ORDER BY is_admin DESC, email', [req.user.id]);
+  if (!rows.length) throw new HttpError(400, 'No mailboxes to connect yet');
+  const added = await connector.enqueue(req.user.id, s.id, rows.map((r) => r.id), { retry: req.body.retry === true });
+  res.json({ queued: added, skipped: rows.length - added });
+}));
+
+app.get('/api/sequencers/:id/export.csv', auth, clientOnly, asyncRoute(async (req, res) => {
+  const { rows: [s] } = await query('SELECT label FROM sequencer_accounts WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
+  if (!s) throw new HttpError(404, 'Sequencer not found');
+  const { rows } = await query(
+    `SELECT m.email, m.password, m.inbox_type, p.label AS inbox_label FROM mailboxes m LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
+      WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`, [req.user.id]);
+  const lines = rows.map((m) => sequencers.csvRow({
+    email: m.email, password: onboarding.decrypt(m.password), provider: dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }),
+  }));
+  res.attachment(`mailboxes-for-${s.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.csv`).type('text/csv').send(mailboxes.toCsv([sequencers.CSV_HEADER, ...lines]));
+}));
+
+// Owner: recent connection attempts for a client, with failure details.
+admin.get('/clients/:id/connect-jobs', ownerOnly, asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `SELECT j.id, j.status, j.step, j.error, j.diag, j.attempts, j.created_at, j.finished_at, m.email, s.label AS sequencer, s.provider
+       FROM connect_jobs j JOIN mailboxes m ON m.id = j.mailbox_id JOIN sequencer_accounts s ON s.id = j.sequencer_id
+      WHERE j.user_id = $1 ORDER BY j.id DESC LIMIT 100`, [Number(req.params.id) || 0]);
+  res.json({ jobs: rows });
 }));
 
 // The client's own mailbox logins.
@@ -3131,6 +3208,7 @@ async function scheduledBilling() {
     .catch((err) => console.error('Domain recheck failed:', err))
     .then(recheckDomains);
   setInterval(recheckDomains, 60 * 60 * 1000);
+  connector.start().catch((err) => console.error('[connect] start failed:', err));
 })().catch((err) => {
   console.error(err);
   process.exit(1);

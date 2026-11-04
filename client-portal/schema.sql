@@ -399,3 +399,41 @@ ALTER TABLE domains ADD COLUMN IF NOT EXISTS ns_status TEXT;
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS ns_error TEXT NOT NULL DEFAULT '';
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS ns_updated_at TIMESTAMPTZ;
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS added_by_client BOOLEAN NOT NULL DEFAULT false;
+
+-- Clients' sequencers (Instantly, Smartlead, …), with API keys / logins
+-- (encrypted). Mailboxes are connected by a background queue (connector.js):
+-- connect_jobs is each attempt (step, error, on-screen details of a failure),
+-- mailbox_connections the current state per mailbox and sequencer.
+CREATE TABLE IF NOT EXISTS sequencer_accounts (
+  id          SERIAL PRIMARY KEY,
+  user_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider    TEXT NOT NULL,
+  label       TEXT NOT NULL DEFAULT '',
+  creds       BYTEA NOT NULL,
+  hint        TEXT NOT NULL DEFAULT '',
+  last_ok_at  TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS mailbox_connections (
+  mailbox_id   INT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  sequencer_id INT NOT NULL REFERENCES sequencer_accounts(id) ON DELETE CASCADE,
+  status       TEXT NOT NULL,
+  error        TEXT NOT NULL DEFAULT '',
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (mailbox_id, sequencer_id)
+);
+CREATE TABLE IF NOT EXISTS connect_jobs (
+  id           SERIAL PRIMARY KEY,
+  user_id      INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sequencer_id INT NOT NULL REFERENCES sequencer_accounts(id) ON DELETE CASCADE,
+  mailbox_id   INT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  status       TEXT NOT NULL DEFAULT 'queued',
+  step         TEXT NOT NULL DEFAULT '',
+  error        TEXT NOT NULL DEFAULT '',
+  diag         JSONB,
+  attempts     INT NOT NULL DEFAULT 0,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at   TIMESTAMPTZ,
+  finished_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS connect_jobs_queue ON connect_jobs (status, id);

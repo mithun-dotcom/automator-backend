@@ -462,7 +462,10 @@ async function renderClient(page, arg, sub) {
   if (page === 'order') return renderOrder();
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
-  if (page === 'mailboxes') return renderMyMailboxes((await api('GET', '/api/mailboxes')).mailboxes);
+  if (page === 'mailboxes') {
+    const [{ mailboxes: rows }, seq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
+    return renderMyMailboxes(rows, seq);
+  }
   if (page === 'domains') {
     const [{ domains }, hosts] = await Promise.all([api('GET', '/api/domains'), api('GET', '/api/domain-hosts')]);
     return renderMyDomains(domains, hosts);
@@ -3072,14 +3075,18 @@ function deviceOf(ua) {
 
 // Mailbox logins with the password hidden until Show. pwUrl(id) fetches one
 // password; admin adds the batch column and Delete / admin switch.
-function mailboxTable(rows, { pwUrl, admin = false, types = [] }) {
+const CONN_LABEL = { queued: 'Queued', running: 'Connecting…', connected: 'Connected', failed: 'Failed' };
+const connChips = (m) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}">${c.status === 'connected' ? '✓' : c.status === 'failed' ? '✗' : '⏳'} ${esc(c.label)}${c.status !== 'connected' ? ` · ${CONN_LABEL[c.status] || c.status}` : ''}</span>${c.status === 'failed' && c.error ? `<div class="small access-off conn-err">${esc(c.error)}</div>` : ''}`).join('');
+
+function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false }) {
   if (!rows.length) return '';
   const typeCell = (m) => (admin
     ? `<select class="dom-type" data-mb-type="${m.id}" aria-label="Mailbox type for ${esc(m.email)}"><option value="">Not set</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === m.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`
     : (m.inbox_label ? esc(m.inbox_label) : '<span class="muted">—</span>'));
   return `<div class="table-wrap"><table class="mb-table">
-    <thead><tr><th>Email</th><th>Password</th><th>Mailbox type</th><th>Created</th>${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
+    <thead><tr>${select ? '<th style="width:28px"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Email</th><th>Password</th><th>Mailbox type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
     <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}">
+      ${select ? `<td><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
       <td><div class="mb-email"><span class="mono">${esc(m.email)}</span>
         <button class="icon-btn" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button>
         ${m.is_admin ? '<span class="badge b-in_progress">Admin</span>' : ''}</div></td>
@@ -3088,6 +3095,7 @@ function mailboxTable(rows, { pwUrl, admin = false, types = [] }) {
         <button class="icon-btn" data-copy-pw="${m.id}" title="Copy password" aria-label="Copy password for ${esc(m.email)}">${icon('copy')}</button></div></td>
       <td class="mb-type">${typeCell(m)}</td>
       <td class="small mb-created">${m.created_on ? fmtDate(String(m.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
+      ${conns ? `<td class="mb-conns">${connChips(m) || '<span class="muted small">—</span>'}</td>` : ''}
       ${admin ? `<td class="small">${m.order_id ? esc(m.batch_name || `#${m.order_id}`) : '<span class="muted">—</span>'}</td>
         <td><label class="switch switch-sm" title="Admin mailbox"><input type="checkbox" data-mb-admin="${m.id}" aria-label="Admin: ${esc(m.email)}" ${m.is_admin ? 'checked' : ''}><span></span></label></td>
         <td><button class="btn btn-sm btn-ghost" data-mb-del="${m.id}" data-email="${esc(m.email)}">Delete</button></td>` : ''}
@@ -3120,20 +3128,93 @@ function wireMailboxTable(pwUrl) {
   }
 }
 
-// Client: their mailbox logins.
-function renderMyMailboxes(rows) {
+// Client: their mailbox logins, and their sequencers (Instantly, …) to
+// connect the mailboxes to in the background with one click.
+let mbRefresh = null;
+function renderMyMailboxes(rows, seqData = {}) {
+  const { sequencers: seqs = [], providers = [] } = seqData;
   const admins = rows.filter((m) => m.is_admin).length;
+  const prov = (k) => providers.find((p) => p.key === k) || {};
+  const pending = seqs.some((s) => s.pending);
   shell(CLIENT_TABS, '#/mailboxes', `
     <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p></div>
       ${rows.length ? '<div class="row"><a class="btn" href="/api/mailboxes.csv">⬇ Download CSV</a></div>' : ''}</div>
     <div class="stack">
+      <div class="card">
+        <div class="card-head"><div><h2>Sequencers</h2><div class="muted small">Connect your sequencer once, then add your mailboxes to it with one click. We sign each mailbox in to Google / Microsoft for you in the background.</div></div></div>
+        ${seqs.length ? `<div class="table-wrap"><table><tbody>${seqs.map((s) => `<tr>
+          <td><strong>${esc(s.label)}</strong><div class="muted small">${esc(prov(s.provider).name || s.provider)}${s.hint ? ` · key ${esc(s.hint)}` : ''}</div></td>
+          <td class="small">${prov(s.provider).csvOnly ? '<span class="muted">Import with the CSV</span>' : `<strong>${s.connected}</strong> connected${s.pending ? ` · <span class="conn-run">${s.pending} in progress</span>` : ''}${s.failed ? ` · <span class="access-off">${s.failed} failed</span>` : ''}`}</td>
+          <td><div class="row" style="flex-wrap:wrap;gap:6px;justify-content:flex-end">
+            ${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">⬇ CSV for ${esc(s.label)}</a>` : `
+              <button class="btn btn-sm btn-primary" data-seq-all="${s.id}" ${rows.length ? '' : 'disabled'}>Connect all mailboxes</button>
+              <button class="btn btn-sm" data-seq-sel="${s.id}" ${rows.length ? '' : 'disabled'}>Connect selected</button>
+              ${s.failed ? `<button class="btn btn-sm" data-seq-retry="${s.id}">Retry failed</button>` : ''}`}
+            <button class="btn btn-sm btn-ghost" data-seq-del="${s.id}" data-name="${esc(s.label)}">Remove</button></div></td></tr>`).join('')}</tbody></table></div>` : ''}
+        <form class="card-pad" id="seq-form">
+          <div class="grid-2"><div class="field"><label for="seq-provider">Connect a sequencer</label><select id="seq-provider" name="provider" required><option value="">Choose…</option>
+            ${providers.map((p) => `<option value="${p.key}">${esc(p.name)}</option>`).join('')}</select></div><div></div></div>
+          <div id="seq-fields"></div>
+          <div class="row"><button class="btn btn-primary" type="submit">Test &amp; connect</button><span class="muted small">Keys are checked first, then stored encrypted.</span></div>
+          <div class="error"></div>
+        </form>
+      </div>
       ${rows.length ? `<div class="card">
-        <div class="card-head"><div><h2>${rows.length} mailbox${rows.length === 1 ? '' : 'es'}</h2>${admins ? `<div class="muted small">${admins === 1 ? 'The admin mailbox is' : 'Admin mailboxes are'} marked <strong>Admin</strong>.</div>` : ''}</div>
+        <div class="card-head"><div><h2>${rows.length} mailbox${rows.length === 1 ? '' : 'es'}</h2>${admins ? `<div class="muted small">${admins === 1 ? 'The admin mailbox is' : 'Admin mailboxes are'} marked <strong>Admin</strong>.${seqs.length ? ' Tick mailboxes to connect only those.' : ''}</div>` : ''}</div>
           ${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}</div>
-        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password` })}
+        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password`, select: seqs.length > 0, conns: seqs.length > 0 })}
       </div>` : '<div class="card"><div class="empty">Your mailboxes will appear here once they\'re set up. We\'ll let you know when they\'re ready.</div></div>'}
     </div>`);
   wireMailboxTable((id) => `/api/mailboxes/${id}/password`);
+  const reload = async () => {
+    if (!location.hash.startsWith('#/mailboxes')) return;
+    const [{ mailboxes: r }, sq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
+    renderMyMailboxes(r, sq);
+  };
+  // While connections are running, refresh every 8 seconds.
+  clearTimeout(mbRefresh);
+  if (pending) mbRefresh = setTimeout(() => { reload().catch(() => {}); }, 8000);
+
+  const all = document.getElementById('mb-all');
+  if (all) all.onchange = () => document.querySelectorAll('.mb-sel').forEach((c) => { if (!c.closest('tr').hidden) c.checked = all.checked; });
+  const sel = document.getElementById('seq-provider');
+  sel.onchange = () => {
+    const p = prov(sel.value);
+    document.getElementById('seq-fields').innerHTML = !p.key ? '' : `
+      <p class="muted small" style="margin:0 0 10px">${esc(p.help)}</p>
+      <div class="grid-2">${p.fields.map((f) => `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
+        <input id="sf-${f.key}" name="cred_${f.key}" ${f.secret ? 'type="password"' : ''} autocomplete="off" required></div>`).join('')}
+        <div class="field"><label for="sf-label">Name it <span class="muted small">(optional)</span></label><input id="sf-label" name="label" placeholder="e.g. Instantly main workspace"></div></div>`;
+  };
+  onSubmit(document.getElementById('seq-form'), async (d) => {
+    const creds = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('cred_')).map(([k, v]) => [k.slice(5), v]));
+    await api('POST', '/api/sequencers', { provider: d.provider, label: d.label, creds });
+    toast('Sequencer connected');
+    await reload();
+  });
+  const start = async (id, body, b) => {
+    b.disabled = true;
+    try {
+      const r = await api('POST', `/api/sequencers/${id}/connect`, body);
+      toast(r.queued ? `Connecting ${r.queued} mailbox${r.queued === 1 ? '' : 'es'} in the background (about a minute each). You can leave this page.` : 'Those mailboxes are already connected or in progress');
+    } catch (ex) { toast(ex.message); }
+    await reload();
+  };
+  document.querySelectorAll('[data-seq-all]').forEach((b) => { b.onclick = () => start(b.dataset.seqAll, {}, b); });
+  document.querySelectorAll('[data-seq-retry]').forEach((b) => { b.onclick = () => start(b.dataset.seqRetry, { mailbox_ids: rows.filter((m) => (m.connections || []).some((c) => String(c.sequencer_id) === b.dataset.seqRetry && c.status === 'failed')).map((m) => m.id), retry: true }, b); });
+  document.querySelectorAll('[data-seq-sel]').forEach((b) => {
+    b.onclick = () => {
+      const ids = [...document.querySelectorAll('.mb-sel:checked')].map((c) => Number(c.value));
+      if (!ids.length) { toast('Tick the mailboxes to connect first'); return; }
+      start(b.dataset.seqSel, { mailbox_ids: ids, retry: true }, b);
+    };
+  });
+  document.querySelectorAll('[data-seq-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Remove ${b.dataset.name}? Its keys are deleted here (mailboxes already added stay in the sequencer).`)) return;
+      try { await api('DELETE', `/api/sequencers/${b.dataset.seqDel}`); await reload(); } catch (ex) { toast(ex.message); }
+    };
+  });
 }
 
 // Admin: clients and how many mailbox logins each has.
@@ -3186,10 +3267,12 @@ function adminMailboxClient({ client, mailboxes: rows, batches, types }) {
       ${uploadGuide('mailboxes', !rows.length)}
       <div class="card">
         <div class="card-head"><h2>Mailbox logins</h2>${rows.length ? `<div class="row">${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}<button class="btn btn-sm btn-danger" id="mb-del-all">Delete all</button></div>` : ''}</div>
-        ${rows.length ? mailboxTable(rows, { pwUrl, admin: true, types }) : '<div class="empty">No logins uploaded yet.</div>'}
+        ${rows.length ? mailboxTable(rows, { pwUrl, admin: true, types, conns: rows.some((m) => (m.connections || []).length) }) : '<div class="empty">No logins uploaded yet.</div>'}
       </div>
+      ${isOwner() ? '<div id="conn-log"></div>' : ''}
     </div>`);
   wireMailboxTable(pwUrl);
+  connectionLog(client.id);
   onSubmit(document.getElementById('mb-upload'), async (d) => {
     const file = document.getElementById('mb-file').files[0];
     if (!file) throw new Error('Choose the CSV file');
@@ -3531,4 +3614,23 @@ async function cloudflareCard() {
   });
   const t = document.getElementById('cf-test');
   if (t) t.onclick = async () => { try { const r = await api('POST', '/api/admin/cloudflare/test'); toast(`Working: ${r.account}`); } catch (ex) { toast(ex.message); } };
+}
+
+// Owner: the client's recent sequencer connections, with what was on screen
+// when one failed (for fixing a sign-in step).
+async function connectionLog(clientId) {
+  const box = document.getElementById('conn-log');
+  if (!box) return;
+  let jobs;
+  try { ({ jobs } = await api('GET', `/api/admin/clients/${clientId}/connect-jobs`)); } catch { return; }
+  if (!jobs.length) return;
+  box.innerHTML = `<div class="card"><div class="card-head"><div><h2>Sequencer connection log</h2><div class="muted small">The client's recent connections. Failed ones show the step and what was on screen.</div></div></div>
+    <div class="table-wrap"><table><thead><tr><th>When</th><th>Mailbox</th><th>Sequencer</th><th>Result</th></tr></thead><tbody>
+    ${jobs.map((j) => `<tr><td class="small nowrap">${fmtWhen(j.created_at)}</td><td class="mono small">${esc(j.email)}</td><td>${esc(j.sequencer)}</td>
+      <td><span class="conn-chip conn-${j.status === 'done' ? 'connected' : j.status}">${j.status === 'done' ? 'Connected' : CONN_LABEL[j.status] || j.status}</span>
+        ${j.step ? `<span class="muted small"> · ${esc(j.step)}</span>` : ''}${j.error ? `<div class="small ${j.status === 'failed' ? 'access-off' : 'muted'}">${esc(j.error)}</div>` : ''}
+        ${j.diag ? `<details class="small"><summary>On screen</summary><div class="mono" style="white-space:pre-wrap;font-size:11px">${esc([
+          `URL: ${j.diag.url || ''}`, `Title: ${j.diag.title || ''}`, `Headings: ${(j.diag.headings || []).join(' | ')}`,
+          `Buttons: ${(j.diag.buttons || []).join(' | ')}`, `Inputs: ${(j.diag.inputs || []).join(' | ')}`, `Text: ${j.diag.text || ''}`].join('\n'))}</div></details>` : ''}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
 }
