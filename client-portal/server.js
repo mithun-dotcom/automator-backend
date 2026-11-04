@@ -2129,6 +2129,23 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
   if (Date.parse(to) - Date.parse(from) > 5 * 366 * 86400000) throw new HttpError(400, 'Choose a period of 5 years or less');
   const [pFrom, pTo] = previousPeriod(from, to);
   const bucket = (Date.parse(to) - Date.parse(from)) / 86400000 < 62 ? 'day' : 'month';
+  // Sold by filter: everything counts only that team member's clients ('__none': clients with no Sold by).
+  const sellers = (await query(
+    "SELECT DISTINCT COALESCE(sold_by, '') AS s FROM users WHERE role = 'client' AND reseller_id IS NULL ORDER BY 1")).rows.map((r) => r.s);
+  let seller = req.query.seller === undefined || req.query.seller === '' ? null : String(req.query.seller);
+  if (seller === '__none') seller = '';
+  if (seller !== null && !sellers.includes(seller)) throw new HttpError(400, 'Unknown team member');
+  // The seller is one of the stored names (checked above), quoted as an SQL literal.
+  const scopeCtes = seller === null ? '' : `users AS (SELECT * FROM users WHERE role = 'client' AND COALESCE(sold_by, '') = '${seller.replace(/'/g, "''")}'),
+    direct_orders AS (SELECT * FROM direct_orders WHERE user_id IN (SELECT id FROM users)),
+    direct_invoices AS (SELECT * FROM direct_invoices WHERE user_id IN (SELECT id FROM users))`;
+  // Wraps a query so users / direct_orders / direct_invoices mean the filtered ones.
+  const scoped = (sql) => {
+    if (!scopeCtes) return sql;
+    const t = sql.trimStart();
+    return /^WITH\s/i.test(t) ? `WITH ${scopeCtes}, ${t.slice(5)}` : `WITH ${scopeCtes} ${t}`;
+  };
+  const sq = (sql, params) => query(scoped(sql), params);
 
   const local = (col) => `(${col} AT TIME ZONE '${tz.replace(/'/g, '')}')::date`;
   const sold = `o.inbox_type <> 'other' AND NOT (o.status = 'cancelled' AND o.activated_at IS NULL)`;
@@ -2153,21 +2170,21 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
   const cutOf = (d, t = '$3') => `LEAST(${d}::date + 1, ${t}::date + 1)`;
   const step = bucket === 'day' ? "interval '1 day'" : "interval '1 month'";
 
-  const [series, period, prev, outstanding, byType, topClients, recent, bySeller] = await Promise.all([
-    query(`WITH b AS (
+  const [series, period, prev, outstanding, byType, topClients, recent, bySeller, sellerSeries] = await Promise.all([
+    sq(`WITH b AS (
              SELECT g::date AS bs, LEAST((g + ${step})::date, $2::date + 1) AS be
                FROM generate_series(${bucket === 'day' ? '$1::date' : "date_trunc('month', $1::date)"}, $2::date, ${step}) g)
            SELECT to_char(b.bs, '${bucket === 'day' ? 'YYYY-MM-DD' : 'YYYY-MM'}') AS key, GREATEST(b.bs, $1::date) AS bs, b.be,
              ${flow('GREATEST(b.bs, $1::date)', 'b.be')}, ${standing('LEAST(b.be, $3::date + 1)')}
            FROM b ORDER BY b.bs`, [from, to, today]),
-    query(`SELECT ${flow('$1::date', '$2::date + 1')}, ${standing(cutOf('$2'))}`, [from, to, today]),
-    query(`SELECT ${flow('$1::date', '$2::date + 1')}, ${standing(cutOf('$2'))}`, [pFrom, pTo, today]),
-    query(`SELECT COALESCE(SUM(amount), 0) AS unpaid, count(*)::int AS unpaid_count,
+    sq(`SELECT ${flow('$1::date', '$2::date + 1')}, ${standing(cutOf('$2'))}`, [from, to, today]),
+    sq(`SELECT ${flow('$1::date', '$2::date + 1')}, ${standing(cutOf('$2'))}`, [pFrom, pTo, today]),
+    sq(`SELECT COALESCE(SUM(amount), 0) AS unpaid, count(*)::int AS unpaid_count,
              COALESCE(SUM(amount) FILTER (WHERE due_date < $1), 0) AS overdue,
              (count(*) FILTER (WHERE due_date < $1))::int AS overdue_count
            FROM direct_invoices WHERE status = 'unpaid'`, [today]),
     // Per mailbox type: sold in the period and the one before, and active at the end of the period.
-    query(`SELECT p.label, p.sort_order,
+    sq(`SELECT p.label, p.sort_order,
              COALESCE(SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2), 0)::int AS sold,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2), 0) AS sold_value,
              COALESCE(SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $3 AND $4), 0)::int AS prev_sold,
@@ -2177,18 +2194,18 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
            WHERE ${sold} GROUP BY p.label, p.sort_order
            HAVING SUM(o.quantity) FILTER (WHERE ${local('o.created_at')} BETWEEN $1 AND $2 OR ${local('o.created_at')} BETWEEN $3 AND $4 OR (${activeAt(cutOf('$2', '$5'))})) > 0
            ORDER BY sold DESC, active DESC, p.sort_order`, [from, to, pFrom, pTo, today]),
-    query(`SELECT u.id, u.email, u.name, u.company,
+    sq(`SELECT u.id, u.email, u.name, u.company,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $1 AND $2), 0) AS this_period,
              COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $3 AND $4), 0) AS prev_period
            FROM direct_invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND (${local('i.paid_at')} BETWEEN $1 AND $2 OR ${local('i.paid_at')} BETWEEN $3 AND $4)
-           GROUP BY u.id ORDER BY this_period DESC, prev_period DESC LIMIT 10`, [from, to, pFrom, pTo]),
-    query(`SELECT i.id, i.amount, i.paid_at, i.description, u.email, u.company
+           GROUP BY u.id, u.email, u.name, u.company ORDER BY this_period DESC, prev_period DESC LIMIT 10`, [from, to, pFrom, pTo]),
+    sq(`SELECT i.id, i.amount, i.paid_at, i.description, u.email, u.company
            FROM direct_invoices i JOIN users u ON u.id = i.user_id
            WHERE i.status = 'paid' AND i.paid_at IS NOT NULL AND ${local('i.paid_at')} BETWEEN $1 AND $2
            ORDER BY i.paid_at DESC, i.id DESC LIMIT 15`, [from, to]),
     // Commission view: payments received and mailboxes sold per seller.
-    query(`WITH pay AS (
+    sq(`WITH pay AS (
              SELECT COALESCE(u.sold_by, '') AS seller,
                COALESCE(SUM(i.amount) FILTER (WHERE ${local('i.paid_at')} BETWEEN $1 AND $2), 0) AS this_period,
                (count(*) FILTER (WHERE ${local('i.paid_at')} BETWEEN $1 AND $2))::int AS this_count,
@@ -2208,9 +2225,20 @@ admin.get('/analytics', ownerOnly, asyncRoute(async (req, res) => {
              COALESCE(mb.sold, 0) AS sold, COALESCE(mb.prev_sold, 0) AS prev_sold
            FROM pay FULL JOIN mb ON pay.seller = mb.seller
            ORDER BY this_period DESC, sold DESC`, [from, to, pFrom, pTo]),
+    // Each team member, each day/month of the period: mailboxes sold and payments (only without a Sold by filter).
+    seller !== null ? { rows: [] } : query(`WITH b AS (
+             SELECT g::date AS bs, LEAST((g + ${step})::date, $2::date + 1) AS be
+               FROM generate_series(${bucket === 'day' ? '$1::date' : "date_trunc('month', $1::date)"}, $2::date, ${step}) g),
+           s AS (SELECT DISTINCT COALESCE(sold_by, '') AS seller FROM users WHERE role = 'client' AND reseller_id IS NULL)
+           SELECT to_char(b.bs, '${bucket === 'day' ? 'YYYY-MM-DD' : 'YYYY-MM'}') AS key, s.seller,
+             (SELECT COALESCE(SUM(o.quantity), 0) FROM direct_orders o JOIN users u ON u.id = o.user_id
+               WHERE ${sold} AND COALESCE(u.sold_by, '') = s.seller AND ${local('o.created_at')} >= GREATEST(b.bs, $1::date) AND ${local('o.created_at')} < b.be)::int AS sold,
+             (SELECT COALESCE(SUM(i.amount), 0) FROM direct_invoices i JOIN users u ON u.id = i.user_id
+               WHERE i.status = 'paid' AND COALESCE(u.sold_by, '') = s.seller AND ${local('i.paid_at')} >= GREATEST(b.bs, $1::date) AND ${local('i.paid_at')} < b.be) AS payments
+           FROM b CROSS JOIN s ORDER BY b.bs, s.seller`, [from, to]),
   ]);
   res.json({
-    today, from, to, prevFrom: pFrom, prevTo: pTo, bucket,
+    today, from, to, prevFrom: pFrom, prevTo: pTo, bucket, sellers, seller, sellerSeries: sellerSeries.rows,
     series: series.rows, period: period.rows[0], prev: prev.rows[0], outstanding: outstanding.rows[0],
     byType: byType.rows, topClients: topClients.rows, recentPayments: recent.rows, bySeller: bySeller.rows,
   });

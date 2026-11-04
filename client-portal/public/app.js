@@ -2289,7 +2289,7 @@ function drawChart(el, points, { kind = 'bar', money: isMoney = false } = {}) {
 }
 
 // The chosen Analytics period: a preset, or a month / custom dates.
-const analyticsPeriod = { preset: 'this_month', month: '', from: '', to: '' };
+const analyticsPeriod = { preset: 'this_month', month: '', from: '', to: '', seller: '' };
 const isoDay = (d) => d.toISOString().slice(0, 10);
 // [from, to] for a preset, from the business "today" (YYYY-MM-DD).
 function presetRange(preset, today, p = analyticsPeriod) {
@@ -2316,11 +2316,14 @@ const rangeText = (a, b) => (a === b ? prettyDay(a) : a.slice(0, 4) === b.slice(
 async function loadAnalytics() {
   const today = (state.admin && state.admin.today) || isoDay(new Date());
   const [from, to] = presetRange(analyticsPeriod.preset, today);
-  return api('GET', `${API()}/analytics?from=${from}&to=${to}`);
+  const seller = analyticsPeriod.seller ? `&seller=${encodeURIComponent(analyticsPeriod.seller)}` : '';
+  return api('GET', `${API()}/analytics?from=${from}&to=${to}${seller}`);
 }
 
 function renderAnalytics(data) {
-  const { period: cur, prev, outstanding, byType, topClients, recentPayments, bySeller = [], series, bucket, from, to, prevFrom, prevTo, today } = data;
+  const { period: cur, prev, outstanding, byType, topClients, recentPayments, bySeller = [], series, bucket, from, to, prevFrom, prevTo, today,
+    sellers = [], seller = null, sellerSeries = [] } = data;
+  const sellerName = (v) => (v ? v : 'Not set');
   const vs = `<span class="muted">vs ${rangeText(prevFrom, prevTo)}</span>`;
   const endVs = `<span class="muted">vs ${prettyDay(prevTo)}</span>`;
   const tile = (label, value, d, sub, cls = '') => `<div class="card kpi ${cls}">
@@ -2358,13 +2361,31 @@ function renderAnalytics(data) {
   ];
   const maxSold = Math.max(...byType.map((t) => Number(t.sold)), 0) || 1;
   const p = analyticsPeriod;
+  // Team member × day/month: mailboxes sold and payments (shown when not filtered to one person).
+  function sellerMatrix() {
+    if (seller !== null || !sellerSeries.length) return '';
+    const totals = {};
+    sellerSeries.forEach((r) => { const t = (totals[r.seller] = totals[r.seller] || { sold: 0, payments: 0 }); t.sold += r.sold; t.payments += Number(r.payments); });
+    const cols = Object.keys(totals).filter((k) => totals[k].sold || totals[k].payments).sort((a, b) => totals[b].sold - totals[a].sold || totals[b].payments - totals[a].payments);
+    if (!cols.length) return '';
+    const cell = (k, c) => sellerSeries.find((r) => r.key === k && r.seller === c) || { sold: 0, payments: 0 };
+    const val = (v) => (v.sold || Number(v.payments) ? `<strong>${count(v.sold)}</strong> <span class="muted small">mb</span><div class="muted small">${money(v.payments)}</div>` : '<span class="muted">—</span>');
+    const keys = [...new Set(sellerSeries.map((r) => r.key))].reverse();
+    return `<div class="card"><div class="card-head"><div><h2>Team members ${bucket === 'day' ? 'day by day' : 'month by month'}</h2><div class="muted small">Mailboxes sold (mb) and payments received, per Sold by. Pick a name in <strong>Sold by</strong> above to see only theirs.</div></div></div>
+      <div class="table-wrap"><table><thead><tr><th>${bucket === 'day' ? 'Date' : 'Month'}</th>${cols.map((c) => `<th class="num">${esc(sellerName(c))}</th>`).join('')}</tr></thead><tbody>
+        ${keys.filter((k) => cols.some((c) => { const v = cell(k, c); return v.sold || Number(v.payments); })).map((k) => `<tr><td class="nowrap">${esc(rowLabel(k))}</td>${cols.map((c) => `<td class="num">${val(cell(k, c))}</td>`).join('')}</tr>`).join('')}
+        <tr class="an-total"><td><strong>Total</strong></td>${cols.map((c) => `<td class="num">${val(totals[c])}</td>`).join('')}</tr>
+      </tbody></table></div></div>`;
+  }
   const [pf, pt] = presetRange(p.preset, today);
 
   shell(ADMIN_TABS, '#/admin/analytics', `
-    <div class="page-head"><div><h1>Analytics</h1><div class="muted small"><strong>${rangeText(from, to)}</strong> compared with ${rangeText(prevFrom, prevTo)}</div></div></div>
+    <div class="page-head"><div><h1>Analytics</h1><div class="muted small"><strong>${rangeText(from, to)}</strong> compared with ${rangeText(prevFrom, prevTo)}${seller !== null ? ` · <strong>Sold by ${esc(sellerName(seller))}</strong> only` : ''}</div></div></div>
     <div class="stack">
       <form class="card an-filter" id="an-filter">
         <div class="field"><label for="an-preset">Period</label><select id="an-preset" name="preset">${PRESETS.map(([v, l]) => `<option value="${v}" ${v === p.preset ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="field"><label for="an-seller">Sold by</label><select id="an-seller" name="seller"><option value="">Everyone</option>
+          ${sellers.map((v) => `<option value="${esc(v || '__none')}" ${(v || '__none') === p.seller ? 'selected' : ''}>${esc(sellerName(v))}</option>`).join('')}</select></div>
         <div class="field an-month" ${p.preset === 'month' ? '' : 'hidden'}><label for="an-month">Month</label><input id="an-month" name="month" type="month" max="${today.slice(0, 7)}" value="${esc(p.month || today.slice(0, 7))}"></div>
         <div class="field an-custom" ${p.preset === 'custom' ? '' : 'hidden'}><label for="an-from">From</label><input id="an-from" name="from" type="date" max="${today}" value="${esc(p.preset === 'custom' ? pf : from)}"></div>
         <div class="field an-custom" ${p.preset === 'custom' ? '' : 'hidden'}><label for="an-to">To</label><input id="an-to" name="to" type="date" max="${today}" value="${esc(p.preset === 'custom' ? pt : to)}"></div>
@@ -2393,6 +2414,7 @@ function renderAnalytics(data) {
             <td class="num">${money(r.this_period)}<div class="muted small">${plural(r.this_count, 'payment')}</div></td>
             <td class="num">${money(r.prev_period)}<div class="muted small">${plural(r.prev_count, 'payment')}</div></td></tr>`).join('')}
         </tbody></table></div>` : '<div class="card-pad muted">No sales in this period.</div>'}</div>
+      ${sellerMatrix()}
       <div class="card"><div class="card-head"><div><h2>${bucket === 'day' ? 'Day by day' : 'Month by month'}</h2><div class="muted small">${rangeText(from, to)}</div></div></div>
         <div class="table-wrap"><table><thead><tr><th>${bucket === 'day' ? 'Date' : 'Month'}</th><th class="num">Mailboxes sold</th><th class="num">New batches</th><th class="num">Payments</th><th class="num">Invoiced</th><th class="num">New clients</th><th class="num">Cancelled</th><th class="num">Active mailboxes</th><th class="num">MRR</th></tr></thead><tbody>
           ${[...series].reverse().map((m) => `<tr${Number(m.mailboxes_sold) || Number(m.payments) ? '' : ' class="an-quiet"'}><td class="nowrap">${esc(rowLabel(m.key))}</td>
@@ -2434,6 +2456,11 @@ function renderAnalytics(data) {
     reload();
   };
   form.month.onchange = () => { if (form.month.value) { p.month = form.month.value; reload(); } };
+  form.seller.onchange = () => {
+    p.seller = form.seller.value;
+    if (p.preset === 'custom') { p.from = form.from.value; p.to = form.to.value; }
+    reload();
+  };
   form.onsubmit = (e) => {
     e.preventDefault();
     if (!form.from.value || !form.to.value) { toast('Choose both dates'); return; }
