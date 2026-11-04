@@ -3252,7 +3252,7 @@ function cfCell(d, { client = false } = {}) {
   if (d.cf_status === 'active') return `<span class="badge dns-st dns-ok">Active on Cloudflare</span>`;
   let line = '';
   if (d.ns_status === 'updated') line = `Nameservers switched${host ? ` at ${esc(host)}` : ''}${d.ns_updated_at ? ` on ${fmtDate(d.ns_updated_at)}` : ''}. Waiting for Cloudflare to see them (usually minutes, up to 24 hours).`;
-  else if (d.ns_status === 'failed') line = `<span class="access-off">Couldn't switch the nameservers${host ? ` at ${esc(host)}` : ''}: ${esc(d.ns_error)}</span>`;
+  else if (d.ns_status === 'failed') line = `<span class="access-off">Couldn't switch the nameservers. ${esc(d.ns_error)}</span>`;
   else line = `${client ? 'Set these nameservers at your domain host' : 'The client sets these nameservers at their host'}${host ? ` (${esc(host)})` : ''}:`;
   return `<span class="badge dns-st dns-warn">Pending</span><div class="small" style="margin-top:4px">${line}</div>${ns ? `<div class="cf-ns small">${ns}</div>` : ''}`;
 }
