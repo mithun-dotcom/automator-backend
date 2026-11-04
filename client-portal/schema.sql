@@ -373,3 +373,29 @@ CREATE TABLE IF NOT EXISTS domains (
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS domains_user_domain ON domains (user_id, domain);
+
+-- Clients' domain hosts (registrars), connected with their API keys
+-- (encrypted), used to point their domains at Mithmill's Cloudflare.
+CREATE TABLE IF NOT EXISTS registrar_accounts (
+  id          SERIAL PRIMARY KEY,
+  user_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider    TEXT NOT NULL,
+  label       TEXT NOT NULL DEFAULT '',
+  creds       BYTEA NOT NULL,
+  hint        TEXT NOT NULL DEFAULT '',
+  last_ok_at  TIMESTAMPTZ,
+  last_error  TEXT NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Cloudflare: the zone, its status and nameservers, and whether the
+-- registrar was switched to them (updated / failed / manual / done).
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS registrar_account_id INT REFERENCES registrar_accounts(id) ON DELETE SET NULL;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_zone_id TEXT;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_status TEXT;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_nameservers JSONB;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_checked_at TIMESTAMPTZ;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS ns_status TEXT;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS ns_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS ns_updated_at TIMESTAMPTZ;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS added_by_client BOOLEAN NOT NULL DEFAULT false;

@@ -463,7 +463,10 @@ async function renderClient(page, arg, sub) {
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
   if (page === 'mailboxes') return renderMyMailboxes((await api('GET', '/api/mailboxes')).mailboxes);
-  if (page === 'domains') return renderMyDomains((await api('GET', '/api/domains')).domains);
+  if (page === 'domains') {
+    const [{ domains }, hosts] = await Promise.all([api('GET', '/api/domains'), api('GET', '/api/domain-hosts')]);
+    return renderMyDomains(domains, hosts);
+  }
   return renderDashboard();
 }
 
@@ -2079,6 +2082,7 @@ function adminSettings() {
   shell(ADMIN_TABS, '#/admin/settings', `
     <div class="page-head"><div><h1>Settings</h1></div></div>
     <div class="stack">
+      <div id="cf-card"></div>
       <form class="card card-pad" id="settings">
         <h2 style="margin-bottom:14px">Orders &amp; clients</h2>
         <div class="field"><label for="s-emails">Send new-order notifications to</label>
@@ -2145,6 +2149,7 @@ function adminSettings() {
     try { const r = await api('POST', `${API()}/test-email`, {}); toast(`Test email sent to ${r.to}`); } catch (ex) { toast(ex.message); }
     e.target.disabled = false;
   };
+  cloudflareCard();
   onSubmit(document.getElementById('settings'), async (d) => {
     await api('PUT', `${API()}/settings`, d);
     toast('Settings saved');
@@ -3238,23 +3243,114 @@ const dnsBadge = (d) => (d.dns_status ? `<span class="badge ${DNS_BADGE[d.dns_st
 const dnsIssues = (d) => (d.dns && d.dns.issues.length ? `<ul class="dns-issues">${d.dns.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '');
 
 // Client: their domains and DNS health.
-function renderMyDomains(rows) {
+// Cloudflare status of a domain: badge plus what's happening with the nameservers.
+function cfCell(d, { client = false } = {}) {
+  if (!d.cf_status) return '<span class="muted small">Not on Cloudflare</span>';
+  const ns = (d.cf_nameservers || []).map((n) => `<span class="mono">${esc(n)}</span>`).join('<br>');
+  const host = d.host_label || '';
+  if (d.cf_status === 'error') return `<span class="badge dns-st dns-err">Cloudflare error</span><div class="small access-off" style="margin-top:4px">${esc(d.cf_error)}</div>`;
+  if (d.cf_status === 'active') return `<span class="badge dns-st dns-ok">Active on Cloudflare</span>`;
+  let line = '';
+  if (d.ns_status === 'updated') line = `Nameservers switched${host ? ` at ${esc(host)}` : ''}${d.ns_updated_at ? ` on ${fmtDate(d.ns_updated_at)}` : ''}. Waiting for Cloudflare to see them (usually minutes, up to 24 hours).`;
+  else if (d.ns_status === 'failed') line = `<span class="access-off">Couldn't switch the nameservers${host ? ` at ${esc(host)}` : ''}: ${esc(d.ns_error)}</span>`;
+  else line = `${client ? 'Set these nameservers at your domain host' : 'The client sets these nameservers at their host'}${host ? ` (${esc(host)})` : ''}:`;
+  return `<span class="badge dns-st dns-warn">Pending</span><div class="small" style="margin-top:4px">${line}</div>${ns ? `<div class="cf-ns small">${ns}</div>` : ''}`;
+}
+
+// Client: their domains, DNS health, and (when Cloudflare is set up) their
+// domain hosts and adding domains that move to Mithmill's Cloudflare.
+function renderMyDomains(rows, hostsData = {}) {
+  const { hosts = [], providers = [], cloudflareReady = false, serverIp = '' } = hostsData;
   const problems = rows.filter((d) => d.dns_status && d.dns_status !== 'ok').length;
+  const prov = (k) => providers.find((p) => p.key === k) || {};
   shell(CLIENT_TABS, '#/domains', `
     <div class="page-head"><div><h1>Domains</h1><p class="muted">Your sending domains, the mailbox type on each, and their DNS health (checked daily).</p></div></div>
-    <div class="card">
+    <div class="stack">
+      ${cloudflareReady ? `<div class="charts">
+        <div class="card">
+          <div class="card-head"><div><h2>1. Your domain hosts</h2><div class="muted small">Where your domains are registered. Connect one with its API key so we can switch the nameservers for you.</div></div></div>
+          ${hosts.length ? `<div class="table-wrap"><table><tbody>${hosts.map((h) => `<tr>
+            <td><strong>${esc(h.label)}</strong><div class="muted small">${esc(prov(h.provider).name || h.provider)}${h.hint ? ` · key ${esc(h.hint)}` : ''}</div>${h.last_error ? `<div class="small access-off">${esc(h.last_error)}</div>` : ''}</td>
+            <td class="small">${h.domain_count} domain${h.domain_count === 1 ? '' : 's'}</td>
+            <td><button class="btn btn-sm btn-ghost" data-host-del="${h.id}" data-name="${esc(h.label)}">Remove</button></td></tr>`).join('')}</tbody></table></div>` : ''}
+          <form class="card-pad" id="host-form">
+            <div class="field"><label for="host-provider">Connect a domain host</label><select id="host-provider" name="provider" required><option value="">Choose…</option>
+              ${providers.map((p) => `<option value="${p.key}">${esc(p.name)}</option>`).join('')}</select></div>
+            <div id="host-fields"></div>
+            <div class="row"><button class="btn btn-primary" type="submit">Test &amp; connect</button><span class="muted small">Keys are checked first, then stored encrypted.</span></div>
+            <div class="error"></div>
+          </form>
+        </div>
+        <form class="card card-pad" id="dom-client-add">
+          <h2 style="margin-bottom:4px">2. Add domains</h2>
+          <p class="muted small" style="margin:0 0 14px">We add each domain to our Cloudflare (keeping its current DNS records, so email keeps working) and switch its nameservers at your host. The domain is active once Cloudflare sees the new nameservers.</p>
+          <div class="field"><label for="dc-text">Domains (one per line)</label><textarea id="dc-text" name="text" rows="5" placeholder="yourdomain.com&#10;getyourdomain.com" required></textarea></div>
+          <div class="field"><label for="dc-host">Registered at</label><select id="dc-host" name="host_id" required>${hosts.length ? hosts.map((h) => `<option value="${h.id}">${esc(h.label)} (${esc(prov(h.provider).name || h.provider)})</option>`).join('') : '<option value="">Connect a domain host first</option>'}</select></div>
+          <div class="row"><button class="btn btn-primary" type="submit" ${hosts.length ? '' : 'disabled'}>Add &amp; move to Cloudflare</button></div>
+          <div class="error"></div>
+        </form>
+      </div>` : ''}
+      <div class="card">
       ${rows.length ? `<div class="card-head"><div><h2>${rows.length} domain${rows.length === 1 ? '' : 's'}</h2>${problems ? `<div class="small access-off">${problems} need${problems === 1 ? 's' : ''} attention. We're on it; we'll contact you if we need anything.</div>` : '<div class="muted small">All DNS records look good.</div>'}</div></div>
       <div class="table-wrap"><table class="dom-table">
-        <thead><tr><th>Domain</th><th>Mailbox type</th><th class="num">Mailboxes</th><th>Created</th><th>DNS</th><th>Last checked</th></tr></thead>
+        <thead><tr><th>Domain</th><th>Mailbox type</th><th class="num">Mailboxes</th><th>Cloudflare</th><th>DNS</th><th>Last checked</th><th></th></tr></thead>
         <tbody>${rows.map((d) => `<tr>
-          <td><strong class="mono">${esc(d.domain)}</strong></td>
+          <td><strong class="mono">${esc(d.domain)}</strong>${d.host_label ? `<div class="muted small">${esc(d.host_label)}</div>` : ''}</td>
           <td>${d.inbox_label ? esc(d.inbox_label) : '<span class="muted">—</span>'}</td>
           <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
-          <td class="small">${d.created_on ? fmtDate(String(d.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
+          <td class="cf-cell">${cfCell(d, { client: true })}</td>
           <td>${dnsBadge(d)}${dnsChips(d)}</td>
           <td class="small">${d.dns_checked_at ? fmtWhen(d.dns_checked_at) : '—'}</td>
+          <td><div class="row" style="flex-wrap:nowrap;gap:6px">${d.cf_status && d.cf_status !== 'active' ? `<button class="btn btn-sm" data-dc-check="${d.id}">${d.ns_status === 'failed' || d.cf_status === 'error' ? 'Retry' : 'Check now'}</button>` : ''}
+            ${d.added_by_client ? `<button class="btn btn-sm btn-ghost" data-dc-del="${d.id}" data-domain="${esc(d.domain)}">Remove</button>` : ''}</div></td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="empty">Your domains will appear here once they\'re added.</div>'}
+      </div>
     </div>`);
+  const reload = async () => renderMyDomains((await api('GET', '/api/domains')).domains, await api('GET', '/api/domain-hosts'));
+  const hostForm = document.getElementById('host-form');
+  if (hostForm) {
+    const sel = document.getElementById('host-provider');
+    sel.onchange = () => {
+      const p = prov(sel.value);
+      document.getElementById('host-fields').innerHTML = !p.key ? '' : `
+        <p class="muted small" style="margin:0 0 10px">${esc(p.help)}</p>
+        ${p.needsIp && serverIp ? `<div class="note note-info" style="margin:0 0 12px"><span>Whitelist this IP in Namecheap: <strong class="mono">${esc(serverIp)}</strong></span></div>` : ''}
+        ${p.fields.map((f) => `<div class="field"><label for="hf-${f.key}">${esc(f.label)}${f.optional ? ' <span class="muted small">(optional)</span>' : ''}</label>
+          <input id="hf-${f.key}" name="cred_${f.key}" ${f.secret ? 'type="password" autocomplete="off"' : 'autocomplete="off"'} ${f.optional ? '' : 'required'}></div>`).join('')}
+        <div class="field"><label for="hf-label">Name it <span class="muted small">(optional, e.g. "Main GoDaddy")</span></label><input id="hf-label" name="label"></div>`;
+    };
+    onSubmit(hostForm, async (d) => {
+      const creds = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('cred_')).map(([k, v]) => [k.slice(5), v]));
+      await api('POST', '/api/domain-hosts', { provider: d.provider, label: d.label, creds });
+      toast('Domain host connected');
+      await reload();
+    });
+  }
+  const addForm = document.getElementById('dom-client-add');
+  if (addForm) {
+    onSubmit(addForm, async (d) => {
+      const btn = addForm.querySelector('[type=submit]');
+      btn.textContent = 'Adding… (this can take a minute)';
+      const r = await api('POST', '/api/domains', { text: d.text, host_id: d.host_id });
+      toast(`${r.added} domain${r.added === 1 ? '' : 's'} added${r.failed ? `, ${r.failed} need${r.failed === 1 ? 's' : ''} attention (see below)` : ''}`);
+      await reload();
+    });
+  }
+  document.querySelectorAll('[data-host-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Remove ${b.dataset.name}? Its API keys are deleted. Domains already moved stay on Cloudflare.`)) return;
+      try { await api('DELETE', `/api/domain-hosts/${b.dataset.hostDel}`); await reload(); } catch (ex) { toast(ex.message); }
+    };
+  });
+  document.querySelectorAll('[data-dc-check]').forEach((b) => {
+    b.onclick = async () => { b.disabled = true; b.textContent = 'Checking…'; try { await api('POST', `/api/domains/${b.dataset.dcCheck}/connect`, {}); } catch (ex) { toast(ex.message); } await reload(); };
+  });
+  document.querySelectorAll('[data-dc-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Remove ${b.dataset.domain} from your list? (It stays on Cloudflare; ask us if you want it removed there too.)`)) return;
+      try { await api('DELETE', `/api/domains/${b.dataset.dcDel}`); await reload(); } catch (ex) { toast(ex.message); }
+    };
+  });
 }
 
 // Admin: clients and their domains.
@@ -3306,12 +3402,13 @@ function adminDomainClient({ client, domains, batches, types }) {
       <div class="card">
         <div class="card-head"><h2>Domains</h2>${domains.length ? `<div class="row">${domains.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search domain…">' : ''}<button class="btn btn-sm" id="dom-check-all">Recheck all DNS</button></div>` : ''}</div>
         ${domains.length ? `<div class="table-wrap"><table class="dom-table">
-          <thead><tr><th>Domain</th><th>Mailbox type</th><th>Detected</th><th>DNS</th><th class="num">Mailboxes</th><th>Created</th><th>Checked</th><th></th></tr></thead>
+          <thead><tr><th>Domain</th><th>Mailbox type</th><th>Detected</th><th>DNS</th><th>Cloudflare</th><th class="num">Mailboxes</th><th>Created</th><th>Checked</th><th></th></tr></thead>
           <tbody>${domains.map((d) => `<tr data-mb="${d.id}" data-search="${searchText(d.domain, d.inbox_label, d.batch_name)}">
             <td><strong class="mono">${esc(d.domain)}</strong>${d.order_id ? `<div class="muted small">${esc(d.batch_name || `Batch #${d.order_id}`)}</div>` : ''}</td>
             <td><select class="dom-type" data-dom-type="${d.id}" aria-label="Mailbox type for ${esc(d.domain)}">${typeOptions(d.inbox_type, 'Not set')}</select></td>
             <td class="small">${d.dns ? `${esc(PROVIDER_NAME[d.dns.detected] || d.dns.detected)}${d.dns.mx[0] ? `<div class="muted mono" style="font-size:11px">${esc(d.dns.mx[0])}</div>` : ''}` : '—'}</td>
             <td>${dnsBadge(d)}${dnsChips(d)}${dnsIssues(d)}</td>
+            <td class="cf-cell">${cfCell(d)}${d.cf_status !== 'active' ? `<div style="margin-top:6px"><button class="btn btn-sm" data-dom-cf="${d.id}">${d.cf_status ? 'Check / retry' : 'Add to Cloudflare'}</button></div>` : ''}</td>
             <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
             <td class="small">${d.created_on ? fmtDate(String(d.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
             <td class="small">${d.dns_checked_at ? fmtWhen(d.dns_checked_at) : '—'}</td>
@@ -3342,6 +3439,13 @@ function adminDomainClient({ client, domains, batches, types }) {
   };
   const all = document.getElementById('dom-check-all');
   if (all) all.onclick = async () => { busy(all, 'Checking…'); try { await api('POST', `${API()}/clients/${client.id}/domains/check`); toast('DNS rechecked'); } catch (ex) { toast(ex.message); } route(); };
+  document.querySelectorAll('[data-dom-cf]').forEach((b) => {
+    b.onclick = async () => {
+      busy(b, 'Working…');
+      try { const r = await api('POST', `${API()}/domains/${b.dataset.domCf}/cloudflare`); if (r && !r.ok) toast(r.error); } catch (ex) { toast(ex.message); }
+      route();
+    };
+  });
   document.querySelectorAll('[data-dom-check]').forEach((b) => {
     b.onclick = async () => { busy(b, 'Checking…'); try { await api('POST', `${API()}/domains/${b.dataset.domCheck}/check`); } catch (ex) { toast(ex.message); } route(); };
   });
@@ -3396,4 +3500,33 @@ function uploadGuide(kind, open) {
       <div class="row" style="margin-top:14px"><a class="btn btn-primary" href="${g.file}">⬇ Download sample CSV</a></div>
     </div>
   </details>`;
+}
+
+// Settings: Mithmill's Cloudflare account (owner). Clients' domains are added
+// there and their nameservers switched to it.
+async function cloudflareCard() {
+  const box = document.getElementById('cf-card');
+  if (!box || !isOwner()) return;
+  let cf;
+  try { cf = await api('GET', '/api/admin/cloudflare'); } catch (ex) { box.innerHTML = ''; return; }
+  box.innerHTML = `<form class="card card-pad" id="cf-form">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+      <div><h2>Cloudflare</h2><div class="muted small" style="margin-top:4px">Clients' domains are added to this account, and their nameservers are switched to it from their domain host.</div></div>
+      ${cf.tokenSet ? '<span class="badge dns-st dns-ok">Connected</span>' : '<span class="badge dns-st dns-warn">Not connected</span>'}</div>
+    <div class="grid-2">
+      <div class="field"><label for="cf-acc">Account ID</label><input id="cf-acc" name="account_id" class="mono" required value="${esc(cf.accountId)}" placeholder="32 characters">
+        <div class="hint">Cloudflare dashboard → your account → Overview (right side) → Account ID.</div></div>
+      <div class="field"><label for="cf-token">API token</label><input id="cf-token" name="api_token" type="password" autocomplete="off" placeholder="${cf.tokenSet ? `Saved (${esc(cf.tokenHint)}). Leave empty to keep it` : 'Paste the token'}" ${cf.tokenSet ? '' : 'required'}>
+        <div class="hint">My Profile → API Tokens → Create Token → Custom token with: <strong>Zone → Zone → Edit</strong> and <strong>Zone → DNS → Edit</strong>; Account resources: <strong>Include → your account</strong>; Zone resources: <strong>Include → All zones from that account</strong>.</div></div>
+    </div>
+    <div class="row"><button class="btn btn-primary" type="submit">${cf.tokenSet ? 'Save & test' : 'Connect Cloudflare'}</button>${cf.tokenSet ? '<button class="btn" type="button" id="cf-test">Test connection</button>' : ''}<span class="muted small">The token is checked first, then stored encrypted. It's never shown again.</span></div>
+    <div class="error"></div>
+  </form>`;
+  onSubmit(document.getElementById('cf-form'), async (d) => {
+    const r = await api('PUT', '/api/admin/cloudflare', d);
+    toast(`Cloudflare connected: ${r.account}`);
+    cloudflareCard();
+  });
+  const t = document.getElementById('cf-test');
+  if (t) t.onclick = async () => { try { const r = await api('POST', '/api/admin/cloudflare/test'); toast(`Working: ${r.account}`); } catch (ex) { toast(ex.message); } };
 }

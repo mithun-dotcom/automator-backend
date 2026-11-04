@@ -32,6 +32,29 @@ A portal where Mithmill clients see their mailboxes and billing and order new ma
 - Pricing: standard prices per inbox type under **Pricing & reminders**, and each client's own prices under **Clients & invites** → Edit pricing (blank = standard price). You can also change the price and mailbox count on an existing order; future renewals follow it.
 - Reminders: run the reminder check by hand under **Pricing & reminders**.
 
+## Cloudflare and client domain hosts
+
+**Owner setup** (Settings → Cloudflare)
+- Enter the Cloudflare **Account ID** and an **API token**. Create the token as a custom token with Zone → Zone → Edit and Zone → DNS → Edit, Account resources: your account, and Zone resources: all zones from that account.
+- The token is tested before it's saved. It's stored encrypted (same key as onboarding CSVs) and is never shown or sent to the browser again.
+
+**Clients** (Domains page, shown once Cloudflare is connected)
+1. **Connect a domain host** with its API keys: Spaceship, GoDaddy, Namecheap, Hostinger, Name.com, Dynadot or Porkbun. The keys are tested, then stored encrypted.
+   - Namecheap needs our server's IP whitelisted; the page shows it.
+   - GoDaddy only gives API access to accounts with 10+ domains or Domain Pro.
+   - Any other host (DreamHost, etc.) can be added as **Other host (manual)**.
+2. **Add domains** (one per line, picking the host). For each domain the portal:
+   - creates a zone in our Cloudflare, copying the domain's current DNS records so email keeps working;
+   - switches the domain's nameservers at the host to Cloudflare's.
+   - For manual hosts, it shows the two nameservers to set by hand.
+3. Each domain shows its Cloudflare status:
+   - **Pending**: nameservers switched or to be set, waiting for Cloudflare.
+   - **Active on Cloudflare**.
+   - An error, with the reason (e.g. "Domain not found in this account", or "already on another Cloudflare account"), plus **Retry**.
+   - Pending zones are checked hourly and with **Check now**. When one turns active, the client is notified.
+
+Admins see the Cloudflare status on each client's Domains page and can **Add to Cloudflare** / retry any domain (using the client's host if it has one). Clients can remove domains they added themselves.
+
 ## Domains in client emails
 
 Renewal reminders (7/3/1-day, including the critical one), invoice emails, urgent reminders, cancellation emails (Cancel subscription and setting a batch to cancelled), and your unpaid-invoice alerts all include the domains on that subscription and how many mailboxes they have. For example: "Domains on this batch: acme.com, getacme.com (24 mailboxes)". Invoice emails show it as a **Domains** note box.

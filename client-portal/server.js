@@ -11,6 +11,8 @@ const billing = require('./billing');
 const onboarding = require('./onboarding');
 const mailboxes = require('./mailboxes');
 const dnscheck = require('./dnscheck');
+const cloudflare = require('./cloudflare');
+const registrars = require('./registrars');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
@@ -1181,9 +1183,12 @@ shared.delete('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
 // an automatic DNS check (MX/SPF/DMARC/DKIM) when added and once a day.
 
 const DOMAIN_LIST = `SELECT d.id, d.domain, d.inbox_type, p.label AS inbox_label, d.order_id, o.batch_name, d.dns, d.dns_status, d.dns_checked_at, d.created_at,
+    d.cf_status, d.cf_nameservers, d.cf_error, d.cf_checked_at, d.ns_status, d.ns_error, d.ns_updated_at, d.added_by_client,
+    d.registrar_account_id, h.provider AS host_provider, h.label AS host_label,
     (SELECT count(*) FROM mailboxes m WHERE m.user_id = d.user_id AND m.email LIKE '%@' || d.domain)::int AS mailbox_count,
     (SELECT min(m.created_on) FROM mailboxes m WHERE m.user_id = d.user_id AND m.email LIKE '%@' || d.domain) AS created_on
   FROM domains d LEFT JOIN pricing p ON p.inbox_type = d.inbox_type LEFT JOIN orders o ON o.id = d.order_id
+  LEFT JOIN registrar_accounts h ON h.id = d.registrar_account_id
   WHERE d.user_id = $1 ORDER BY d.domain`;
 
 // Checks these domains' DNS (a few at a time). A domain with no mailbox type
@@ -1407,10 +1412,195 @@ async function recheckDomains() {
     const { rows } = await query(
       "SELECT id FROM domains WHERE dns_checked_at IS NULL OR dns_checked_at < now() - interval '24 hours' ORDER BY dns_checked_at NULLS FIRST LIMIT 60");
     await checkDomains(rows.map((r) => r.id));
+    await refreshZones();
   } catch (err) {
     console.error('Domain DNS recheck failed:', err);
   }
 }
+
+// ---- Cloudflare: domains go onto Mithmill's Cloudflare account and their
+// nameservers are switched at the client's domain host (registrar).
+
+// Adds the domain to Cloudflare (or refreshes its zone) and, when it has a
+// domain host with an API, switches the nameservers there. Never throws: the
+// outcome is stored on the domain (cf_status / cf_error, ns_status / ns_error).
+async function connectDomain(id) {
+  const { rows: [d] } = await query(
+    'SELECT d.*, h.provider, h.creds FROM domains d LEFT JOIN registrar_accounts h ON h.id = d.registrar_account_id WHERE d.id = $1', [id]);
+  if (!d) return null;
+  let zone;
+  try {
+    zone = d.cf_zone_id ? await cloudflare.getZone(d.cf_zone_id) : await cloudflare.addZone(d.domain);
+  } catch (err) {
+    await query("UPDATE domains SET cf_status = 'error', cf_error = $2, cf_checked_at = now() WHERE id = $1", [id, err.message.slice(0, 500)]);
+    return { ok: false, error: err.message };
+  }
+  await query("UPDATE domains SET cf_zone_id = $2, cf_status = $3, cf_nameservers = $4, cf_error = '', cf_checked_at = now() WHERE id = $1",
+    [id, zone.id, zone.status, JSON.stringify(zone.nameservers)]);
+  const p = d.provider && registrars.PROVIDERS[d.provider];
+  if (zone.status === 'active') {
+    await query("UPDATE domains SET ns_status = 'done', ns_error = '' WHERE id = $1", [id]);
+  } else if (!p || p.manual) {
+    await query("UPDATE domains SET ns_status = 'manual', ns_error = '' WHERE id = $1", [id]);
+  } else if (d.ns_status !== 'updated') {
+    try {
+      await p.setNameservers(JSON.parse(onboarding.decrypt(d.creds)), d.domain, zone.nameservers);
+      await query("UPDATE domains SET ns_status = 'updated', ns_error = '', ns_updated_at = now() WHERE id = $1", [id]);
+      await query('UPDATE registrar_accounts SET last_ok_at = now(), last_error = \'\' WHERE id = $1', [d.registrar_account_id]);
+      await cloudflare.activationCheck(zone.id);
+    } catch (err) {
+      await query("UPDATE domains SET ns_status = 'failed', ns_error = $2 WHERE id = $1", [id, err.message.slice(0, 500)]);
+      return { ok: false, error: err.message };
+    }
+  }
+  return { ok: true, status: zone.status };
+}
+
+// Pending zones: is Cloudflare seeing the new nameservers yet? When one turns
+// active, the client hears about it. Runs hourly with the DNS recheck.
+async function refreshZones(ids) {
+  const { rows } = ids
+    ? await query('SELECT id, user_id, domain, cf_status FROM domains WHERE id = ANY($1) AND cf_zone_id IS NOT NULL', [ids])
+    : await query("SELECT id, user_id, domain, cf_status FROM domains WHERE cf_zone_id IS NOT NULL AND cf_status <> 'active' LIMIT 100");
+  for (const d of rows) {
+    const before = d.cf_status;
+    await connectDomain(d.id);
+    const { rows: [now] } = await query('SELECT cf_status FROM domains WHERE id = $1', [d.id]);
+    if (before !== 'active' && now.cf_status === 'active') {
+      const { rows: [u] } = await query('SELECT id, email, name FROM users WHERE id = $1', [d.user_id]);
+      await billing.notify(u, `${d.domain} is active on Cloudflare`,
+        `Your domain ${d.domain} is now active: its nameservers point to our Cloudflare, so we can manage its DNS for your mailboxes.`, { paymentNote: false });
+    }
+  }
+}
+
+admin.get('/cloudflare', ownerOnly, asyncRoute(async (req, res) => {
+  const cfg = await cloudflare.config();
+  res.json({ accountId: cfg.accountId, tokenSet: Boolean(cfg.token), tokenHint: registrars.mask(cfg.token) });
+}));
+admin.put('/cloudflare', ownerOnly, asyncRoute(async (req, res) => {
+  const accountId = str(req.body.account_id, 64);
+  const token = str(req.body.api_token, 300);
+  if (!/^[0-9a-f]{32}$/i.test(accountId)) throw new HttpError(400, 'The Account ID is 32 letters and numbers (Cloudflare dashboard → your account → Overview, right side)');
+  const current = await cloudflare.config();
+  if (!token && !current.token) throw new HttpError(400, 'Enter the API token');
+  let result;
+  try {
+    result = await cloudflare.test({ accountId, token: token || current.token });
+  } catch (err) {
+    throw new HttpError(400, `${err.message}. Nothing was saved.`);
+  }
+  await cloudflare.save({ accountId, token });
+  await audit.record(req.user, 'edited', 'Cloudflare connection', [{ field: 'Account', from: '', to: result.account }]);
+  res.json({ ok: true, account: result.account });
+}));
+admin.post('/cloudflare/test', ownerOnly, asyncRoute(async (req, res) => {
+  try { res.json({ ok: true, ...(await cloudflare.test()) }); } catch (err) { throw new HttpError(400, err.message); }
+}));
+
+// Owner / team: add a client's domain to Cloudflare (with its domain host, if any).
+shared.post('/domains/:id/cloudflare', asyncRoute(async (req, res) => {
+  const d = await assertDomain(req, req.params.id);
+  const r = await connectDomain(d.id);
+  res.json(r);
+}));
+
+// ---- The client's domain hosts and their own domains.
+const clientOnly = (req, res, next) => (req.user.role === 'client' ? next() : next(new HttpError(403, 'Clients only')));
+const HOST_LIST = `SELECT h.id, h.provider, h.label, h.hint, h.last_ok_at, h.last_error, h.created_at,
+    (SELECT count(*) FROM domains d WHERE d.registrar_account_id = h.id)::int AS domain_count
+  FROM registrar_accounts h WHERE h.user_id = $1 ORDER BY h.created_at`;
+
+app.get('/api/domain-hosts', auth, clientOnly, asyncRoute(async (req, res) => {
+  const [{ rows }, cfg] = await Promise.all([query(HOST_LIST, [req.user.id]), cloudflare.config()]);
+  let ip = '';
+  try { ip = await registrars.myIp(); } catch { ip = ''; }
+  res.json({ hosts: rows, providers: registrars.publicList(), cloudflareReady: Boolean(cfg.accountId && cfg.token), serverIp: ip });
+}));
+
+app.post('/api/domain-hosts', auth, clientOnly, asyncRoute(async (req, res) => {
+  const provider = str(req.body.provider, 30);
+  let creds;
+  try {
+    creds = registrars.cleanCreds(provider, req.body.creds);
+    await registrars.PROVIDERS[provider].test(creds);
+  } catch (err) {
+    throw new HttpError(400, err instanceof registrars.HostError ? `${err.message}. Check the keys and try again.` : err.message);
+  }
+  const p = registrars.PROVIDERS[provider];
+  const secret = p.fields.find((f) => f.secret) || p.fields[0];
+  const label = str(req.body.label, 100) || (p.manual ? creds.host_name || 'Other host' : p.name);
+  const { rows: [h] } = await query(
+    'INSERT INTO registrar_accounts (user_id, provider, label, creds, hint, last_ok_at) VALUES ($1, $2, $3, $4, $5, now()) RETURNING id',
+    [req.user.id, provider, label, onboarding.encrypt(JSON.stringify(creds)), p.manual ? '' : registrars.mask(creds[secret.key])]);
+  res.status(201).json({ id: h.id });
+}));
+
+app.delete('/api/domain-hosts/:id', auth, clientOnly, asyncRoute(async (req, res) => {
+  const { rowCount } = await query('DELETE FROM registrar_accounts WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
+  if (!rowCount) throw new HttpError(404, 'Domain host not found');
+  res.json({ ok: true });
+}));
+
+// The client adds domains (one per line) from one of their domain hosts:
+// each goes onto Cloudflare and its nameservers are switched.
+app.post('/api/domains', auth, clientOnly, asyncRoute(async (req, res) => {
+  const hostId = Number(req.body.host_id) || 0;
+  const { rows: [host] } = await query('SELECT id FROM registrar_accounts WHERE id = $1 AND user_id = $2', [hostId, req.user.id]);
+  if (!host) throw new HttpError(400, 'Choose the domain host these domains are registered at');
+  const cfg = await cloudflare.config();
+  if (!cfg.accountId || !cfg.token) throw new HttpError(503, 'Adding domains isn\'t available yet. Please contact us.');
+  const names = [];
+  const bad = [];
+  for (const raw of String(req.body.text || '').split(/[\s,;]+/).filter(Boolean)) {
+    const d = dnscheck.clean(raw);
+    if (!d) { bad.push(raw); continue; }
+    for (const part of await dnscheck.splitGlued(d)) if (!names.includes(part)) names.push(part);
+  }
+  if (bad.length) throw new HttpError(400, `Not valid domains: ${bad.slice(0, 5).join(', ')}`);
+  if (!names.length) throw new HttpError(400, 'Enter at least one domain');
+  if (names.length > 100) throw new HttpError(400, 'Add at most 100 domains at a time');
+  const ids = [];
+  for (const name of names) {
+    const { rows: [d] } = await query(
+      `INSERT INTO domains (user_id, domain, registrar_account_id, added_by_client) VALUES ($1, $2, $3, true)
+       ON CONFLICT (user_id, domain) DO UPDATE SET registrar_account_id = EXCLUDED.registrar_account_id,
+         ns_status = CASE WHEN domains.ns_status = 'failed' THEN NULL ELSE domains.ns_status END
+       RETURNING id`, [req.user.id, name, host.id]);
+    ids.push(d.id);
+  }
+  const results = [];
+  for (const id of ids) results.push(await connectDomain(id));
+  checkDomains(ids).catch((err) => console.error('Domain check failed:', err));
+  await audit.record(req.user, 'added', `${names.length} domain${names.length === 1 ? '' : 's'} (client, to Cloudflare)`,
+    [{ field: 'Domains', from: '', to: names.join('\n') }], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ added: names.length, ok: results.filter((r) => r && r.ok).length, failed: results.filter((r) => r && !r.ok).length });
+}));
+
+const clientDomain = async (req) => {
+  const { rows: [d] } = await query('SELECT * FROM domains WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
+  if (!d) throw new HttpError(404, 'Domain not found');
+  return d;
+};
+// Retry: re-adds to Cloudflare / switches the nameservers again; or just refreshes the status.
+app.post('/api/domains/:id/connect', auth, clientOnly, asyncRoute(async (req, res) => {
+  const d = await clientDomain(req);
+  if (d.ns_status === 'failed') await query('UPDATE domains SET ns_status = NULL WHERE id = $1', [d.id]);
+  if (req.body && Number(req.body.host_id)) {
+    const { rows: [h] } = await query('SELECT id FROM registrar_accounts WHERE id = $1 AND user_id = $2', [Number(req.body.host_id), req.user.id]);
+    if (!h) throw new HttpError(400, 'Domain host not found');
+    await query('UPDATE domains SET registrar_account_id = $2, ns_status = NULL WHERE id = $1', [d.id, h.id]);
+  }
+  await refreshZones([d.id]);
+  if (!d.cf_zone_id) await connectDomain(d.id);
+  res.json({ ok: true });
+}));
+app.delete('/api/domains/:id', auth, clientOnly, asyncRoute(async (req, res) => {
+  const d = await clientDomain(req);
+  if (!d.added_by_client) throw new HttpError(403, 'This domain was added by us. Ask us if it should be removed.');
+  await query('DELETE FROM domains WHERE id = $1', [d.id]);
+  res.json({ ok: true });
+}));
 
 // The client's own mailbox logins.
 const clientRole = (req, res, next) => (req.user.role === 'client' ? next() : next(new HttpError(403, 'Clients only')));
