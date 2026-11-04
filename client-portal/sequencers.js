@@ -65,7 +65,16 @@ const PROVIDERS = {
         const r = await http('GET', `https://api.instantly.ai/api/v2/oauth/session/status/${encodeURIComponent(sessionId)}`, { headers: this.headers(creds) });
         const st = r.data && r.data.status;
         if (r.ok && st === 'success') return { note: r.data.email ? `Connected as ${r.data.email}` : 'Connected' };
-        if (!r.ok || st === 'error' || st === 'expired') throw new SeqError(`Instantly: ${st === 'expired' ? 'the sign-in session expired' : errOf(r)}`, await signin.diag(page));
+        if (!r.ok || st === 'error' || st === 'expired') {
+          const code = errOf(r);
+          const page2 = await signin.diag(page);
+          // The page Instantly shows at the end says what happened (e.g. "Account already exists in another workspace").
+          if (/already exists in (this|your) workspace/i.test(page2.text || '')) return { note: 'Already in this Instantly workspace' };
+          const why = /account_exists|already exists/i.test(`${code} ${page2.text || ''}`)
+            ? 'this mailbox is already connected in another Instantly workspace. Remove it there first (or use that workspace\'s API key), then retry'
+            : st === 'expired' ? 'the sign-in session expired' : `${code}${page2.text ? ` (${page2.text.slice(0, 120)})` : ''}`;
+          throw new SeqError(`Instantly: ${why}`, page2);
+        }
         await signin.sleep(3000);
       }
       throw new SeqError('Instantly didn\'t confirm the connection within a minute', await signin.diag(page));

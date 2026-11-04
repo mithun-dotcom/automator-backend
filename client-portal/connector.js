@@ -17,12 +17,12 @@ const setConn = (mailboxId, sequencerId, status, error = '') => query(
    ON CONFLICT (mailbox_id, sequencer_id) DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error, updated_at = now()`,
   [mailboxId, sequencerId, status, String(error).slice(0, 500)]);
 
-// Google or Microsoft, from the mailbox's type, else what its domain's MX says.
+// Google or Microsoft: what the domain's MX records say (that's where the
+// mailbox really lives), else the mailbox's type.
 async function providerOf(m) {
-  const fromType = m.inbox_type ? dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }) : null;
-  if (fromType) return fromType;
   const { rows: [d] } = await query("SELECT dns->>'detected' AS detected FROM domains WHERE user_id = $1 AND domain = lower(split_part($2, '@', 2))", [m.user_id, m.email]);
-  return d && ['google', 'microsoft'].includes(d.detected) ? d.detected : null;
+  if (d && ['google', 'microsoft'].includes(d.detected)) return d.detected;
+  return m.inbox_type ? dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }) : null;
 }
 
 // Adds jobs for these mailboxes (skipping ones already connected or waiting).

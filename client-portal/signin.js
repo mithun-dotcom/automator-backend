@@ -79,8 +79,9 @@ async function google(page, email, password, step = () => {}) {
   if (!onGoogle(page.url())) await page.waitForURL(onGoogle, { timeout: 30000 }).catch(() => {});
   // An account chooser can come first.
   await clickFirst(page, ['text=Use another account']);
-  const emailBox = page.locator('input[type="email"]').first();
-  if (!(await emailBox.isVisible({ timeout: 20000 }).catch(() => false)) && !(await emailBox.waitFor({ timeout: 20000 }).then(() => true).catch(() => false))) {
+  // Google's current page uses a text field named "identifier"; older ones type="email" / #identifierId.
+  const emailBox = page.locator('input[name="identifier"], #identifierId, input[type="email"], input[autocomplete="username"]').first();
+  if (!(await emailBox.waitFor({ state: 'visible', timeout: 30000 }).then(() => true).catch(() => false))) {
     await fail(page, 'Google: the sign-in page didn\'t show an email field');
   }
   await emailBox.fill(email);
@@ -148,7 +149,7 @@ async function microsoft(page, email, password, step = () => {}) {
   const t0 = Date.now();
   while (!(await pw.isVisible().catch(() => false))) {
     const text = await bodyText(page);
-    if (/doesn.t exist|We couldn.t find an account/i.test(text)) await fail(page, 'Microsoft: no account with this email');
+    if (/doesn.t exist|We couldn.t find an account/i.test(text)) await fail(page, 'Microsoft has no account with this email. Check the mailbox type: this domain may be on Google');
     if (Date.now() - t0 > 25000) await fail(page, 'Microsoft: the password field didn\'t appear');
     await sleep(800);
   }
@@ -163,6 +164,7 @@ async function microsoft(page, email, password, step = () => {}) {
     if (!onMicrosoft(url)) { step('Microsoft: done'); return; }
     const text = await bodyText(page);
     if (/password is incorrect|account or password is incorrect/i.test(text)) await fail(page, 'Microsoft: wrong password for this mailbox');
+    if (/couldn.t find an account|doesn.t exist/i.test(text)) await fail(page, 'Microsoft has no account with this email. Check the mailbox type: this domain may be on Google');
     if (/Update your password|password has expired/i.test(text)) await fail(page, 'Microsoft wants the password changed. Change it, update it here, and retry');
     if (/Approve sign in request|Enter code|Verify your identity|Authenticator/i.test(text)) await fail(page, 'Microsoft asked for MFA (Authenticator / code). Turn off MFA / Security defaults for this mailbox and retry');
     if (/Need admin approval|Approval required|requires admin approval/i.test(text)) await fail(page, 'Microsoft: the tenant admin must approve the sequencer\'s app (Entra ID → Enterprise applications → consent)');
