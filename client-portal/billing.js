@@ -98,10 +98,10 @@ async function notify(user, title, body, { always = false, emailExtra = '', butt
   await sendMail({
     to: user.email,
     subject: subject || title,
-    text: `Hi ${user.name || 'there'},\n\n${body}${buttons.length ? `\n\n${buttons.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n')}` : ''}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${APP_URL}` : ''}${note ? `\n\n${note}` : ''}\n\n${name}`,
+    text: `Hi ${user.name || 'there'},\n\n${body}${buttons.length ? `\n\n${buttons.map((b) => `${b.hint ? `${b.hint}\n` : ''}${b.label}: ${b.url}`).join('\n')}` : ''}${emailExtra ? `\n\n${emailExtra}` : ''}${portal ? `\n\nOpen your portal: ${brand && brand.portalUrl ? brand.portalUrl : APP_URL}` : ''}${note ? `\n\n${note}` : ''}\n\n${name}`,
     heading: heading || title,
     alert,
-    cta: portal ? { label: 'Open your portal', url: APP_URL } : null,
+    cta: portal ? { label: 'Open your portal', url: brand && brand.portalUrl ? brand.portalUrl : APP_URL } : null,
     buttons,
     after: emailExtra || undefined,
     note: note || undefined,

@@ -17,8 +17,13 @@ function toBrand(r) {
     }
   }
   const name = r.brand_name || r.company || 'Your provider';
+  // Their own domain if set, else the main portal with ?b=<id> (both show their brand).
+  const portalUrl = r.custom_domain ? `https://${r.custom_domain}` : APP_URL ? `${APP_URL}/?b=${r.user_id}` : '';
   return {
     resellerId: r.user_id,
+    customDomain: r.custom_domain || '',
+    portalUrl,
+    loginUrl: portalUrl ? `${portalUrl}#/login` : '',
     name,
     logoPath: r.logo_type ? `/brand/${r.user_id}/logo?v=${r.logo_version}` : null,
     logoUrl: r.logo_type && APP_URL ? `${APP_URL}/brand/${r.user_id}/logo?v=${r.logo_version}` : null,
@@ -60,4 +65,12 @@ async function resellerOf(userId) {
   return r || null;
 }
 
-module.exports = { forClient, forReseller, resellerOf };
+// The white-label reseller whose own domain this is (null if none).
+async function forHost(host) {
+  const h = String(host || '').toLowerCase().replace(/:\d+$/, '');
+  if (!h) return null;
+  const { rows: [r] } = await query(`${SELECT} WHERE lower(r.custom_domain) = $1 AND (r.white_label OR r.use_mixxbee) AND r.active`, [h]);
+  return toBrand(r);
+}
+
+module.exports = { forClient, forReseller, resellerOf, forHost };

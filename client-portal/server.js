@@ -212,7 +212,7 @@ app.post('/api/auth/forgot', asyncRoute(async (req, res) => {
   const { rows: [rc] } = await query('SELECT reseller_id FROM users WHERE id = $1', [user.id]);
   const rb = rc && rc.reseller_id ? await brands.forClient(user.id) : null;
   if (rb) {
-    const blink = `${baseUrl(req)}/?b=${rb.resellerId}#/invite/${token}`;
+    const blink = rb.customDomain ? `https://${rb.customDomain}/#/invite/${token}` : `${baseUrl(req)}/?b=${rb.resellerId}#/invite/${token}`;
     await sendMail({
       to: email,
       subject: `Reset your ${rb.name} portal password`,
@@ -263,6 +263,12 @@ app.get('/api/me', auth, asyncRoute(async (req, res) => {
     }
   }
   res.json(watchedBy ? { ...me, watching: { name: watchedBy.name, email: watchedBy.email } } : me);
+}));
+
+// The brand of the domain the portal is opened on (a reseller's own domain).
+app.get('/api/brand-host', asyncRoute(async (req, res) => {
+  const b = await brands.forHost(req.hostname);
+  res.json({ brand: b ? { id: b.resellerId, name: b.name, logo: b.logoPath, host: b.customDomain } : null });
 }));
 
 // A white-label reseller's name and logo, for their clients' login page (?b=<id>).
@@ -678,6 +684,7 @@ shared.get('/overview', asyncRoute(async (req, res) => {
     sellers: reseller ? [] : (await query("SELECT COALESCE(NULLIF(name, ''), email) AS name FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows.map((r) => r.name),
     mailEnabled: mailEnabled(), today: billing.today(),
     whiteLabel: reseller ? (await query('SELECT white_label OR use_mixxbee AS wl FROM resellers WHERE user_id = $1', [req.user.id])).rows[0].wl : undefined,
+    clientLoginUrl: reseller ? ((await brands.forReseller(req.user.id)) || {}).loginUrl : undefined,
   });
 }));
 
@@ -973,7 +980,8 @@ async function inviteResellerClient(req, client) {
     [client.email, client.name || '', client.company || '', token, req.user.watchedBy ? req.user.watchedBy.id : req.user.id]);
   const brand = await brands.forClient(client.id);
   const name = brand ? brand.name : 'Mithmill';
-  const link = `${baseUrl(req)}/${brand ? `?b=${brand.resellerId}` : ''}#/invite/${token}`;
+  const link = brand && brand.customDomain ? `https://${brand.customDomain}/#/invite/${token}`
+    : `${baseUrl(req)}/${brand ? `?b=${brand.resellerId}` : ''}#/invite/${token}`;
   const reset = Boolean(client.password_set);
   const emailed = await sendMail({
     to: client.email,
@@ -2772,6 +2780,44 @@ admin.get('/resellers', ownerOnly, asyncRoute(async (req, res) => {
   res.json({ resellers: rows, mailEnabled: mailEnabled() });
 }));
 
+// The address a reseller's domain must point to (CNAME), on Render.
+const PORTAL_HOST = process.env.RENDER_EXTERNAL_HOSTNAME || 'mithmill-client-portal.onrender.com';
+
+// Is the reseller's own domain set up? 1. DNS points here; 2. it answers over
+// HTTPS (the domain is added in Render, which issues the certificate) with their brand.
+admin.post('/resellers/:id/domain-check', ownerOnly, asyncRoute(async (req, res) => {
+  const r = await findReseller(req.params.id);
+  const d = r.custom_domain;
+  if (!d) throw new HttpError(400, 'Save a custom domain first');
+  const out = { domain: d, target: PORTAL_HOST, dns: { ok: false, found: '' }, https: { ok: false, error: '' } };
+  try {
+    const cname = await dnscheck.api.cname(d).catch(() => []);
+    if (cname.length) {
+      out.dns.found = `CNAME ${cname.join(', ')}`;
+      out.dns.ok = cname.some((c) => c.toLowerCase().replace(/\.$/, '') === PORTAL_HOST);
+    } else {
+      const [mine, theirs] = await Promise.all([
+        require('dns').promises.resolve4(PORTAL_HOST).catch(() => []),
+        require('dns').promises.resolve4(d).catch(() => []),
+      ]);
+      out.dns.found = theirs.length ? `A ${theirs.join(', ')}` : 'no record';
+      out.dns.ok = theirs.length > 0 && theirs.some((ip) => mine.includes(ip));
+    }
+  } catch (err) { out.dns.found = err.message; }
+  try {
+    const rr = await fetch(`https://${d}/api/brand-host`, { signal: AbortSignal.timeout(10000) });
+    const data = await rr.json().catch(() => ({}));
+    out.https.ok = rr.ok && data.brand && data.brand.id === r.id;
+    if (!out.https.ok) out.https.error = rr.ok ? 'The domain reaches a server, but not this portal for this reseller' : `HTTP ${rr.status}`;
+  } catch (err) {
+    const code = (err.cause && err.cause.code) || '';
+    out.https.error = /certificate|SSL|TLS|CERT/i.test(`${code} ${err.cause || err.message}`) ? 'No HTTPS certificate yet (add the domain in Render, then wait a few minutes)'
+      : code === 'ENOTFOUND' ? 'The domain doesn\'t exist in DNS yet: add the CNAME record first'
+        : code || err.message;
+  }
+  res.json(out);
+}));
+
 admin.get('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
   const r = await findReseller(req.params.id);
   const [clients, orders, invoices] = await Promise.all([
@@ -2791,7 +2837,7 @@ admin.get('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
   ]);
   const { rows: [agreement] } = await query(
     'SELECT version, signer_name, signer_title, signed_at, ip FROM reseller_agreements WHERE reseller_id = $1 ORDER BY signed_at DESC LIMIT 1', [r.id]);
-  res.json({ reseller: resellerOut(r), clients: clients.rows, orders: orders.rows, invoices: invoices.rows, today: billing.today(),
+  res.json({ reseller: { ...resellerOut(r), custom_domain: r.custom_domain, portal_host: PORTAL_HOST }, clients: clients.rows, orders: orders.rows, invoices: invoices.rows, today: billing.today(),
     mailAccount: process.env.SMTP_USER || '', agreement: agreement || null, agreementVersion: policy.VERSION });
 }));
 
@@ -2847,11 +2893,18 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
     smtp_user: b.smtp_user === undefined ? r.smtp_user : str(b.smtp_user, 200),
     white_label: b.white_label === undefined ? r.white_label : Boolean(b.white_label),
     use_mixxbee: b.use_mixxbee === undefined ? r.use_mixxbee : Boolean(b.use_mixxbee),
+    custom_domain: b.custom_domain === undefined ? r.custom_domain : (b.custom_domain ? dnscheck.clean(String(b.custom_domain)) || 'INVALID' : ''),
     active: b.active === undefined ? r.active : Boolean(b.active),
     monthly_commitment: b.monthly_commitment === undefined ? r.monthly_commitment
       : (b.monthly_commitment === '' || b.monthly_commitment === null ? null : Math.max(0, Math.round(Number(b.monthly_commitment)) || 0)),
   };
   if (!v.brand_name) throw new HttpError(400, 'Give the reseller a brand name');
+  if (v.custom_domain === 'INVALID') throw new HttpError(400, 'Enter the domain only, e.g. portal.theirbrand.com');
+  if (v.custom_domain && /(^|\.)(mithmill\.com|onrender\.com)$/i.test(v.custom_domain)) throw new HttpError(400, 'Use a domain the reseller owns, e.g. portal.theirbrand.com');
+  if (v.custom_domain) {
+    const { rows: [taken] } = await query('SELECT user_id FROM resellers WHERE lower(custom_domain) = $1 AND user_id <> $2', [v.custom_domain, r.id]);
+    if (taken) throw new HttpError(400, 'Another reseller already uses that domain');
+  }
   // Paying through Mixxbee is white-label with our processor: it needs their branding on.
   if (v.use_mixxbee) v.white_label = true;
   if (v.smtp_port < 1 || v.smtp_port > 65535) throw new HttpError(400, 'SMTP port must be a number like 465 or 587');
@@ -2862,9 +2915,9 @@ admin.put('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
   await query(
     `UPDATE resellers SET brand_name = $1, website = $2, support_email = $3, payment_note = $4, sender_name = $5,
        sender_email = $6, reply_to = $7, smtp_host = $8, smtp_port = $9, smtp_user = $10, smtp_pass = $11,
-       white_label = $12, active = $13, monthly_commitment = $15, use_mixxbee = $16 WHERE user_id = $14`,
+       white_label = $12, active = $13, monthly_commitment = $15, use_mixxbee = $16, custom_domain = $17 WHERE user_id = $14`,
     [v.brand_name, v.website, v.support_email, v.payment_note, v.sender_name, v.sender_email, v.reply_to,
-     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id, v.monthly_commitment, v.use_mixxbee]);
+     v.smtp_host, v.smtp_port, v.smtp_user, pass, v.white_label, v.active, r.id, v.monthly_commitment, v.use_mixxbee, v.custom_domain]);
   const changes = Object.entries(v).filter(([k, val]) => String(val) !== String(r[k]))
     .map(([k, val]) => ({ field: k.replace(/_/g, ' '), from: String(r[k] ?? ''), to: String(val) }));
   if (pass !== r.smtp_pass) changes.push({ field: 'smtp password', from: '', to: pass ? '(changed)' : '(removed)' });

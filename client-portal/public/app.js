@@ -339,7 +339,13 @@ function welcome(name, stats, eyebrow = 'Welcome back') {
 // no Mithmill chat, and no New order page (they order through the reseller).
 let loginBrand = null;
 const savedBrandId = () => { try { return localStorage.getItem('portalBrand'); } catch { return null; } };
+let hostBrandChecked = false;
 async function loadLoginBrand() {
+  // A reseller's own domain shows their brand, whatever ?b says.
+  if (!hostBrandChecked) {
+    hostBrandChecked = true;
+    try { const { brand } = await api('GET', '/api/brand-host'); if (brand) { loginBrand = brand; return; } } catch { /* main domain */ }
+  } else if (loginBrand && loginBrand.host) return;
   const id = new URLSearchParams(location.search).get('b') || savedBrandId();
   if (!id || (loginBrand && String(loginBrand.id) === String(id))) return;
   try {
@@ -2531,7 +2537,7 @@ function renderAnalytics(data) {
 // billed by email.
 function resellerClients() {
   const { clients, whiteLabel } = state.admin;
-  const loginLink = `${location.origin}/${whiteLabel ? `?b=${state.me.id}` : ''}#/login`;
+  const loginLink = state.admin.clientLoginUrl || `${location.origin}/${whiteLabel ? `?b=${state.me.id}` : ''}#/login`;
   shell(ADMIN_TABS, '#/admin/clients', `
     <div class="page-head"><div><h1>Clients</h1><p class="muted">Your clients get their invoices and renewal reminders by email${whiteLabel ? ', under your brand' : ''}. Invite them to the client portal to see their mailboxes, domains and invoices${whiteLabel ? ' (with your logo and name)' : ''}.</p></div></div>
     <div class="stack">
@@ -2724,6 +2730,12 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
           <div><strong>Use our payment processing (Mixxbee)</strong><div class="muted small" style="margin-top:4px">On: their clients pay through Mixxbee LLC, like Mithmill's clients (this also turns White-label on). Invoices and emails keep their brand and logo, and show "Payments powered by Mixxbee" and "Mixxbee LLC on behalf of ${esc(r.brand_name || 'their brand')}". Their own payment details below aren't used. Payment links go in each invoice's notes, as for your own invoices.</div></div>
           <label class="switch switch-lg"><input type="checkbox" name="use_mixxbee" ${r.use_mixxbee ? 'checked' : ''}><span></span></label>
         </div>
+        <div class="field"><label>Their own portal domain <span class="muted small">(optional)</span></label>
+          <div class="row" style="flex-wrap:nowrap"><input name="custom_domain" class="mono" value="${esc(r.custom_domain || '')}" placeholder="portal.theirbrand.com">${r.custom_domain ? '<button type="button" class="btn" id="rs-domain-check">Check</button>' : ''}</div>
+          <div class="hint">Their clients use this address for the portal, with their brand, instead of client.mithmill.com. Set it up in 2 steps:
+            1) at their DNS host, add a <strong>CNAME</strong> record for that name pointing to <span class="mono">${esc(r.portal_host || 'mithmill-client-portal.onrender.com')}</span>;
+            2) in Render → mithmill-client-portal → Settings → Custom Domains → <strong>Add</strong> the same domain (Render issues the HTTPS certificate). Then click Check.</div>
+          <div id="rs-domain-result"></div></div>
         <div class="grid-2">
           <div class="field"><label>Brand name</label><input name="brand_name" required value="${esc(r.brand_name)}"></div>
           <div class="field"><label>Website</label><input name="website" value="${esc(r.website)}" placeholder="https://"></div>
@@ -2825,6 +2837,21 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
     </div>`);
 
   wireClientInvites();
+  const dc = document.getElementById('rs-domain-check');
+  if (dc) {
+    dc.onclick = async () => {
+      dc.disabled = true; dc.textContent = 'Checking…';
+      const box = document.getElementById('rs-domain-result');
+      try {
+        const c = await api('POST', `/api/admin/resellers/${r.id}/domain-check`);
+        const line = (ok, label, detail) => `<div class="small" style="margin-top:4px">${ok ? '✅' : '❌'} <strong>${label}</strong> ${esc(detail)}</div>`;
+        box.innerHTML = line(c.dns.ok, 'DNS:', c.dns.ok ? `points to ${c.target}` : `${c.domain} should be a CNAME to ${c.target} (found: ${c.dns.found || 'nothing'})`)
+          + line(c.https.ok, 'HTTPS:', c.https.ok ? `https://${c.domain} is live with their brand` : c.https.error)
+          + (c.dns.ok && c.https.ok ? `<div class="small" style="margin-top:6px">All set. Their clients' links now use <a href="https://${esc(c.domain)}/#/login" target="_blank" rel="noopener">https://${esc(c.domain)}</a>.</div>` : '');
+      } catch (ex) { box.textContent = ex.message; }
+      dc.disabled = false; dc.textContent = 'Check';
+    };
+  }
   const f = document.getElementById('rs-brand');
   // Mixxbee processing is white-label paid through us: switching it on switches white-label on too.
   f.use_mixxbee.addEventListener('change', () => { if (f.use_mixxbee.checked) f.white_label.checked = true; });

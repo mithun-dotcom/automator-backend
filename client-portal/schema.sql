@@ -441,3 +441,8 @@ CREATE INDEX IF NOT EXISTS connect_jobs_queue ON connect_jobs (status, id);
 -- White-label reseller whose clients pay through Mithmill's processor
 -- (Mixxbee LLC): their brand and logo, with "Payments powered by Mixxbee".
 ALTER TABLE resellers ADD COLUMN IF NOT EXISTS use_mixxbee BOOLEAN NOT NULL DEFAULT false;
+
+-- A reseller's own portal address (e.g. portal.theirbrand.com, a CNAME to
+-- this service): opening it shows their brand; their clients' links use it.
+ALTER TABLE resellers ADD COLUMN IF NOT EXISTS custom_domain TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS resellers_custom_domain ON resellers (lower(custom_domain)) WHERE custom_domain <> '';
