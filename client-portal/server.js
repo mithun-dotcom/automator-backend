@@ -209,6 +209,23 @@ app.post('/api/auth/forgot', asyncRoute(async (req, res) => {
     `INSERT INTO invites (email, name, company, token, expires_at, role)
      VALUES ($1, $2, '', $3, now() + interval '${RESET_MINUTES} minutes', $4)`,
     [email, user.name || '', token, user.role]);
+  const { rows: [rc] } = await query('SELECT reseller_id FROM users WHERE id = $1', [user.id]);
+  const rb = rc && rc.reseller_id ? await brands.forClient(user.id) : null;
+  if (rb) {
+    const blink = `${baseUrl(req)}/?b=${rb.resellerId}#/invite/${token}`;
+    await sendMail({
+      to: email,
+      subject: `Reset your ${rb.name} portal password`,
+      text: `Hi ${user.name || 'there'},\n\nWe received a request to reset the password for your ${rb.name} portal account.\n\n` +
+        `Set a new password here (the link works for ${RESET_MINUTES} minutes):\n\n${blink}\n\n` +
+        `If you didn't ask for this, you can ignore this email. Your password stays the same.\n\n${rb.name}`,
+      heading: 'Reset your password',
+      cta: { label: 'Set a new password', url: blink },
+      brand: rb,
+      reason: `You receive this because someone asked to reset the password for this email on the ${rb.name} portal.`,
+    });
+    return done();
+  }
   const link = `${baseUrl(req)}/#/invite/${token}`;
   await sendMail({
     to: email,
@@ -234,10 +251,27 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/me', auth, (req, res) => {
+app.get('/api/me', auth, asyncRoute(async (req, res) => {
   const { watchedBy, ...me } = req.user;
+  // A reseller's client: their portal shows the reseller's brand (when white-label) and has no New order page.
+  if (me.role === 'client') {
+    const { rows: [u] } = await query('SELECT reseller_id FROM users WHERE id = $1', [me.id]);
+    if (u && u.reseller_id) {
+      me.resellerClient = true;
+      const b = await brands.forClient(me.id);
+      if (b) me.brand = { id: b.resellerId, name: b.name, logo: b.logoPath, supportEmail: b.supportEmail };
+    }
+  }
   res.json(watchedBy ? { ...me, watching: { name: watchedBy.name, email: watchedBy.email } } : me);
-});
+}));
+
+// A white-label reseller's name and logo, for their clients' login page (?b=<id>).
+app.get('/api/brand/:id', asyncRoute(async (req, res) => {
+  const { rows: [r] } = await query('SELECT user_id FROM resellers WHERE user_id = $1 AND (white_label OR use_mixxbee) AND active', [Number(req.params.id) || 0]);
+  if (!r) return res.json({ brand: null });
+  const b = await brands.forReseller(r.user_id);
+  res.json({ brand: { id: b.resellerId, name: b.name, logo: b.logoPath } });
+}));
 
 // "Watch": the owner opens a client's, reseller's or team member's dashboard as them.
 app.post('/api/admin/watch/:id', auth, ownerOnly, asyncRoute(async (req, res) => {
@@ -282,8 +316,10 @@ async function findInvite(token) {
 
 app.get('/api/invites/:token', asyncRoute(async (req, res) => {
   const invite = await findInvite(req.params.token);
-  const { rows: [existing] } = await query('SELECT password_set FROM users WHERE email = $1', [invite.email]);
-  res.json({ email: invite.email, name: invite.name, company: invite.company, reset: Boolean(existing && existing.password_set) });
+  const { rows: [existing] } = await query('SELECT id, password_set, reseller_id FROM users WHERE email = $1', [invite.email]);
+  const b = existing && existing.reseller_id ? await brands.forClient(existing.id) : null;
+  res.json({ email: invite.email, name: invite.name, company: invite.company, reset: Boolean(existing && existing.password_set),
+    brand: b ? { id: b.resellerId, name: b.name, logo: b.logoPath } : null });
 }));
 
 app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
@@ -329,6 +365,7 @@ const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o
   o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months, o.domain_invited, o.sequencer_invited`;
 
 app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
+  const dashBrand = await brands.forClient(req.user.id);
   const uid = req.user.id;
   const settings = await getSettings();
   const [orders, invoices, notifications, pricing] = await Promise.all([
@@ -362,11 +399,12 @@ app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
     invoices: invoices.rows,
     notifications: notifications.rows,
     pricing: pricing.rows,
-    paymentNote: billing.PAYMENT_NOTE,
+    paymentNote: dashBrand ? dashBrand.paymentNote : billing.PAYMENT_NOTE,
     today: billing.today(),
     csvRequiredMin: Number(settings.csv_required_min),
     cancelNote: settings.cancel_note,
-    supportEmail: settings.support_email,
+    supportEmail: dashBrand ? dashBrand.supportEmail || settings.support_email : settings.support_email,
+    brandName: dashBrand ? dashBrand.name : 'Mithmill',
     appUrl: baseUrl(req),
   });
 }));
@@ -410,6 +448,8 @@ const SEQUENCERS = ['Instantly', 'Smartlead', 'Lemlist', 'Reply.io', 'Other', 'N
 
 app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   if (req.user.role !== 'client') throw new HttpError(403, 'Only clients place orders here');
+  const { rows: [me] } = await query('SELECT reseller_id FROM users WHERE id = $1', [req.user.id]);
+  if (me && me.reseller_id) throw new HttpError(403, 'Please contact your provider to order more mailboxes');
   const b = req.body;
   const { rows: [price] } = await query(`${CLIENT_PRICING_SQL} WHERE p.inbox_type = $2`,
     [req.user.id, str(b.inbox_type, 50)]);
@@ -872,8 +912,8 @@ admin.post('/invites', audited('invited', 'invite', (req, body) => (body ? body.
   if (!isEmail(email)) throw new HttpError(400, 'Enter a valid email');
   const { rows: [found] } = await query('SELECT role, name, company, password_set, reseller_id, added_by FROM users WHERE email = $1', [email]);
   if (found && found.role !== 'client') throw new HttpError(400, found.role === 'reseller' ? 'That email belongs to a reseller' : 'That email belongs to a team member');
-  // Resellers' clients don't log in to the portal.
-  if (found && found.reseller_id) throw new HttpError(400, 'That email belongs to a reseller\'s client, who can\'t be invited');
+  // A reseller's client is invited in the reseller's brand (from their reseller page or the reseller's portal).
+  if (found && found.reseller_id) throw new HttpError(400, 'That email belongs to a reseller\'s client: invite them from the reseller\'s page or the reseller\'s portal');
   if (found && !canSee(req, found)) throw new HttpError(400, 'A client with that email already exists');
   // A client you added yourself but who never joined gets a normal invite, not a reset.
   const existing = found && found.password_set ? found : null;
@@ -921,6 +961,43 @@ function parseCycle(b) {
   }
   return 1;
 }
+
+// Invites a reseller's client to the portal (or re-sends a password link if
+// they've joined), in the reseller's brand when white-label is on.
+async function inviteResellerClient(req, client) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  await query('DELETE FROM invites WHERE email = $1 AND accepted_at IS NULL', [client.email]);
+  await query(
+    `INSERT INTO invites (email, name, company, token, expires_at, sold_by, added_by)
+     VALUES ($1, $2, $3, $4, now() + interval '${INVITE_DAYS} days', '', $5)`,
+    [client.email, client.name || '', client.company || '', token, req.user.watchedBy ? req.user.watchedBy.id : req.user.id]);
+  const brand = await brands.forClient(client.id);
+  const name = brand ? brand.name : 'Mithmill';
+  const link = `${baseUrl(req)}/${brand ? `?b=${brand.resellerId}` : ''}#/invite/${token}`;
+  const reset = Boolean(client.password_set);
+  const emailed = await sendMail({
+    to: client.email,
+    subject: reset ? `Reset your ${name} portal password` : `You're invited to the ${name} client portal`,
+    text: reset
+      ? `Hi ${client.name || 'there'},\n\nUse this link to set a new password for the ${name} client portal (valid for ${INVITE_DAYS} days):\n\n${link}\n\n${name}`
+      : `Hi ${client.name || 'there'},\n\nYou've been invited to the ${name} client portal, where you can see your mailboxes, ` +
+        `domains, invoices and renewals.\n\nSet your password here (valid for ${INVITE_DAYS} days):\n\n${link}\n\n${name}`,
+    heading: reset ? 'Reset your password' : `You're invited to the ${name} client portal`,
+    cta: { label: reset ? 'Set a new password' : 'Accept invitation', url: link },
+    brand,
+    reason: `You receive this because ${name} invited you to its client portal.`,
+  });
+  return { link, emailed, reset };
+}
+
+shared.post('/clients/:id/invite', asyncRoute(async (req, res) => {
+  const client = await assertClient(req, req.params.id);
+  if (!client.reseller_id) throw new HttpError(400, 'Invite this client from Clients & invites');
+  if (client.access_blocked) throw new HttpError(400, 'This client\'s portal access is blocked');
+  const r = await inviteResellerClient(req, client);
+  await audit.record(req.user, 'invited', `reseller's client ${client.company || client.name || client.email} <${client.email}>`, []);
+  res.json(r);
+}));
 
 // Adds a client without inviting them, so existing batches and billing can be
 // loaded first. They get their password when they accept an invite later.
@@ -2698,7 +2775,8 @@ admin.get('/resellers', ownerOnly, asyncRoute(async (req, res) => {
 admin.get('/resellers/:id', ownerOnly, asyncRoute(async (req, res) => {
   const r = await findReseller(req.params.id);
   const [clients, orders, invoices] = await Promise.all([
-    query(`SELECT u.id, u.email, u.name, u.company, u.created_at,
+    query(`SELECT u.id, u.email, u.name, u.company, u.created_at, u.password_set,
+             EXISTS (SELECT 1 FROM invites i WHERE i.email = u.email AND i.accepted_at IS NULL AND i.expires_at > now()) AS invited,
              COALESCE(SUM(o.quantity) FILTER (WHERE o.status = 'active' AND o.inbox_type <> 'other'), 0)::int AS active_mailboxes,
              COALESCE(SUM(o.quantity * o.price_per_mailbox) FILTER (WHERE o.status = 'active'), 0) AS monthly,
              count(o.id)::int AS batch_count

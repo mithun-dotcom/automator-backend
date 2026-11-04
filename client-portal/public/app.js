@@ -164,7 +164,8 @@ async function route() {
   }
   if (!state.me) { updateWatchBar(); return renderLogin(); }
   updateWatchBar();
-  if (!state.me.watching) tawkIdentify();
+  applyClientBrand();
+  if (!state.me.watching && !state.me.resellerClient) tawkIdentify();
   setAdminTabs();
   // Resellers sign the Reseller Agreement before anything else.
   if (isReseller() && !state.agreementOk && !state.me.watching && parts[0] !== 'password') {
@@ -249,7 +250,10 @@ function shell(tabs, active, content) {
   const items = isClient ? [...tabs, ['#/notifications', 'Notifications']] : tabs;
   const current = active || (location.hash.startsWith('#/notifications') ? '#/notifications' : '');
   const nav = items.map(([href, label]) => `<a href="${href}" class="${href === current ? 'active' : ''}">${icon(NAV_ICONS[href])}<span class="label">${label}</span>${href === '#/notifications' && unread ? `<span class="sb-badge">${unread}</span>` : ''}</a>`).join('');
-  const logo = (sub) => `<a class="sb-logo" href="#/"><img src="logo-mark-white.png" alt=""><div><div class="sb-name">MithMill</div><div class="sb-sub">${sub}</div></div></a>`;
+  const b = isClient && state.me.brand;
+  const logo = (sub) => (b
+    ? `<a class="sb-logo sb-logo-brand" href="#/">${b.logo ? `<span class="sb-brand-logo"><img src="${esc(b.logo)}" alt=""></span>` : ''}<div><div class="sb-name">${esc(b.name)}</div><div class="sb-sub">${sub}</div></div></a>`
+    : `<a class="sb-logo" href="#/"><img src="logo-mark-white.png" alt=""><div><div class="sb-name">MithMill</div><div class="sb-sub">${sub}</div></div></a>`);
 
   document.body.classList.remove('nav-open');
   $app.innerHTML = `
@@ -330,12 +334,50 @@ function welcome(name, stats, eyebrow = 'Welcome back') {
 
 // ------------------------------------------------------------------ auth pages
 
-function authCard(inner) {
-  $app.innerHTML = `<div class="auth"><div class="card"><div class="auth-logo"><img src="logo-full.png" alt="MithMill — From Cold to Gold: Email Strategies That Shine"></div>${inner}</div></div>`;
+// ---- A reseller's clients see the reseller's brand (white-label): login and
+// invite pages (?b=<reseller id>, remembered on this browser), sidebar, title;
+// no Mithmill chat, and no New order page (they order through the reseller).
+let loginBrand = null;
+const savedBrandId = () => { try { return localStorage.getItem('portalBrand'); } catch { return null; } };
+async function loadLoginBrand() {
+  const id = new URLSearchParams(location.search).get('b') || savedBrandId();
+  if (!id || (loginBrand && String(loginBrand.id) === String(id))) return;
+  try {
+    const { brand } = await api('GET', `/api/brand/${encodeURIComponent(id)}`);
+    loginBrand = brand;
+    try { if (brand) localStorage.setItem('portalBrand', String(brand.id)); else localStorage.removeItem('portalBrand'); } catch { /* private mode */ }
+  } catch { loginBrand = null; }
+}
+function hideChat() {
+  const hide = () => { try { window.Tawk_API.hideWidget(); } catch { /* not loaded */ } };
+  if (window.Tawk_API && typeof window.Tawk_API.hideWidget === 'function') hide();
+  else if (window.Tawk_API) window.Tawk_API.onLoad = hide;
+}
+function applyClientBrand() {
+  const me = state.me;
+  if (!me || !me.resellerClient) return;
+  const i = CLIENT_TABS.findIndex(([h]) => h === '#/order');
+  if (i !== -1) CLIENT_TABS.splice(i, 1);
+  hideChat();
+  if (me.brand) {
+    loginBrand = { id: me.brand.id, name: me.brand.name, logo: me.brand.logo };
+    try { localStorage.setItem('portalBrand', String(me.brand.id)); } catch { /* private mode */ }
+    document.title = `${me.brand.name} Client Portal`;
+  }
 }
 
-function renderLogin() {
-  if (location.hash !== '#/login') history.replaceState(null, '', '#/login');
+function authCard(inner) {
+  if (loginBrand) hideChat();
+  const logo = loginBrand
+    ? `${loginBrand.logo ? `<img src="${esc(loginBrand.logo)}" alt="${esc(loginBrand.name)}" style="max-height:64px">` : `<div class="auth-brand-name">${esc(loginBrand.name)}</div>`}`
+    : '<img src="logo-full.png" alt="MithMill — From Cold to Gold: Email Strategies That Shine">';
+  if (loginBrand) document.title = `${loginBrand.name} Client Portal`;
+  $app.innerHTML = `<div class="auth"><div class="card"><div class="auth-logo">${logo}</div>${inner}</div></div>`;
+}
+
+async function renderLogin() {
+  if (location.hash !== '#/login') history.replaceState(null, '', `${location.search}#/login`);
+  await loadLoginBrand();
   authCard(`
     <h1>Client portal</h1>
     <p class="muted">Log in to see your mailboxes, billing and orders.</p>
@@ -346,7 +388,7 @@ function renderLogin() {
       <button class="btn btn-primary" style="width:100%" type="submit">Log in</button>
       <div class="error"></div>
     </form>
-    <p class="muted small" style="margin:16px 0 0">Access is by invitation only. Need an account? Contact your Mithmill account manager.</p>`);
+    <p class="muted small" style="margin:16px 0 0">Access is by invitation only. Need an account? Contact your ${esc(loginBrand ? loginBrand.name : 'Mithmill')} account manager.</p>`);
   onSubmit(document.getElementById('f'), async (d) => {
     const r = await api('POST', '/api/auth/login', d);
     state.me = await api('GET', '/api/me');
@@ -365,7 +407,7 @@ function renderVpnBlocked() {
       <li>Click <strong>Try again</strong>.</li>
     </ol>
     <button class="btn btn-primary" style="width:100%" id="vpn-retry">Try again</button>
-    <p class="muted small" style="margin:16px 0 0">Still seeing this with the VPN off? Contact your Mithmill account manager.</p>`);
+    <p class="muted small" style="margin:16px 0 0">Still seeing this with the VPN off? Contact your ${esc(loginBrand ? loginBrand.name : 'Mithmill')} account manager.</p>`);
   document.getElementById('vpn-retry').onclick = () => { state.me = undefined; route(); };
 }
 
@@ -400,7 +442,7 @@ function renderForgot() {
     authCard(`
       <h1>Check your email</h1>
       <p class="muted">If <strong>${esc(d.email)}</strong> has an account, we've sent it a link to set a new password. The link works for 1 hour.</p>
-      <p class="muted small">Nothing arrived after a few minutes? Check your spam folder, or contact your Mithmill account manager.</p>
+      <p class="muted small">Nothing arrived after a few minutes? Check your spam folder, or contact your ${esc(loginBrand ? loginBrand.name : 'Mithmill')} account manager.</p>
       <a class="btn" href="#/login">Back to login</a>`);
   });
 }
@@ -410,12 +452,13 @@ async function renderInvite(token) {
   let inv;
   try {
     inv = await api('GET', `/api/invites/${encodeURIComponent(token)}`);
+    if (inv.brand) loginBrand = inv.brand; else await loadLoginBrand();
   } catch (ex) {
     authCard(`<h1>Invite not valid</h1><p class="muted">${esc(ex.message)}</p><a class="btn" href="#/login">Go to login</a>`);
     return;
   }
   authCard(`
-    <h1>${inv.reset ? 'Set a new password' : 'Welcome to Mithmill'}</h1>
+    <h1>${inv.reset ? 'Set a new password' : `Welcome to ${esc(inv.brand ? inv.brand.name : 'Mithmill')}`}</h1>
     <p class="muted">${inv.reset ? 'Choose a new password for' : 'Create your password to activate your account for'} <strong>${esc(inv.email)}</strong>.</p>
     <form id="f">
       ${inv.reset ? '' : `<div class="field"><label for="name">Your name</label><input id="name" name="name" value="${esc(inv.name)}" autocomplete="name"></div>`}
@@ -459,7 +502,7 @@ async function renderClient(page, arg, sub) {
     if (sub === 'pdf') { history.replaceState(null, '', `#/invoice/${arg}`); setTimeout(() => window.print(), 300); }
     return;
   }
-  if (page === 'order') return renderOrder();
+  if (page === 'order') return state.me.resellerClient ? go('#/dashboard') : renderOrder();
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
   if (page === 'mailboxes') {
@@ -474,7 +517,7 @@ async function renderClient(page, arg, sub) {
 }
 
 function batchesTable(orders) {
-  if (!orders.length) return '<div class="empty">No orders yet. Place your first order to get mailboxes set up.</div>';
+  if (!orders.length) return `<div class="empty">${state.me && state.me.resellerClient ? 'No mailboxes yet.' : 'No orders yet. Place your first order to get mailboxes set up.'}</div>`;
   return `<div class="table-wrap"><table>
     <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Amount</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
     <tbody>${orders.map((o) => `<tr>
@@ -551,7 +594,7 @@ function cancelEmail(o) {
     ? domains.map(([d, n]) => `- ${d}: ${o.inbox_label}${n ? `, ${n} mailbox${n === 1 ? '' : 'es'}` : ''}`)
     : ['- No domains on file for this batch'];
   const body = [
-    'Hi Mithmill team,',
+    `Hi ${state.dash.brandName || 'Mithmill'} team,`,
     '',
     'I would like to cancel all the inboxes from this order.',
     '',
@@ -607,7 +650,7 @@ function renderDashboard() {
   shell(CLIENT_TABS, '#/dashboard', `
     <div class="page-head">
       <div><h1>Dashboard</h1><p class="muted">${esc(user.company || user.email)}${stats.nextRenewal ? ` · Next renewal ${fmtDate(stats.nextRenewal)}` : ''}</p></div>
-      <a class="btn btn-primary" href="#/order">+ New order</a>
+      ${state.me.resellerClient ? '' : '<a class="btn btn-primary" href="#/order">+ New order</a>'}
     </div>
     <div class="stack">
       ${welcome((user.name || user.company || 'there').split(' ')[0], [
@@ -2489,7 +2532,7 @@ function renderAnalytics(data) {
 function resellerClients() {
   const { clients, whiteLabel } = state.admin;
   shell(ADMIN_TABS, '#/admin/clients', `
-    <div class="page-head"><div><h1>Clients</h1><p class="muted">Your clients get their invoices and renewal reminders by email${whiteLabel ? ', under your brand' : ''}. They don't log in to the portal.</p></div></div>
+    <div class="page-head"><div><h1>Clients</h1><p class="muted">Your clients get their invoices and renewal reminders by email${whiteLabel ? ', under your brand' : ''}. Invite them to the client portal to see their mailboxes, domains and invoices${whiteLabel ? ' (with your logo and name)' : ''}.</p></div></div>
     <div class="stack">
       <form class="card card-pad" id="add-client-form">
         <h2 style="margin-bottom:14px">Add a client</h2>
@@ -2505,9 +2548,11 @@ function resellerClients() {
         <div class="card-head"><h2>Your clients</h2><span class="muted small">${clients.length} total</span></div>
         ${clients.length ? filterBar('rclients', [{ name: 'active', label: 'Mailboxes: any', options: [['yes', 'Has active mailboxes'], ['no', 'No active mailboxes']] }]) : ''}
         ${clients.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Client</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
+          <thead><tr><th>Client</th><th>Portal</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
           <tbody>${clients.map((c) => `<tr data-id="${c.id}" data-search="${searchText(c.company, c.name, c.email)}" data-active="${c.active_mailboxes > 0 ? 'yes' : 'no'}">
             <td>${esc(c.company || c.name || c.email)}<div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}${esc(c.email)}</div></td>
+            <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}
+              <div><button class="btn btn-sm btn-ghost" data-rc-invite="${c.id}" data-email="${esc(c.email)}">${c.password_set ? 'Send reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button></div></td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
             <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button><button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button></div></td>
           </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet. Add your first one above.</div>'}
@@ -2515,6 +2560,7 @@ function resellerClients() {
     </div>`);
 
   wireFilterBar('rclients');
+  wireClientInvites();
   onSubmit(document.getElementById('add-client-form'), async (d) => {
     const r = await api('POST', `${API()}/clients`, d);
     toast(`${d.email} added. Now add their batches.`);
@@ -2740,8 +2786,10 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
 
       <div class="card">
         <div class="card-head"><div><h2>Their clients</h2><div class="muted small">The reseller doesn't see that you can see these.</div></div><span class="muted small">${clients.length}</span></div>
-        ${clients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th class="num">Batches</th><th>Added</th></tr></thead><tbody>
+        ${clients.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Portal</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th class="num">Batches</th><th>Added</th></tr></thead><tbody>
           ${clients.map((c) => `<tr><td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}<a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div></td>
+            <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}
+              <div><button class="btn btn-sm btn-ghost" data-rc-invite="${c.id}" data-email="${esc(c.email)}">${c.password_set ? 'Send reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button>${watchBtn(c.id)}</div></td>
             <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td class="num">${c.batch_count}</td><td>${fmtDate(c.created_at)}</td></tr>`).join('')}
         </tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
       </div>
@@ -2768,6 +2816,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
       </div>
     </div>`);
 
+  wireClientInvites();
   const f = document.getElementById('rs-brand');
   // Mixxbee processing is white-label paid through us: switching it on switches white-label on too.
   f.use_mixxbee.addEventListener('change', () => { if (f.use_mixxbee.checked) f.white_label.checked = true; });
@@ -3642,4 +3691,20 @@ async function connectionLog(clientId) {
           `URL: ${j.diag.url || ''}`, `Title: ${j.diag.title || ''}`, `Headings: ${(j.diag.headings || []).join(' | ')}`,
           `Buttons: ${(j.diag.buttons || []).join(' | ')}`, `Inputs: ${(j.diag.inputs || []).join(' | ')}`, `Text: ${j.diag.text || ''}`].join('\n'))}</div></details>` : ''}</td></tr>`).join('')}
     </tbody></table></div></div>`;
+}
+
+// "Send invite" for a reseller's client (reseller's Clients page and the
+// owner's reseller page): emails the invite in the reseller's brand.
+function wireClientInvites() {
+  document.querySelectorAll('[data-rc-invite]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await api('POST', `${isReseller() ? '/api/reseller' : '/api/admin'}/clients/${b.dataset.rcInvite}/invite`);
+        if (r.emailed) toast(`${r.reset ? 'Password link' : 'Invite'} emailed to ${b.dataset.email}`);
+        else prompt(`Email isn't set up, so send this link to ${b.dataset.email} yourself:`, r.link);
+        route();
+      } catch (ex) { toast(ex.message); b.disabled = false; }
+    };
+  });
 }
