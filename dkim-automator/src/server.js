@@ -67,6 +67,48 @@ app.post('/api/jobs', async (req, res) => {
   res.json({ ok: true, job: queue.publicJob(job), skipped, invalid });
 });
 
+// Bulk: one line per domain → "admin@x.com, password, domain.com" (password may be empty if
+// that account is already signed in to the Chrome running the extension). Grouped per admin.
+app.post('/api/jobs/bulk', async (req, res) => {
+  const b = req.body || {};
+  const groups = new Map(), bad = [];
+  String(b.rows || '').split(/\r?\n/).forEach((line, i) => {
+    if (!line.trim() || /^\s*#/.test(line)) return;
+    const cols = line.split(/[,\t;]/).map(c => c.trim());
+    if (cols.length < 2) return bad.push(`line ${i + 1}: expected email, password, domain`);
+    const email = cols[0].toLowerCase();
+    const domainCols = cols.length === 2 ? [cols[1]] : cols.slice(2);
+    const password = cols.length === 2 ? '' : cols[1];
+    const { domains, invalid } = parseDomains(domainCols.join(' '));
+    if (!/@/.test(email)) return bad.push(`line ${i + 1}: invalid admin email`);
+    if (!domains.length) return bad.push(`line ${i + 1}: no valid domain${invalid.length ? ` (${invalid.join(', ')})` : ''}`);
+    const g = groups.get(email) || { password: '', domains: [] };
+    if (password) g.password = password;
+    g.domains.push(...domains);
+    groups.set(email, g);
+  });
+  if (!groups.size) return res.status(400).json({ error: 'No valid rows', bad });
+  const selector = String(b.selector || 'google').trim().toLowerCase();
+  const keyLength = Number(b.keyLength) === 1024 ? 1024 : 2048;
+  const dnsProvider = b.dnsProvider === 'manual' ? 'manual' : 'cloudflare';
+  if (!/^[a-z0-9-]{1,63}$/.test(selector)) return res.status(400).json({ error: 'Invalid selector' });
+  if (dnsProvider === 'cloudflare' && !b.simulate) {
+    if (!b.cloudflareToken) return res.status(400).json({ error: 'Cloudflare API token is required (or choose Manual DNS)' });
+    try { await dns.cloudflareVerifyToken(b.cloudflareToken); }
+    catch (e) { return res.status(400).json({ error: `Cloudflare token check failed: ${e.message}` }); }
+  }
+  const created = [], skipped = [];
+  for (const [email, g] of groups) {
+    const r = queue.createJob({
+      adminEmail: email, adminPassword: g.password, domains: [...new Set(g.domains)], dnsProvider,
+      cloudflareToken: b.cloudflareToken, selector, keyLength, regenerate: b.regenerate, simulate: !!b.simulate, executor: 'extension',
+    });
+    skipped.push(...r.skipped);
+    if (r.job.tasks.length) created.push({ id: r.job.id, tenant: email, domains: r.job.tasks.length });
+  }
+  res.json({ ok: true, jobs: created, skipped, bad });
+});
+
 app.get('/api/jobs', (req, res) => res.json(store.all().map(j => queue.publicJob(j))));
 
 app.get('/api/jobs/:id', (req, res) => {

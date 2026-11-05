@@ -79,20 +79,29 @@
   <section class="card">
     <h2>New DKIM job</h2>
     <form id="form" autocomplete="off">
+      <div class="row" style="margin-bottom:12px">
+        <label class="check"><input type="radio" name="mode" value="bulk" checked> Bulk list (many admin accounts)</label>
+        <label class="check"><input type="radio" name="mode" value="single"> One admin account</label>
+      </div>
+      <div id="bulkBox" style="margin-bottom:12px">
+        <label>One line per domain: <span class="mono">admin email, password, domain</span>
+          <span class="hint">Leave the password empty (<span class="mono">admin@x.com,,x.com</span>) if that account is already signed in to the extension's Chrome.</span></label>
+        <textarea name="rows" placeholder="admin@acme-mail.com, Passw0rd!, acme-mail.com&#10;admin@acme-outreach.com, S3cret!, acme-outreach.com&#10;admin@acme-outreach.com, S3cret!, acme-outreach2.com"></textarea>
+      </div>
       <div class="grid">
-        <div>
+        <div class="single">
           <label>Google Admin email</label>
-          <input name="adminEmail" type="email" placeholder="admin@yourdomain.com" required>
+          <input name="adminEmail" type="email" placeholder="admin@yourdomain.com">
         </div>
-        <div>
+        <div class="single">
           <label>Run Google steps in</label>
           <select name="executor" id="executor">
             <option value="extension">My Chrome (extension), recommended</option>
             <option value="server">Server browser (needs password, may get CAPTCHAs)</option>
           </select>
         </div>
-        <div id="pwBox" style="display:none">
-          <label>Google Admin password</label>
+        <div class="single">
+          <label>Google Admin password <span class="hint" id="pwHint">(optional: lets the extension sign in by itself)</span></label>
           <input name="adminPassword" type="password" autocomplete="new-password">
         </div>
         <div>
@@ -107,7 +116,7 @@
           <input name="cloudflareToken" type="password" autocomplete="new-password">
         </div>
       </div>
-      <div style="margin-top:12px">
+      <div style="margin-top:12px" class="single">
         <label>Domains <span class="hint">one per line, all on this Google Workspace account</span></label>
         <textarea name="domains" placeholder="example.com&#10;example.org"></textarea>
       </div>
@@ -145,7 +154,14 @@ const LABEL = { queued: 'Queued', record_ready: 'Record ready', waiting_dns: 'Wa
   active: 'Active', failed: 'Failed', needs_action: 'Needs action', cancelled: 'Cancelled' };
 
 $('#dnsProvider').onchange = e => { $('#cfBox').style.display = e.target.value === 'cloudflare' ? '' : 'none'; };
-$('#executor').onchange = e => { $('#pwBox').style.display = e.target.value === 'server' ? '' : 'none'; };
+$('#executor').onchange = e => { $('#pwHint').textContent = e.target.value === 'server' ? '(required)' : '(optional: lets the extension sign in by itself)'; };
+function setMode() {
+  const bulk = document.querySelector('input[name=mode]:checked').value === 'bulk';
+  $('#bulkBox').style.display = bulk ? '' : 'none';
+  document.querySelectorAll('.single').forEach(el => { el.style.display = bulk ? 'none' : ''; });
+}
+document.querySelectorAll('input[name=mode]').forEach(r => { r.onchange = setMode; });
+setMode();
 
 function renderAgent(a) {
   const on = a.connected;
@@ -159,7 +175,7 @@ function renderAgent(a) {
        <ol class="hint" style="margin:10px 0 0; padding-left:18px; font-size:13px">
         <li>Download the extension and unzip it.</li>
         <li>In Chrome open <b>chrome://extensions</b>, switch on <b>Developer mode</b> (top right), click <b>Load unpacked</b> and pick the <b>dkim-automator-extension</b> folder.</li>
-        <li>In that Chrome, sign in to <b>admin.google.com</b> with the Google Admin account(s) you'll use.</li>
+        <li>Tip: create a separate Chrome profile just for this (Chrome → profile icon → <b>Add</b>) and install it there, then tick <b>Sign out after each account</b> in the extension.</li>
         <li>Click the extension icon → it should say <b>Connected</b>. It's already set up with this dashboard's address and key.</li>
        </ol>`;
 }
@@ -181,11 +197,19 @@ $('#form').onsubmit = async e => {
   msg.className = 'msg';
   $('#submit').disabled = true;
   try {
-    const r = await api('POST', '/api/jobs', body);
-    const extra = [r.skipped?.length ? `skipped (already running): ${r.skipped.join(', ')}` : '', r.invalid?.length ? `invalid: ${r.invalid.join(', ')}` : ''].filter(Boolean).join(' · ');
-    msg.textContent = `Job started for ${r.job.total} domain(s).${extra ? ' ' + extra : ''}`;
+    if (body.mode === 'bulk') {
+      const r = await api('POST', '/api/jobs/bulk', body);
+      const n = r.jobs.reduce((a, j) => a + j.domains, 0);
+      const extra = [r.skipped?.length ? `skipped (already running): ${r.skipped.join(', ')}` : '', r.bad?.length ? `ignored: ${r.bad.join('; ')}` : ''].filter(Boolean).join(' · ');
+      msg.textContent = `Started ${n} domain(s) across ${r.jobs.length} admin account(s).${extra ? ' ' + extra : ''}`;
+      e.target.rows.value = '';
+    } else {
+      const r = await api('POST', '/api/jobs', body);
+      const extra = [r.skipped?.length ? `skipped (already running): ${r.skipped.join(', ')}` : '', r.invalid?.length ? `invalid: ${r.invalid.join(', ')}` : ''].filter(Boolean).join(' · ');
+      msg.textContent = `Job started for ${r.job.total} domain(s).${extra ? ' ' + extra : ''}`;
+      e.target.domains.value = '';
+    }
     msg.className = 'msg ok';
-    e.target.domains.value = '';
     refresh();
   } catch (err) {
     msg.textContent = err.message;

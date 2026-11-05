@@ -79,22 +79,94 @@ async function page(tabId, op, args = []) {
 // ── One step ────────────────────────────────────────────────────────────────
 class StepError extends Error { constructor(msg, kind, debug) { super(msg); this.kind = kind; this.debug = debug; } }
 
-async function openForTenant(tabId, tenant, log) {
-  // adminUrlOverride exists only for automated tests against a mock page
-  const { adminUrlOverride } = await chrome.storage.local.get('adminUrlOverride');
-  const base = adminUrlOverride || DKIM_URL;
-  const url = `${base}?authuser=${encodeURIComponent(tenant)}`;
-  let tab = await navigate(tabId, url);
-  if (!tab.url.startsWith(new URL(base).origin + '/') || /\/signin|ServiceLogin|accounts\.google\.com/.test(tab.url)) {
-    throw new StepError(`This Chrome is not signed in to Google Admin as ${tenant}`, 'auth', { url: tab.url });
-  }
+const isSignInUrl = u => /accounts\.google\.com|\/signin|ServiceLogin|\/AddSession/.test(u);
+
+async function adminBase() {
+  // overrides exist only for automated tests against a mock page
+  const o = await chrome.storage.local.get(['adminUrlOverride', 'signinUrlOverride']);
+  return { base: o.adminUrlOverride || DKIM_URL, signin: o.signinUrlOverride || 'https://accounts.google.com/AddSession' };
+}
+
+async function accountOk(tabId, tenant) {
   const accounts = await page(tabId, 'account');
-  if (accounts && accounts.length && !accounts.includes(tenant.toLowerCase())) {
-    throw new StepError(`Google Admin opened as ${accounts[0]}, not ${tenant}. Sign in to ${tenant} in this Chrome too`, 'auth');
+  return !accounts || !accounts.length || accounts.includes(tenant.toLowerCase()) ? true : accounts[0];
+}
+
+async function openForTenant(tabId, item, log) {
+  const { base } = await adminBase();
+  const tenant = item.tenant;
+  const url = `${base}?authuser=${encodeURIComponent(tenant)}`;
+  const tab = await navigate(tabId, url);
+  const onAdmin = tab.url.startsWith(new URL(base).origin + '/') && !isSignInUrl(tab.url);
+  const ok = onAdmin ? await accountOk(tabId, tenant) : false;
+  if (ok !== true) {
+    if (!item.password) {
+      throw new StepError(ok
+        ? `Google Admin opened as ${ok}, not ${tenant}. Sign in to ${tenant} in this Chrome (or add its password to the job)`
+        : `This Chrome is not signed in as ${tenant}. Sign in to it here, or add its password to the job`, 'auth', { url: tab.url });
+    }
+    await signIn(tabId, item, log);
   }
   const ready = await page(tabId, 'waitPanel');
   if (!ready.ok) throw new StepError('Authenticate email page did not load (is Gmail enabled and is this account a super admin?)', undefined, ready.debug);
   log('Opened Gmail → Authenticate email');
+}
+
+// Sign in to Google with the job's admin email + password, in this tab.
+async function signIn(tabId, item, log) {
+  const { base, signin } = await adminBase();
+  const cont = `${base}?authuser=${encodeURIComponent(item.tenant)}`;
+  log(`Signing in as ${item.tenant}`);
+  await navigate(tabId, `${signin}?Email=${encodeURIComponent(item.tenant)}&continue=${encodeURIComponent(cont)}`);
+  for (let step = 0; step < 20; step++) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.url.startsWith(new URL(base).origin + '/') && !isSignInUrl(tab.url)) {
+      const ok = await accountOk(tabId, item.tenant);
+      if (ok !== true) throw new StepError(`Signed in, but Google Admin opened as ${ok} instead of ${item.tenant}`, 'auth');
+      log('Signed in');
+      return;
+    }
+    const st = await page(tabId, 'signin', [item.tenant, item.password]).catch(() => ({ action: 'none' }));
+    if (st.action === 'error') throw new StepError(st.message, 'auth', st.debug);
+    if (st.action === 'challenge') { await waitForHuman(tabId, item, st.message, log); continue; }
+    if (st.action !== 'none') log(`Sign-in: ${st.action}${st.clicked ? ` (${st.clicked})` : ''}`);
+    await sleep(st.action === 'none' ? 2000 : 3500);
+    if (step === 12) await navigate(tabId, cont); // nudge towards the admin console
+  }
+  throw new StepError('Google sign-in did not finish', 'auth');
+}
+
+// Google wants a human (CAPTCHA, code, approve on phone). Bring the tab forward and wait.
+async function waitForHuman(tabId, item, message, log) {
+  log(`Google asks: ${message}. Waiting for you in Chrome…`);
+  await setStatus({ needsYou: `${item.tenant}: ${message}` });
+  const tab = await chrome.tabs.update(tabId, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }).catch(() => {});
+  chrome.notifications?.create(`dkim-${Date.now()}`, {
+    type: 'basic', iconUrl: 'icon.png', priority: 2, requireInteraction: true,
+    title: 'DKIM Automator needs you', message: `Finish Google sign-in for ${item.tenant}: ${message}`,
+  });
+  const { base } = await adminBase();
+  const end = Date.now() + 4 * 60 * 1000;
+  while (Date.now() < end) {
+    await sleep(3000);
+    const t = await chrome.tabs.get(tabId);
+    if (t.url.startsWith(new URL(base).origin + '/') && !isSignInUrl(t.url)) break;
+    const st = await page(tabId, 'signin', ['', '', true]).catch(() => null); // inspect only
+    if (st && st.action !== 'challenge') break;
+  }
+  await setStatus({ needsYou: null });
+  const t = await chrome.tabs.get(tabId);
+  const st = await page(tabId, 'signin', ['', '', true]).catch(() => null);
+  if (st && st.action === 'challenge' && isSignInUrl(t.url))
+    throw new StepError(`Google asked for a check (${message}) and it wasn't completed in time. Complete it in Chrome, then press Retry`, 'auth');
+  log('Check completed, continuing');
+}
+
+async function signOutAll(tabId, log) {
+  await navigate(tabId, 'https://accounts.google.com/Logout');
+  await navigate(tabId, 'about:blank');
+  log('Signed out of Google');
 }
 
 async function selectDomain(tabId, domain, log) {
@@ -109,7 +181,7 @@ async function runItem(item) {
   const log = m => { logs.push(m); addLog(`${item.domain}: ${m}`); };
   const tab = await workTab();
   try {
-    await openForTenant(tab.id, item.tenant, log);
+    await openForTenant(tab.id, item, log);
     await selectDomain(tab.id, item.domain, log);
     let p = await page(tab.id, 'read');
     log(`Google status: ${p.status}${p.txtValue ? ' (record exists)' : ''}`);
@@ -137,7 +209,7 @@ async function runItem(item) {
       p = await page(tab.id, 'start');
       if (p.status !== 'authenticating') {
         // the status sometimes only updates after a reload
-        await openForTenant(tab.id, item.tenant, () => {});
+        await openForTenant(tab.id, item, () => {});
         await selectDomain(tab.id, item.domain, () => {});
         const again = await page(tab.id, 'read');
         if (again.status === 'authenticating') p = again;
@@ -164,6 +236,11 @@ async function poll() {
       if (!item) break;
       await addLog(`${item.domain}: ${item.action}…`);
       const out = await runItem(item);
+      const { signOut } = await chrome.storage.local.get('signOut');
+      if (signOut && item.signOutAfter) {
+        const tab = await workTab();
+        await signOutAll(tab.id, m => addLog(`${item.tenant}: ${m}`)).catch(() => {});
+      }
       await addLog(`${item.domain}: ${out.ok ? '✓ done' : '✗ ' + out.error}`);
       await api('/api/agent/report', { jobId: item.jobId, domain: item.domain, action: item.action, ...out });
     }
@@ -184,7 +261,7 @@ chrome.runtime.onMessage.addListener((msg, _s, reply) => {
 });
 
 // ── Runs INSIDE the admin.google.com page (must be self-contained) ──────────
-async function dkimPage(op, a1, a2) {
+async function dkimPage(op, a1, a2, a3) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const vis = e => !!e && e.offsetParent !== null;
   const text = () => (document.body ? document.body.innerText : '');
@@ -238,6 +315,51 @@ async function dkimPage(op, a1, a2) {
     return { ok: !!ok, debug: ok ? null : debug() };
   }
   if (op === 'read') return read();
+
+  if (op === 'signin') {
+    const [email, pw, inspectOnly] = [a1, a2, a3];
+    const t = text();
+    const q = sel => [...document.querySelectorAll(sel)].filter(vis);
+    const set = (el, v) => {
+      el.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const next = () => {
+      // prefer the real <button> inside Google's #identifierNext / #passwordNext wrappers
+      const b = [...document.querySelectorAll('#identifierNext button, #passwordNext button')].find(vis)
+        || [...document.querySelectorAll('#identifierNext, #passwordNext')].find(vis)
+        || findText(['Next', 'Continue', 'Sign in']);
+      if (b) realClick(b);
+      else { const f = document.activeElement && document.activeElement.form; f && (f.requestSubmit ? f.requestSubmit() : f.submit()); }
+    };
+    if (/wrong password|password was changed/i.test(t)) return { action: 'error', message: `Wrong password for ${email || 'this account'}` };
+    if (/couldn.t find your google account/i.test(t)) return { action: 'error', message: `Google account not found: ${email}` };
+    if (/couldn.t sign you in|this browser or app may not be secure/i.test(t)) return { action: 'error', message: 'Google refused this sign-in ("Couldn\'t sign you in"). Sign in manually once in this Chrome, then press Retry' };
+    if (q('img#captchaimg, img[src*="Captcha"], img[alt*="CAPTCHA" i]').length || /type the text you hear or see/i.test(t))
+      return { action: 'challenge', message: 'type the CAPTCHA characters' };
+    if (q('input[type="tel"], input[name="totpPin"], input[name="Pin"], input[autocomplete="one-time-code"], input#idvPin').length)
+      return { action: 'challenge', message: 'enter the verification code' };
+    if (/choose how you want to sign in|choose a way to verify|try another way/i.test(t) && !q('input[type="password"]').length)
+      return { action: 'challenge', message: 'choose a verification method' };
+    const pwEl = q('input[type="password"], input[name="Passwd"]')[0];
+    if (!pwEl && /verify it.s you|confirm it.s you|check your phone|tap yes/i.test(t))
+      return { action: 'challenge', message: 'confirm it\'s you (e.g. tap Yes on your phone)' };
+    if (inspectOnly) return { action: 'ok' };
+    if (pwEl) {
+      if (!pw) return { action: 'error', message: 'Google asks for the password but the job has none for this account' };
+      set(pwEl, pw); await sleep(300); next(); return { action: 'password' };
+    }
+    const em = q('input[type="email"], #identifierId')[0];
+    if (em) { if (em.value.toLowerCase() !== String(email).toLowerCase()) set(em, email); await sleep(300); next(); return { action: 'email' }; }
+    const acc = [...document.querySelectorAll('[data-identifier], [data-email]')]
+      .find(e => (e.getAttribute('data-identifier') || e.getAttribute('data-email') || '').toLowerCase() === String(email).toLowerCase());
+    if (acc) { realClick(acc); return { action: 'account chooser' }; }
+    const inter = findText(['I understand', 'Accept', 'I agree', 'Not now', 'Skip', 'Done', 'Confirm', 'Continue', 'Use another account']);
+    if (inter) { const c = inter.textContent.trim(); realClick(inter); return { action: 'clicked', clicked: c }; }
+    return { action: 'none', debug: debug() };
+  }
 
   if (op === 'select') {
     const d = String(a1).toLowerCase();

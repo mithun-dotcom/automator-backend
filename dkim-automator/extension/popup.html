@@ -29,8 +29,10 @@
     <button class="ghost" id="save">Save</button>
     <button id="poll">Check now</button>
   </div>
+  <label style="display:flex; gap:6px; align-items:flex-start; font-weight:500; margin-top:10px"><input id="signOut" type="checkbox" style="margin-top:2px">
+    <span>Sign out of Google after each account is done<br><span class="hint" style="margin:0">Turn on only in a separate Chrome profile used just for this. Keeps Chrome under Google's ~10 signed-in accounts limit.</span></span></label>
   <div class="status" id="status">…</div>
-  <div class="hint">Keep Chrome open while jobs run. Sign in to admin.google.com in this Chrome with each Google Admin account you use. The extension works in a pinned background tab.</div>
+  <div class="hint">Keep Chrome open while jobs run. The extension signs in with the admin email + password from the job and works in a pinned background tab. If Google asks for a CAPTCHA or code, the tab comes to the front for you.</div>
   <div class="log" id="log"></div>
   <script src="config.js"></script>
   <script src="popup.js"></script>

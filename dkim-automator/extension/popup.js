@@ -1,7 +1,8 @@
 const $ = id => document.getElementById(id);
 
 async function load() {
-  const s = await chrome.storage.local.get(['serverUrl', 'key', 'enabled', 'status', 'log']);
+  const s = await chrome.storage.local.get(['serverUrl', 'key', 'enabled', 'signOut', 'status', 'log']);
+  $('signOut').checked = !!s.signOut;
   $('serverUrl').value = s.serverUrl || self.DKIM_DEFAULTS.serverUrl || '';
   $('key').value = s.key || self.DKIM_DEFAULTS.key || '';
   $('enabled').checked = s.enabled !== false;
@@ -10,7 +11,10 @@ async function load() {
 
 function render(st = {}, log = []) {
   const el = $('status');
-  if (st.connected) {
+  if (st.needsYou) {
+    el.className = 'status bad';
+    el.textContent = `Needs you in the pinned tab → ${st.needsYou}`;
+  } else if (st.connected) {
     el.className = 'status ok';
     el.textContent = st.current ? `Connected — working: ${st.current}` : 'Connected — waiting for work';
   } else {
@@ -28,7 +32,7 @@ async function save() {
     const ok = await chrome.permissions.request({ origins: [new URL(url).origin + '/*'] });
     if (!ok) { alert('Permission to reach that server was not granted.'); return; }
   }
-  await chrome.storage.local.set({ serverUrl: url, key: $('key').value, enabled: $('enabled').checked });
+  await chrome.storage.local.set({ serverUrl: url, key: $('key').value, enabled: $('enabled').checked, signOut: $('signOut').checked });
 }
 
 $('save').onclick = async () => { await save(); chrome.runtime.sendMessage('poll'); };

@@ -53,7 +53,7 @@ function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflare
     id: crypto.randomBytes(6).toString('hex'),
     createdAt: now(),
     tenant: adminEmail.toLowerCase(),
-    creds: encrypt(JSON.stringify({ email: adminEmail, password: adminPassword })),
+    creds: encrypt(JSON.stringify({ email: adminEmail, password: adminPassword || '' })),
     dns: { provider: dnsProvider, token: cloudflareToken ? encrypt(cloudflareToken) : null },
     options: { selector, keyLength, regenerate: !!regenerate, simulate: !!simulate, executor: executor === 'server' ? 'server' : 'extension' },
     cancelled: false,
@@ -291,7 +291,7 @@ function stats() {
 // ── Chrome extension agent ──────────────────────────────────────────────────
 // The extension polls /api/agent/claim, performs one Google Admin step in the user's own
 // signed-in Chrome, and posts the outcome to /api/agent/report.
-const LEASE_MS = 4 * 60 * 1000;
+const LEASE_MS = 7 * 60 * 1000; // covers waiting up to ~4 min for the admin to finish a Google check
 const agents = new Map(); // agentId -> { lastSeen, version, current }
 
 function touchAgent(agentId, version) {
@@ -318,11 +318,17 @@ function claim(agentId, version) {
       if (!needsBrowser(t.state) || (t.nextRunAt || 0) > now() || (t.lease && t.lease.until > now())) continue;
       const action = t.state === 'queued' ? 'generate' : 'activate';
       t.lease = { agentId, until: now() + LEASE_MS, action };
+      let password = '';
+      try { password = (JSON.parse(decrypt(job.creds) || '{}').password) || ''; } catch {}
+      // sign out afterwards only if nothing else for this Google account is ready right now
+      const more = jobs.some(j2 => j2.tenant === job.tenant && !j2.cancelled && j2.tasks.some(t2 =>
+        t2 !== t && needsBrowser(t2.state) && (t2.nextRunAt || 0) <= now() + 60e3));
       log(job, t, action === 'generate' ? 'Chrome extension: generating DKIM key' : 'Chrome extension: starting authentication');
       agents.get(agentId).current = `${action} ${t.domain}`;
       return {
         jobId: job.id, domain: t.domain, action, tenant: job.tenant,
         selector: job.options.selector, keyLength: job.options.keyLength, regenerate: job.options.regenerate,
+        password, signOutAfter: !more,
       };
     }
   }
@@ -352,7 +358,8 @@ function report(agentId, b) {
       log(job, t, `Page debug: ${JSON.stringify(b.debug).slice(0, 1500)}`, 'error');
     }
     const err = Object.assign(new Error(msg), { kind: b.kind || undefined });
-    if (err.kind === 'auth') err.message += /sign in/i.test(msg) ? ', then press Retry' : ' — sign in to admin.google.com with this account in the Chrome running the extension, then press Retry';
+    if (err.kind === 'auth' && /wrong password/i.test(msg)) err.message += ' — press Retry and enter the correct password';
+    else if (err.kind === 'auth') err.message += /sign in|retry/i.test(msg) ? (/retry/i.test(msg) ? '' : ', then press Retry') : ' — sign in to admin.google.com with this account in the Chrome running the extension, then press Retry';
     handleError(job, t, err);
   }
   store.save();

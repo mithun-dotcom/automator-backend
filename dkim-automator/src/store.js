@@ -15,9 +15,14 @@ function save() {
   timer = setTimeout(flush, 300);
 }
 function flush() {
-  const tmp = FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(jobs));
-  fs.renameSync(tmp, FILE);
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(jobs));
+    fs.renameSync(tmp, FILE);
+  } catch (e) {
+    console.error('Could not save jobs:', e.message); // keep running; next save retries
+  }
 }
 
 module.exports = {

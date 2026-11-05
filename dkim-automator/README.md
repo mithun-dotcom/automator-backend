@@ -9,7 +9,12 @@ you are already signed in. The server never needs your Google password.
 
 1. In the dashboard click **Download extension** (`/extension.zip`, pre-configured with the server
    URL and access key), unzip it, then go to `chrome://extensions` → Developer mode → **Load unpacked**.
-2. Sign in to admin.google.com in that Chrome with each admin account you use.
+2. Either give each job the admin password (the extension then signs in by itself: email →
+   password → "I understand"/"Not now" screens), or sign in to admin.google.com yourself once.
+   If Google asks for a CAPTCHA / code / phone approval, the pinned tab comes to the front and the
+   extension waits up to 4 minutes for you, then continues. Use a dedicated Chrome profile and the
+   "Sign out after each account" option for many tenants (Chrome allows ~10 signed-in accounts).
+   **Bulk mode**: paste `admin email, password, domain` lines; rows are grouped per admin account.
 3. The extension polls the server every 30s, does each step in a pinned background tab and reports back.
 
 An older "server browser" mode (headless Chromium on the server with the admin password) is still
