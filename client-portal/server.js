@@ -2049,17 +2049,24 @@ async function createBatchesFromInvoice(invoiceId, months) {
 
 const otherName = (it) => it.batch_name || (it.inbox_type === 'other' ? it.description || 'Other service' : '');
 
-// An invoice that already belongs to a batch can still carry "Other" lines
-// ticked Recurring (e.g. a warmup service added to a mailbox batch). Each
-// becomes its own active batch that renews alongside the linked one; saving
-// the invoice again updates that batch rather than adding another.
+// An invoice that already belongs to a batch can carry more lines than that
+// batch: another mailbox type (e.g. 3 Google + 3 Microsoft on one invoice) or
+// "Other" lines ticked Recurring (e.g. a warmup service). Each becomes its own
+// batch that renews alongside the linked one, so it counts on the client's
+// dashboard; saving the invoice again updates that batch rather than adding
+// another. A mailbox line the client already has a batch for (same type and
+// quantity) is left alone.
 async function syncRecurringOtherLines(invoiceId) {
   const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [invoiceId]);
   if (!inv || !inv.order_id || inv.status === 'void') return [];
   const { rows: [base] } = await query('SELECT * FROM orders WHERE id = $1', [inv.order_id]);
   if (!base) return [];
-  const { rows: items } = await query(
-    "SELECT * FROM invoice_items WHERE invoice_id = $1 AND inbox_type = 'other' AND recurring ORDER BY sort_order, id", [invoiceId]);
+  const { rows: types } = await query("SELECT inbox_type FROM pricing WHERE inbox_type <> 'other'");
+  const mailboxType = new Set(types.map((t) => t.inbox_type));
+  const { rows: all } = await query('SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id', [invoiceId]);
+  // The linked batch covers the first mailbox line of its own type.
+  const baseLine = all.find((it) => it.inbox_type === base.inbox_type && mailboxType.has(it.inbox_type));
+  const items = all.filter((it) => it !== baseLine && ((it.inbox_type === 'other' && it.recurring) || mailboxType.has(it.inbox_type)));
   const months = billing.cycleMonths(base);
   const start = inv.period_start || inv.issue_date || billing.today();
   const day = base.billing_day || Number(start.slice(8));
@@ -2073,19 +2080,26 @@ async function syncRecurringOtherLines(invoiceId) {
     const name = otherName(it);
     const price = Math.round((it.unit_price / months) * 100) / 100;
     const { rows: [found] } = await query(
-      `SELECT id FROM orders WHERE from_invoice_id = $1 AND inbox_type = 'other' AND batch_name = $2`,
-      [invoiceId, name]);
+      `SELECT id FROM orders WHERE from_invoice_id = $1 AND id <> $2 AND inbox_type = $3 AND batch_name = $4`,
+      [invoiceId, base.id, it.inbox_type, name]);
     if (found) {
       await query('UPDATE orders SET quantity = $1, price_per_mailbox = $2 WHERE id = $3', [it.quantity, price, found.id]);
       ids.push(found.id);
       continue;
     }
+    if (it.inbox_type !== 'other') {
+      // Already a batch of this type and size (e.g. an invoice covering two existing batches).
+      const { rows: [covered] } = await query(
+        "SELECT id FROM orders WHERE user_id = $1 AND id <> $2 AND inbox_type = $3 AND quantity = $4 AND status <> 'cancelled'",
+        [inv.user_id, base.id, it.inbox_type, it.quantity]);
+      if (covered) continue;
+    }
     const { rows: [o] } = await query(
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
          sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by)
-       VALUES ($1, 'other', $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10, $11) RETURNING id`,
+       VALUES ($1, $12, $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10, $11) RETURNING id`,
       [inv.user_id, it.quantity, price, name, base.status === 'active' ? 'active' : base.status,
-       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId, inv.sold_by || base.sold_by]);
+       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId, inv.sold_by || base.sold_by, it.inbox_type]);
     ids.push(o.id);
   }
   return ids;
@@ -3267,6 +3281,20 @@ async function linkStandaloneInvoices() {
 
 // One-time: recurring Other lines saved on batch invoices before they became batches.
 async function syncExistingOtherLines() {
+  // One-time: invoices linked to a batch that also carry another mailbox type.
+  const flag2 = 'mailbox_lines_synced_v1';
+  const { rows: [done2] } = await query('SELECT 1 FROM settings WHERE key = $1', [flag2]);
+  if (!done2) {
+    const { rows } = await query(
+      `SELECT i.id FROM invoices i JOIN orders o ON o.id = i.order_id
+        WHERE i.status <> 'void' AND EXISTS (SELECT 1 FROM invoice_items it WHERE it.invoice_id = i.id
+          AND it.inbox_type <> 'other' AND it.inbox_type <> o.inbox_type) ORDER BY i.id`);
+    for (const { id } of rows) {
+      const ids = await syncRecurringOtherLines(id);
+      if (ids.length) console.log(`Invoice #${id}: extra line(s) now batch(es) ${ids.join(', ')}`);
+    }
+    await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [flag2, new Date().toISOString()]);
+  }
   const flag = 'other_lines_synced_v1';
   const { rows: [done] } = await query('SELECT 1 FROM settings WHERE key = $1', [flag]);
   if (done) return;
