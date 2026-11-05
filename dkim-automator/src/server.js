@@ -81,8 +81,28 @@ app.post('/api/jobs/:id/retry', (req, res) => {
   if (req.body && req.body.adminPassword) {
     const { encrypt } = require('./secure');
     j.creds = encrypt(JSON.stringify({ email: j.tenant, password: req.body.adminPassword }));
+    google.clearSession(j.tenant);
   }
   res.json({ ok: true, retried: queue.retry(j, req.body && req.body.domain) });
+});
+
+// ── Paused Google sign-in (CAPTCHA / verification code / method choice) ─────
+app.get('/api/jobs/:id/challenge.png', async (req, res) => {
+  const j = store.get(req.params.id);
+  if (!j) return res.status(404).end();
+  const img = await google.challengeImage(j.tenant);
+  if (!img) return res.status(404).end();
+  res.set('Cache-Control', 'no-store').type('png').send(img);
+});
+
+app.post('/api/jobs/:id/challenge', async (req, res) => {
+  const j = store.get(req.params.id);
+  if (!j) return res.status(404).json({ error: 'Not found' });
+  try {
+    res.json(await queue.answerChallenge(j, (req.body || {}).answer));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 app.post('/api/jobs/:id/cancel', (req, res) => {

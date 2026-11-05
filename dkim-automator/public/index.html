@@ -60,6 +60,10 @@
   .log { font-family: var(--mono); font-size: 11px; color: var(--muted); max-height: 160px; overflow: auto; white-space: pre-wrap; }
   .empty { color: var(--muted); text-align: center; padding: 20px; }
   .copy { cursor: pointer; border-bottom: 1px dashed var(--muted); }
+  .challenge { margin-top: 12px; border: 1px solid var(--warn); background: var(--warn-bg); border-radius: 10px; padding: 12px; }
+  .challenge b { color: var(--warn); }
+  .challenge img { display: block; width: 100%; max-width: 720px; border-radius: 8px; border: 1px solid var(--line); margin: 10px 0; background: #fff; }
+  .challenge .row input { flex: 1; min-width: 180px; }
   @media (max-width: 640px) { .hide-sm { display: none; } }
 </style>
 </head>
@@ -182,6 +186,20 @@ function renderTask(job, t) {
   </tr>`;
 }
 
+const CH_HINT = { captcha: 'Type the characters in the image', code: 'Verification code', choice: 'Option text, e.g. Get a verification code', verify: 'Leave empty after approving on your phone', blocked: 'Leave empty to try again', unknown: 'Text to type or button to click (optional)' };
+function renderChallenge(j) {
+  const c = j.challenge;
+  return `<div class="challenge">
+    <b>Google sign-in needs you</b> — ${esc(c.message)}
+    <img src="/api/jobs/${j.id}/challenge.png?t=${Math.floor(Date.now() / 6000)}" alt="Live view of the Google sign-in page">
+    <form class="row" data-challenge="${j.id}">
+      <input name="answer" data-chinput="${j.id}" placeholder="${esc(CH_HINT[c.type] || 'Answer')}" autocomplete="off">
+      <button>Continue</button>
+    </form>
+    <div class="hint">The page is kept open for 15 minutes. Image refreshes every few seconds.</div>
+  </div>`;
+}
+
 function renderJob(j) {
   const c = j.counts;
   const summary = Object.entries(c).map(([k, v]) => `${v} ${(LABEL[k] || k).toLowerCase()}`).join(' · ');
@@ -194,6 +212,7 @@ function renderJob(j) {
         <button class="ghost" data-delete="${j.id}">Delete</button>
       </div>
     </div>
+    ${j.challenge ? renderChallenge(j) : ''}
     <div class="table-wrap"><table>
       <thead><tr><th>Domain</th><th>Status</th><th class="hide-sm">TXT host</th><th class="hide-sm">TXT value</th><th></th></tr></thead>
       <tbody>${j.tasks.map(t => renderTask(j, t)).join('')}</tbody>
@@ -213,9 +232,31 @@ async function refresh() {
       ['Success rate', stats.successRate == null ? '—' : stats.successRate + '%'],
       ['Avg. time to active', stats.avgSecondsToActive == null ? '—' : Math.round(stats.avgSecondsToActive / 60) + ' min'],
     ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+    const typed = {}; let focused = document.activeElement?.dataset?.chinput;
+    document.querySelectorAll('[data-chinput]').forEach(i => { typed[i.dataset.chinput] = i.value; });
+    if (busyChallenge) return;
     $('#jobs').innerHTML = full.length ? full.map(renderJob).join('') : '<div class="empty">No jobs yet.</div>';
+    document.querySelectorAll('[data-chinput]').forEach(i => {
+      if (typed[i.dataset.chinput]) i.value = typed[i.dataset.chinput];
+      if (focused === i.dataset.chinput) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+    });
   } catch (e) { console.error(e); }
 }
+
+let busyChallenge = false;
+document.addEventListener('submit', async e => {
+  const id = e.target.dataset?.challenge; if (!id) return;
+  e.preventDefault();
+  const btn = e.target.querySelector('button');
+  btn.disabled = true; btn.textContent = 'Working…'; busyChallenge = true;
+  try {
+    const r = await api('POST', `/api/jobs/${id}/challenge`, { answer: e.target.answer.value });
+    if (!r.loggedIn) alert('Google needs one more step: ' + (r.challenge?.message || 'see the new screenshot'));
+  } catch (err) { alert(err.message); }
+  busyChallenge = false;
+  document.querySelectorAll('[data-chinput]').forEach(i => { i.value = ''; });
+  refresh();
+});
 
 document.addEventListener('toggle', e => {
   const k = e.target.dataset?.log; if (!k) return;

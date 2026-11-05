@@ -5,7 +5,7 @@ const puppeteer = require('puppeteer-core');
 const { CHROME_PATH, HEADLESS, DATA_DIR, BROWSER_IDLE_CLOSE_MS } = require('./config');
 const { encrypt, decrypt, hash } = require('./secure');
 
-const DKIM_URL = 'https://admin.google.com/ac/apps/gmail/authenticateemail';
+const DKIM_URL = process.env.GOOGLE_DKIM_URL || 'https://admin.google.com/ac/apps/gmail/authenticateemail'; // override only for tests
 const SESS_DIR = path.join(DATA_DIR, 'sessions');
 const DEBUG_DIR = path.join(DATA_DIR, 'debug');
 fs.mkdirSync(SESS_DIR, { recursive: true });
@@ -22,7 +22,8 @@ class GoogleWaitError extends Error { constructor(m) { super(m); this.kind = 'wa
 let browser = null;
 let browserUsers = 0;
 let idleTimer = null;
-const contexts = new Map(); // tenantKey -> { context, page, loggedIn }
+const contexts = new Map(); // tenantKey -> { context, page, loggedIn, challenge }
+const CHALLENGE_TTL_MS = 15 * 60 * 1000; // keep a paused sign-in open this long for the admin to answer
 
 async function getBrowser() {
   clearTimeout(idleTimer);
@@ -45,6 +46,7 @@ function scheduleIdleClose() {
   clearTimeout(idleTimer);
   idleTimer = setTimeout(async () => {
     if (browserUsers > 0 || !browser) return;
+    if ([...contexts.values()].some(c => c.challenge && Date.now() - c.challenge.at < CHALLENGE_TTL_MS)) return scheduleIdleClose();
     for (const [k, c] of contexts) { await saveCookies(k, c.page).catch(() => {}); }
     await browser.close().catch(() => {});
     browser = null; contexts.clear();
@@ -62,6 +64,11 @@ async function loadCookies(key, page) {
     if (raw) await page.setCookie(...JSON.parse(raw));
   } catch {}
 }
+function resetChallenge(email) {
+  const c = contexts.get(hash(email));
+  if (c) c.challenge = null;
+}
+
 function clearSession(email) {
   const key = hash(email);
   try { fs.unlinkSync(sessFile(key)); } catch {}
@@ -79,10 +86,11 @@ async function getTenantPage(email) {
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   await page.evaluateOnNewDocument(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  // Images must load: Google's sign-in challenges (CAPTCHA) are images.
   await page.setRequestInterception(true);
-  page.on('request', r => (['image', 'font', 'media'].includes(r.resourceType()) ? r.abort() : r.continue()));
+  page.on('request', r => (['media'].includes(r.resourceType()) ? r.abort() : r.continue()));
   await loadCookies(key, page);
-  c = { context, page, loggedIn: false };
+  c = { context, page, loggedIn: false, challenge: null, key };
   contexts.set(key, c);
   return { key, ...c, entry: c };
 }
@@ -122,6 +130,20 @@ async function typeInto(page, selectors, value, timeout = 6000) {
 
 const bodyText = page => page.evaluate(() => document.body ? document.body.innerText : '');
 
+// Submit the current sign-in step: Enter, and if the page did not move, click Next.
+async function submitStep(page) {
+  const before = page.url() + '|' + (await bodyText(page)).length;
+  const nav = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 6000 }).catch(() => null);
+  await page.keyboard.press('Enter');
+  const moved = await nav;
+  if (moved) return;
+  await delay(800);
+  const after = page.url() + '|' + (await bodyText(page)).length;
+  if (after !== before) return;
+  const nav2 = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 12000 }).catch(() => null);
+  if (await clickByText(page, ['Next', 'Continue', 'Verify', 'Submit', 'Done'], 2000)) await nav2;
+}
+
 async function screenshot(page, label) {
   try {
     const name = `${Date.now()}-${label.replace(/[^a-z0-9.-]/gi, '_')}.png`;
@@ -134,67 +156,171 @@ async function screenshot(page, label) {
 }
 
 // ── Login ───────────────────────────────────────────────────────────────────
+// Sign-in is a resumable loop. When Google shows something only a human should answer
+// (CAPTCHA, verification code, account-recovery choice) the page is kept open and an
+// AuthChallengeError with `challenge` is thrown. The admin sees a live screenshot in the
+// dashboard and answers via answerChallenge(); the loop then continues from that page.
 function onAdmin(url) {
   return url.includes('admin.google.com') && !url.includes('accounts.google.com');
 }
 
+async function inspectSignIn(page) {
+  return page.evaluate(() => {
+    const vis = el => el && el.offsetParent !== null;
+    const text = document.body ? document.body.innerText : '';
+    const q = s => Array.from(document.querySelectorAll(s)).filter(vis);
+    const email = q('input[type="email"], #identifierId')[0];
+    const password = q('input[type="password"], input[name="Passwd"]')[0];
+    const captcha = q('img#captchaimg, img[src*="Captcha"], img[alt*="CAPTCHA" i]').length > 0 ||
+                    /type the text you hear or see/i.test(text);
+    const codeInput = q('input[type="tel"], input[name="totpPin"], input[name="Pin"], input[autocomplete="one-time-code"], input#idvPin')[0];
+    const lower = text.toLowerCase();
+    return {
+      url: location.href,
+      hasEmail: !!email, emailValue: email ? email.value : '',
+      hasPassword: !!password,
+      captcha,
+      code: !!codeInput,
+      choice: /choose how you want to sign in|try another way|choose a way to verify/i.test(text) && !codeInput && !password,
+      wrongPassword: /wrong password/i.test(text),
+      noAccount: /couldn.t find your google account/i.test(text),
+      blocked: /couldn.t sign you in|this browser or app may not be secure/i.test(text),
+      verify: /verify it.s you|2-step verification|confirm it.s you/i.test(lower),
+      prompt: (text.match(/[^\n]*(google sent|enter the code|check your phone|tap yes|open the gmail app)[^\n]*/i) || [null])[0],
+    };
+  });
+}
+
+async function challengeShot(page) {
+  return page.screenshot({ type: 'png' }).catch(() => null);
+}
+
+async function pause(entry, page, type, message) {
+  entry.challenge = { type, message, at: Date.now() };
+  const shot = await screenshot(page, `challenge-${type}`);
+  const e = new AuthChallengeError(message + (shot ? ` [debug: ${shot}]` : ''));
+  e.challenge = { type, message };
+  throw e;
+}
+
 async function dismissInterstitials(page) {
-  // Brand new accounts: "Welcome to your new account" / ToS speedbump, recovery info prompts
-  for (let i = 0; i < 4; i++) {
-    const url = page.url();
-    if (onAdmin(url)) return;
-    const clicked = await clickByText(page, ['I understand', 'Accept', 'Continue', 'Not now', 'Skip', 'Confirm', 'Done'], 2500);
-    if (!clicked) return;
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+  // New accounts: "Welcome to your new account" / ToS speedbump, recovery-info prompts
+  return clickByText(page, ['I understand', 'Accept', 'Not now', 'Skip', 'Confirm', 'Done', 'Continue'], 1500);
+}
+
+async function advanceSignIn(entry, page, email, password, log) {
+  let typedPassword = false;
+  for (let step = 0; step < 12; step++) {
+    await delay(1200);
+    if (onAdmin(page.url())) {
+      entry.loggedIn = true; entry.challenge = null;
+      await saveCookies(entry.key, page);
+      log('Signed in to Google Admin');
+      return page;
+    }
+    const st = await inspectSignIn(page);
+
+    if (st.noAccount) throw new AuthChallengeError('Google account not found');
+    if (st.wrongPassword) throw new AuthChallengeError('Wrong Google Admin password — retry with the correct one');
+    if (st.blocked) await pause(entry, page, 'blocked', 'Google refused this sign-in from the server ("Couldn\'t sign you in"). Try again later or sign in once from a trusted device first');
+    if (st.captcha) await pause(entry, page, 'captcha', 'Google is showing a CAPTCHA — type the characters shown');
+    if (st.code) await pause(entry, page, 'code', st.prompt || 'Google is asking for a verification code — enter it');
+    if (st.choice) await pause(entry, page, 'choice', 'Google wants you to choose a verification method — type the option text exactly as shown (e.g. "Get a verification code")');
+
+    if (st.hasPassword) {
+      if (typedPassword) { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 }).catch(() => {}); continue; }
+      await typeInto(page, ['input[type="password"]', 'input[name="Passwd"]'], password, 4000);
+      typedPassword = true;
+      await submitStep(page);
+      continue;
+    }
+    if (st.hasEmail) {
+      if (st.emailValue.toLowerCase() !== email.toLowerCase())
+        await typeInto(page, ['input[type="email"]', '#identifierId'], email, 4000);
+      await submitStep(page);
+      continue;
+    }
+    if (st.verify) await pause(entry, page, 'verify', st.prompt || 'Google needs you to confirm this sign-in (e.g. tap Yes on your phone). Do it, then press Continue');
+    // account chooser / interstitials
+    if (await clickByText(page, [email, 'Use another account'], 1500)) continue;
+    if (await dismissInterstitials(page)) continue;
+    // nothing recognised: try going to the admin console directly
+    await page.goto(DKIM_URL, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
   }
+  await pause(entry, page, 'unknown', 'Sign-in stopped on an unexpected page — look at the screenshot, type what is needed (or leave empty) and press Continue');
 }
 
 async function ensureLoggedIn(email, password, log) {
   const t = await getTenantPage(email);
-  const { page } = t;
-  if (t.entry.loggedIn) return page;
-
+  const { page, entry } = t;
+  entry.key = t.key;
+  if (entry.loggedIn) return page;
+  if (entry.challenge) {
+    throw Object.assign(new AuthChallengeError(`Waiting for admin: ${entry.challenge.message}`), { challenge: entry.challenge });
+  }
   await page.goto(DKIM_URL, { waitUntil: 'networkidle2', timeout: 45000 });
-  if (onAdmin(page.url())) { t.entry.loggedIn = true; log('Reused saved Google session'); return page; }
-
+  if (onAdmin(page.url())) { entry.loggedIn = true; log('Reused saved Google session'); return page; }
   log('Signing in to Google Admin');
-  if (!(await typeInto(page, ['input[type="email"]', '#identifierId'], email))) {
-    // "Choose an account" screen
-    await clickByText(page, [email, 'Use another account'], 3000);
-    await typeInto(page, ['input[type="email"]', '#identifierId'], email, 4000);
-  }
-  await page.keyboard.press('Enter');
-  await delay(3000);
+  return advanceSignIn(entry, page, email, password, log);
+}
 
-  const ok = await typeInto(page, ['input[type="password"]', 'input[name="Passwd"]'], password, 10000);
-  if (!ok) {
-    const shot = await screenshot(page, 'login-no-password');
-    const txt = await bodyText(page);
-    if (/couldn.t find your google account/i.test(txt)) throw new AuthChallengeError('Google account not found');
-    throw new AuthChallengeError(`Password field not shown (Google may be blocking the sign-in)${shot ? ` [debug: ${shot}]` : ''}`);
-  }
-  await page.keyboard.press('Enter');
-  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-  await delay(2000);
-  await dismissInterstitials(page);
+// Live screenshot of a paused sign-in (PNG buffer) or null.
+async function challengeImage(email) {
+  const c = contexts.get(hash(email));
+  if (!c || !c.challenge || c.page.isClosed()) return null;
+  return challengeShot(c.page);
+}
 
-  if (!onAdmin(page.url())) {
-    await page.goto(DKIM_URL, { waitUntil: 'networkidle2', timeout: 45000 }).catch(() => {});
+function challengeState(email) {
+  const c = contexts.get(hash(email));
+  if (!c || !c.challenge) return null;
+  if (Date.now() - c.challenge.at > CHALLENGE_TTL_MS) { c.challenge = null; return null; }
+  return c.challenge;
+}
+
+// Apply the admin's answer to the paused page and continue signing in.
+// Resolves { loggedIn: true } or throws AuthChallengeError with the next challenge.
+async function answerChallenge(creds, answer, log) {
+  const c = contexts.get(hash(creds.email));
+  if (!c || !c.challenge || c.page.isClosed()) throw new Error('No sign-in is waiting for an answer (it may have expired). Press Retry to start again.');
+  const { page } = c;
+  const type = c.challenge.type;
+  answer = String(answer || '').trim();
+  browserUsers++;
+  try {
+    if (answer) {
+      if (type === 'choice' || type === 'unknown') {
+        if (!(await clickByText(page, [answer], 3000))) {
+          // maybe it's text for an input
+          await page.keyboard.type(answer, { delay: 50 });
+          await submitStep(page);
+        }
+      } else {
+        const sel = type === 'captcha'
+          ? ['input[name="ca"]', 'input[aria-label*="text you hear" i]', 'input#ca']
+          : ['input[type="tel"]', 'input[name="totpPin"]', 'input[name="Pin"]', 'input[autocomplete="one-time-code"]', 'input#idvPin'];
+        let ok = await typeInto(page, sel, answer, 2000);
+        if (!ok) { // fallback: the focused / last visible text input
+          ok = await page.evaluate(() => {
+            const i = Array.from(document.querySelectorAll('input')).filter(i => i.offsetParent && !['hidden', 'email', 'checkbox', 'radio'].includes(i.type)).pop();
+            if (i) { i.focus(); return true; } return false;
+          });
+          if (ok) await page.keyboard.type(answer, { delay: 50 });
+        }
+        if (!ok) throw new Error('Could not find the input box on the Google page');
+        await submitStep(page);
+      }
+    } else {
+      // e.g. admin approved on phone: nothing to type, just wait for Google to move on
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    }
+    c.challenge = null;
+    await advanceSignIn(c, page, creds.email, creds.password, log);
+    return { loggedIn: true };
+  } finally {
+    browserUsers--;
+    scheduleIdleClose();
   }
-  const url = page.url();
-  if (!onAdmin(url)) {
-    const txt = await bodyText(page);
-    const shot = await screenshot(page, 'login-failed');
-    const tag = shot ? ` [debug: ${shot}]` : '';
-    if (/wrong password/i.test(txt)) throw new AuthChallengeError('Wrong Google Admin password' + tag);
-    if (url.includes('/challenge') || /verify it.s you|2-step|verification/i.test(txt))
-      throw new AuthChallengeError('Google is asking for verification (2-Step / "Verify it\'s you"). Complete it once for this account, or turn 2SV off, then press Retry' + tag);
-    throw new AuthChallengeError('Google Admin sign-in failed' + tag);
-  }
-  t.entry.loggedIn = true;
-  await saveCookies(t.key, page);
-  log('Signed in');
-  return page;
 }
 
 // ── Authenticate email page ─────────────────────────────────────────────────
@@ -408,4 +534,4 @@ const sim = {
   async verifyLogin() { return true; },
 };
 
-module.exports = { generate, startAuthentication, verifyLogin, clearSession, sim, DEBUG_DIR, AuthChallengeError, GoogleWaitError };
+module.exports = { generate, startAuthentication, verifyLogin, clearSession, resetChallenge, answerChallenge, challengeImage, challengeState, sim, DEBUG_DIR, AuthChallengeError, GoogleWaitError };

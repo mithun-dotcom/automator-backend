@@ -225,7 +225,7 @@ function retry(job, domain) {
     Object.assign(t, { state: s, attempts: 0, nextRunAt: 0, error: null });
     n++;
   }
-  if (n && job.tenant) google.clearSession(job.tenant);
+  if (n) google.resetChallenge(job.tenant);
   job.cancelled = false;
   store.save();
   return n;
@@ -248,6 +248,7 @@ function publicJob(job, withLogs = false) {
       hostname: t.hostname, selector: t.selector, txtValue: t.txtValue, error: t.error, attempts: t.attempts,
       nextRunAt: t.nextRunAt, updatedAt: t.updatedAt, ...(withLogs ? { log: t.log } : {}),
     })),
+    challenge: job.options.simulate || !job.tasks.some(t => t.state === 'needs_action') ? null : google.challengeState(job.tenant),
   };
 }
 
@@ -266,4 +267,29 @@ function stats() {
   };
 }
 
-module.exports = { createJob, start, retry, cancel, publicJob, stats, TERMINAL };
+// Admin answered a paused Google sign-in (CAPTCHA / code / choice).
+async function answerChallenge(job, answer) {
+  const c = creds(job);
+  const L = m => console.log(`[${job.tenant}] sign-in: ${m}`);
+  try {
+    await google.answerChallenge(c, answer, L);
+  } catch (e) {
+    if (e.challenge) return { loggedIn: false, challenge: google.challengeState(job.tenant) || e.challenge };
+    throw e;
+  }
+  // signed in: resume every task of this tenant that was stopped for sign-in
+  let resumed = 0;
+  for (const j of store.all()) {
+    if (j.tenant !== job.tenant) continue;
+    for (const t of j.tasks) {
+      if (t.state !== 'needs_action' || !t.resumeState || !['queued', 'activating'].includes(t.resumeState)) continue;
+      Object.assign(t, { state: t.resumeState, attempts: 0, nextRunAt: 0, error: null });
+      log(j, t, 'Google sign-in completed by admin, resuming');
+      resumed++;
+    }
+  }
+  store.save();
+  return { loggedIn: true, resumed };
+}
+
+module.exports = { createJob, start, retry, cancel, publicJob, stats, answerChallenge, TERMINAL };
