@@ -3286,12 +3286,12 @@ async function syncExistingOtherLines() {
   // One-time undo: the first version of the repair below also made a batch from
   // the only mailbox line of invoices whose line type differs from their batch
   // (e.g. invoice #8). Remove those batches if nothing else uses them yet.
-  const undo = 'mailbox_lines_undo_v1';
+  const undo = 'mailbox_lines_undo_v2';
   const { rows: [undone] } = await query('SELECT 1 FROM settings WHERE key = $1', [undo]);
   if (!undone) {
     const { rows: wrong } = await query(
       `SELECT o.id, o.from_invoice_id FROM orders o JOIN invoices i ON i.id = o.from_invoice_id
-        WHERE o.id <> i.order_id AND o.created_at >= '2026-11-05T17:20:00Z' AND o.created_at < '2026-11-05T18:00:00Z'
+        WHERE o.id <> i.order_id AND o.inbox_type <> 'other'
           AND (SELECT count(*) FROM invoice_items it WHERE it.invoice_id = i.id AND it.inbox_type <> 'other') = 1
           AND NOT EXISTS (SELECT 1 FROM invoices x WHERE x.order_id = o.id)
           AND NOT EXISTS (SELECT 1 FROM mailboxes m WHERE m.order_id = o.id)`);
