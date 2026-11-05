@@ -70,7 +70,9 @@
 <body>
 <main>
   <h1>DKIM Automator</h1>
-  <p class="sub">Generates Google Workspace DKIM keys, publishes the TXT record to Cloudflare, waits until the record is visible in DNS, then starts authentication.</p>
+  <p class="sub">Generates Google Workspace DKIM keys in your own Chrome, publishes the TXT record to Cloudflare, waits until it is visible in DNS, then starts authentication.</p>
+
+  <section class="card" id="agent"></section>
 
   <div class="stats" id="stats"></div>
 
@@ -83,7 +85,14 @@
           <input name="adminEmail" type="email" placeholder="admin@yourdomain.com" required>
         </div>
         <div>
-          <label>Google Admin password <span class="hint">(2-Step Verification must be off)</span></label>
+          <label>Run Google steps in</label>
+          <select name="executor" id="executor">
+            <option value="extension">My Chrome (extension), recommended</option>
+            <option value="server">Server browser (needs password, may get CAPTCHAs)</option>
+          </select>
+        </div>
+        <div id="pwBox" style="display:none">
+          <label>Google Admin password</label>
           <input name="adminPassword" type="password" autocomplete="new-password">
         </div>
         <div>
@@ -136,6 +145,24 @@ const LABEL = { queued: 'Queued', record_ready: 'Record ready', waiting_dns: 'Wa
   active: 'Active', failed: 'Failed', needs_action: 'Needs action', cancelled: 'Cancelled' };
 
 $('#dnsProvider').onchange = e => { $('#cfBox').style.display = e.target.value === 'cloudflare' ? '' : 'none'; };
+$('#executor').onchange = e => { $('#pwBox').style.display = e.target.value === 'server' ? '' : 'none'; };
+
+function renderAgent(a) {
+  const on = a.connected;
+  const ag = a.agents.find(x => x.online);
+  $('#agent').innerHTML = on
+    ? `<div class="row" style="justify-content:space-between"><div><span class="pill active">Chrome extension connected</span>
+        <span class="hint" style="margin-left:8px">${ag?.current ? 'working: ' + esc(ag.current) : 'idle, waiting for work'}</span></div>
+        <a href="/extension.zip"><button class="ghost">Re-download extension</button></a></div>`
+    : `<div class="row" style="justify-content:space-between"><div><span class="pill needs_action">Chrome extension not connected</span></div>
+        <a href="/extension.zip"><button>Download extension</button></a></div>
+       <ol class="hint" style="margin:10px 0 0; padding-left:18px; font-size:13px">
+        <li>Download the extension and unzip it.</li>
+        <li>In Chrome open <b>chrome://extensions</b>, switch on <b>Developer mode</b> (top right), click <b>Load unpacked</b> and pick the <b>dkim-automator-extension</b> folder.</li>
+        <li>In that Chrome, sign in to <b>admin.google.com</b> with the Google Admin account(s) you'll use.</li>
+        <li>Click the extension icon → it should say <b>Connected</b>. It's already set up with this dashboard's address and key.</li>
+       </ol>`;
+}
 
 async function api(method, url, body) {
   const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -205,7 +232,7 @@ function renderJob(j) {
   const summary = Object.entries(c).map(([k, v]) => `${v} ${(LABEL[k] || k).toLowerCase()}`).join(' · ');
   return `<div class="job">
     <div class="jobhead">
-      <div><b>${esc(j.tenant)}</b> <span class="meta">· ${new Date(j.createdAt).toLocaleString()} · ${j.dnsProvider}${j.options.simulate ? ' · simulated' : ''} · ${summary}</span></div>
+      <div><b>${esc(j.tenant)}</b> <span class="meta">· ${new Date(j.createdAt).toLocaleString()} · ${j.dnsProvider} · ${j.options.simulate ? 'simulated' : j.options.executor === 'server' ? 'server browser' : 'Chrome extension'} · ${summary}</span></div>
       <div class="row">
         <a href="/api/jobs/${j.id}/export.csv"><button class="ghost">CSV</button></a>
         ${j.cancelled || !j.tasks.some(t => !['active','failed','needs_action','cancelled'].includes(t.state)) ? '' : `<button class="ghost" data-cancel="${j.id}">Cancel</button>`}
@@ -222,7 +249,8 @@ function renderJob(j) {
 
 async function refresh() {
   try {
-    const [stats, list] = await Promise.all([api('GET', '/api/stats'), api('GET', '/api/jobs')]);
+    const [stats, list, agent] = await Promise.all([api('GET', '/api/stats'), api('GET', '/api/jobs'), api('GET', '/api/agent/status')]);
+    renderAgent(agent);
     const full = await Promise.all(list.slice(0, 15).map(j => api('GET', `/api/jobs/${j.id}`)));
     const s = stats.counts;
     $('#stats').innerHTML = [

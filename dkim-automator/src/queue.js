@@ -45,7 +45,7 @@ function activeDomains() {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
-function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflareToken, selector, keyLength, regenerate, simulate }) {
+function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflareToken, selector, keyLength, regenerate, simulate, executor }) {
   const busy = activeDomains();
   const skipped = domains.filter(d => busy.has(d));
   const fresh = domains.filter(d => !busy.has(d));
@@ -55,7 +55,7 @@ function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflare
     tenant: adminEmail.toLowerCase(),
     creds: encrypt(JSON.stringify({ email: adminEmail, password: adminPassword })),
     dns: { provider: dnsProvider, token: cloudflareToken ? encrypt(cloudflareToken) : null },
-    options: { selector, keyLength, regenerate: !!regenerate, simulate: !!simulate },
+    options: { selector, keyLength, regenerate: !!regenerate, simulate: !!simulate, executor: executor === 'server' ? 'server' : 'extension' },
     cancelled: false,
     tasks: fresh.map(domain => ({
       domain, state: 'queued', attempts: 0, nextRunAt: 0, selector,
@@ -79,6 +79,12 @@ async function stepGenerate(job, t) {
   setState(job, t, 'queued', { phase: 'generating' });
   const L = m => log(job, t, m);
   const r = await api(job).generate(creds(job), t.domain, job.options, L);
+  applyGenerate(job, t, r);
+}
+
+function applyGenerate(job, t, r) {
+  if (!r.preserved && !/v=DKIM1;.*p=[A-Za-z0-9+/=]{100,}/.test(r.txtValue || '') && !job.options.simulate)
+    throw new Error('Did not get a valid DKIM TXT value from Google' + (r.txtValue ? `: ${String(r.txtValue).slice(0, 80)}` : ''));
   const selector = r.selector || job.options.selector;
   Object.assign(t, { txtValue: r.txtValue, selector, hostname: `${selector}._domainkey.${t.domain}`, googleStatus: r.status });
   if (r.preserved) {
@@ -108,7 +114,8 @@ async function stepWaitDns(job, t) {
     t.simPolls = (t.simPolls || 0) + 1;
     if (t.simPolls < 2) { t.nextRunAt = now() + 4000; return log(job, t, '[simulate] DNS not visible yet'); }
   } else {
-    const r = await dns.isPublished(t.domain, t.selector, t.txtValue);
+    // TEST_DNS_ALWAYS_OK is only for automated tests (never set it in production)
+    const r = process.env.TEST_DNS_ALWAYS_OK === '1' ? { match: true } : await dns.isPublished(t.domain, t.selector, t.txtValue);
     if (!r.match) {
       const waited = now() - (t.dnsSince || now());
       if (waited > C.DNS_WAIT_HOURS * 3600e3) {
@@ -126,12 +133,18 @@ async function stepWaitDns(job, t) {
 
 async function stepActivate(job, t) {
   const r = await api(job).startAuthentication(creds(job), t.domain, m => log(job, t, m));
+  applyActivate(job, t, r);
+}
+
+function applyActivate(job, t, r) {
   if (r.status === 'authenticating') {
     log(job, t, '✓ DKIM authentication started — Google is signing mail');
     return setState(job, t, 'active', { error: null });
   }
   throw Object.assign(new Error('Status did not change to authenticating'), { kind: 'activation' });
 }
+
+const usesExtension = job => job.options.executor === 'extension' && !job.options.simulate;
 
 const STEPS = { queued: stepGenerate, record_ready: stepPublish, waiting_dns: stepWaitDns, activating: stepActivate };
 const needsBrowser = s => s === 'queued' || s === 'activating';
@@ -195,7 +208,13 @@ function tick() {
   for (const job of jobs) {
     if (job.cancelled) continue;
     for (const t of job.tasks) {
+      if (t.lease && t.lease.until < now()) {
+        const step = t.state;
+        t.lease = null;
+        handleError(job, t, new Error(`Chrome extension stopped responding during ${step === 'queued' ? 'key generation' : 'activation'}`));
+      }
       if (!RUNNABLE.has(t.state) || running.has(tkey(job, t)) || (t.nextRunAt || 0) > now()) continue;
+      if (needsBrowser(t.state) && usesExtension(job)) continue;
       if (needsBrowser(t.state)) {
         if (slots <= 0 || busyTenants.has(job.tenant)) continue;
         slots--;
@@ -222,7 +241,7 @@ function retry(job, domain) {
     let s = t.resumeState && RUNNABLE.has(t.resumeState) ? t.resumeState : (t.txtValue ? 'record_ready' : 'queued');
     if (t.state === 'needs_action' && s === 'waiting_dns') t.dnsSince = now();
     if (s === 'activating') t.activationSince = now();
-    Object.assign(t, { state: s, attempts: 0, nextRunAt: 0, error: null });
+    Object.assign(t, { state: s, attempts: 0, nextRunAt: 0, error: null, lease: null });
     n++;
   }
   if (n) google.resetChallenge(job.tenant);
@@ -233,7 +252,7 @@ function retry(job, domain) {
 
 function cancel(job) {
   job.cancelled = true;
-  for (const t of job.tasks) if (!TERMINAL.has(t.state)) Object.assign(t, { resumeState: t.state, state: 'cancelled' });
+  for (const t of job.tasks) if (!TERMINAL.has(t.state)) Object.assign(t, { resumeState: t.state, state: 'cancelled', lease: null });
   store.save();
 }
 
@@ -244,7 +263,9 @@ function publicJob(job, withLogs = false) {
     id: job.id, createdAt: job.createdAt, tenant: job.tenant, dnsProvider: job.dns.provider,
     options: job.options, cancelled: job.cancelled, counts, total: job.tasks.length,
     tasks: job.tasks.map(t => ({
-      domain: t.domain, state: t.state, phase: t.phase || (running.has(tkey(job, t)) ? 'working' : null),
+      domain: t.domain, state: t.state,
+      phase: t.lease ? 'working in Chrome' : t.phase || (running.has(tkey(job, t)) ? 'working'
+        : (usesExtension(job) && needsBrowser(t.state) && !agentOnline() ? 'waiting for Chrome extension' : null)),
       hostname: t.hostname, selector: t.selector, txtValue: t.txtValue, error: t.error, attempts: t.attempts,
       nextRunAt: t.nextRunAt, updatedAt: t.updatedAt, ...(withLogs ? { log: t.log } : {}),
     })),
@@ -265,6 +286,77 @@ function stats() {
     avgSecondsToActive: avg, steps: metrics.steps, failures: metrics.failures,
     uptimeSeconds: Math.round((now() - metrics.started) / 1000),
   };
+}
+
+// ── Chrome extension agent ──────────────────────────────────────────────────
+// The extension polls /api/agent/claim, performs one Google Admin step in the user's own
+// signed-in Chrome, and posts the outcome to /api/agent/report.
+const LEASE_MS = 4 * 60 * 1000;
+const agents = new Map(); // agentId -> { lastSeen, version, current }
+
+function touchAgent(agentId, version) {
+  const a = agents.get(agentId) || {};
+  agents.set(agentId, { ...a, lastSeen: now(), version });
+}
+function agentOnline() {
+  return [...agents.values()].some(a => now() - a.lastSeen < 90e3);
+}
+function agentStatus() {
+  const list = [...agents.entries()].map(([id, a]) => ({ id, ...a, online: now() - a.lastSeen < 90e3 }));
+  return { connected: list.some(a => a.online), agents: list };
+}
+
+function claim(agentId, version) {
+  touchAgent(agentId, version);
+  const jobs = [...store.all()].sort((a, b) => a.createdAt - b.createdAt);
+  // one Google action per tenant at a time
+  const leasedTenants = new Set();
+  for (const j of jobs) for (const t of j.tasks) if (t.lease && t.lease.until > now()) leasedTenants.add(j.tenant);
+  for (const job of jobs) {
+    if (job.cancelled || !usesExtension(job) || leasedTenants.has(job.tenant)) continue;
+    for (const t of job.tasks) {
+      if (!needsBrowser(t.state) || (t.nextRunAt || 0) > now() || (t.lease && t.lease.until > now())) continue;
+      const action = t.state === 'queued' ? 'generate' : 'activate';
+      t.lease = { agentId, until: now() + LEASE_MS, action };
+      log(job, t, action === 'generate' ? 'Chrome extension: generating DKIM key' : 'Chrome extension: starting authentication');
+      agents.get(agentId).current = `${action} ${t.domain}`;
+      return {
+        jobId: job.id, domain: t.domain, action, tenant: job.tenant,
+        selector: job.options.selector, keyLength: job.options.keyLength, regenerate: job.options.regenerate,
+      };
+    }
+  }
+  agents.get(agentId).current = null;
+  return null;
+}
+
+function report(agentId, b) {
+  touchAgent(agentId);
+  const job = store.get(b.jobId);
+  const t = job && job.tasks.find(x => x.domain === b.domain);
+  if (!t || !t.lease || t.lease.agentId !== agentId) return { ok: false, error: 'No matching claimed task (it may have expired)' };
+  const expected = t.state === 'queued' ? 'generate' : 'activate';
+  t.lease = null;
+  if (b.action !== expected) return { ok: false, error: 'Task state changed' };
+  if (Array.isArray(b.log)) for (const m of b.log.slice(0, 20)) log(job, t, `Chrome: ${String(m).slice(0, 300)}`);
+  if (b.ok) {
+    try {
+      if (b.action === 'generate') applyGenerate(job, t, b.result || {});
+      else applyActivate(job, t, b.result || {});
+      t.error = null;
+      metrics.steps++;
+    } catch (e) { handleError(job, t, e); }
+  } else {
+    let msg = String(b.error || 'Chrome extension step failed');
+    if (b.debug) {
+      log(job, t, `Page debug: ${JSON.stringify(b.debug).slice(0, 1500)}`, 'error');
+    }
+    const err = Object.assign(new Error(msg), { kind: b.kind || undefined });
+    if (err.kind === 'auth') err.message += /sign in/i.test(msg) ? ', then press Retry' : ' — sign in to admin.google.com with this account in the Chrome running the extension, then press Retry';
+    handleError(job, t, err);
+  }
+  store.save();
+  return { ok: true, state: t.state };
 }
 
 // Admin answered a paused Google sign-in (CAPTCHA / code / choice).
@@ -292,4 +384,4 @@ async function answerChallenge(job, answer) {
   return { loggedIn: true, resumed };
 }
 
-module.exports = { createJob, start, retry, cancel, publicJob, stats, answerChallenge, TERMINAL };
+module.exports = { createJob, start, retry, cancel, publicJob, stats, answerChallenge, claim, report, agentStatus, TERMINAL };

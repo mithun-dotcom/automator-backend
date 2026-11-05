@@ -1,8 +1,22 @@
 # DKIM Automator (DKIM automation for google)
 
-Backend + web UI that turns on Google Workspace DKIM for many domains with no manual clicks:
+Backend + web UI + Chrome extension that turns on Google Workspace DKIM for many domains with no manual clicks.
 
-1. **Generate**: signs in to the Google Admin console in headless Chromium, opens
+## How the Google steps run
+Google blocks automated sign-ins from datacenter servers with endless CAPTCHAs, so by default the
+Google Admin steps run in **your own Chrome** through the bundled extension (`extension/`), where
+you are already signed in. The server never needs your Google password.
+
+1. In the dashboard click **Download extension** (`/extension.zip`, pre-configured with the server
+   URL and access key), unzip it, then go to `chrome://extensions` → Developer mode → **Load unpacked**.
+2. Sign in to admin.google.com in that Chrome with each admin account you use.
+3. The extension polls the server every 30s, does each step in a pinned background tab and reports back.
+
+An older "server browser" mode (headless Chromium on the server with the admin password) is still
+available, but Google usually blocks it.
+
+## Pipeline
+1. **Generate**: in the Google Admin console (via the extension), opens
    *Apps → Google Workspace → Gmail → Authenticate email*, selects the domain and generates a
    2048-bit key (selector `google` by default). An existing key that is already authenticating is
    kept, not replaced.
@@ -26,8 +40,8 @@ Backend + web UI that turns on Google Workspace DKIM for many domains with no ma
 - `/api/stats` and Prometheus-style `/metrics` endpoints.
 
 ## Requirements
-- The Google Admin account must be a super admin, and 2-Step Verification must be **off** (or
-  completed once so the saved session is reused).
+- The Google Admin account must be a super admin, signed in in the Chrome running the extension.
+- Chrome with the extension installed and open while jobs run.
 - Cloudflare API token with **Zone → Zone → Read** and **Zone → DNS → Edit** for the zones.
 
 ## Run locally
@@ -48,6 +62,7 @@ Tick **Simulate** in the UI to test the whole pipeline without touching Google o
 | `GOOGLE_WAIT_HOURS` | 72 | How long to keep retrying when Google says to wait |
 
 ## API
+- Extension: `POST /api/agent/claim`, `POST /api/agent/report`, `GET /api/agent/status`, `GET /extension.zip`
 - `POST /api/jobs` `{adminEmail, adminPassword, domains, dnsProvider: "cloudflare"|"manual", cloudflareToken, selector, keyLength, regenerate, simulate}`
 - `GET /api/jobs`, `GET /api/jobs/:id`, `POST /api/jobs/:id/retry {domain?, adminPassword?}`,
   `POST /api/jobs/:id/cancel`, `DELETE /api/jobs/:id`, `GET /api/jobs/:id/export.csv`
