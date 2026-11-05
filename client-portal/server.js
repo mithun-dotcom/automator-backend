@@ -368,7 +368,7 @@ const CLIENT_PRICING_SQL = `
 const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o.price_per_mailbox,
   o.domains, o.usernames, o.domain_access_method, o.registrar, o.registrar_email, o.domain_access_notes,
   o.sequencer, o.sequencer_workspace, o.sequencer_email, o.sequencer_notes, o.notes, o.status,
-  o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months, o.domain_invited, o.sequencer_invited`;
+  o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months, o.domain_invited, o.sequencer_invited, o.parent_order_id`;
 
 app.get('/api/dashboard', auth, asyncRoute(async (req, res) => {
   const dashBrand = await brands.forClient(req.user.id);
@@ -801,6 +801,8 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
       } else if (status === 'cancelled') {
         // Stop renewals: no next billing date, and unpaid upcoming invoices void.
         await query('UPDATE orders SET next_billing_date = NULL, cancelled_at = now() WHERE id = $1', [id]);
+        // Its parts go with it.
+        await query("UPDATE orders SET status = 'cancelled', next_billing_date = NULL, cancelled_at = now() WHERE parent_order_id = $1 AND status <> 'cancelled'", [id]);
         await query(
           `UPDATE invoices SET status = 'void'
             WHERE order_id = $1 AND status = 'unpaid' AND period_start IS NOT NULL AND period_start >= $2`,
@@ -829,7 +831,9 @@ async function cancelBatches(req, ids, { reason, note, notify, voidInvoiceId }) 
   if (!CANCEL_REASONS[reason]) throw new HttpError(400, 'Choose a reason for the cancellation');
   if (reason === 'other' && !note) throw new HttpError(400, 'Write the reason for the cancellation');
   const orders = [];
-  for (const id of [...new Set(ids.map(Number))]) {
+  // Cancelling a batch cancels its parts too.
+  const { rows: parts } = await query("SELECT id FROM orders WHERE parent_order_id = ANY($1) AND status <> 'cancelled'", [ids.map(Number)]);
+  for (const id of [...new Set([...ids.map(Number), ...parts.map((p) => p.id)])]) {
     await assertOrder(req, id);
     const { rows: [o] } = await query(
       `SELECT o.*, p.label, u.email, u.name FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
@@ -2012,9 +2016,10 @@ shared.get('/invoices/:id', asyncRoute(async (req, res) => {
   res.json(await invoiceWithItems(Number(req.params.id)));
 }));
 
-// Turns an invoice's mailbox lines into active batches, so they count on the
-// client's dashboard and renew from the invoice's issue date. The invoice is
-// linked to the (first) batch as its first billing period.
+// Turns an invoice's lines into one active batch, so they count on the
+// client's dashboard and renew from the invoice's issue date: the first line
+// is the batch, the others are its parts (parent_order_id), renewing on its
+// invoice. The invoice is linked to the batch as its first billing period.
 async function createBatchesFromInvoice(invoiceId, months) {
   const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [invoiceId]);
   if (!inv) throw new HttpError(404, 'Invoice not found');
@@ -2036,10 +2041,10 @@ async function createBatchesFromInvoice(invoiceId, months) {
   for (const it of lines) {
     const { rows: [o] } = await query(
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
-         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by)
-       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9, $10, $11) RETURNING id`,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by, parent_order_id)
+       VALUES ($1, $2, $3, $4, '', '', '', '', $5, 'active', $6, $7, $8, $6, $9, $10, $11, $12) RETURNING id`,
       [inv.user_id, it.inbox_type, it.quantity, Math.round((it.unit_price / months) * 100) / 100,
-       otherName(it), `${start}T00:00:00Z`, day, next, months, invoiceId, inv.sold_by],
+       otherName(it), `${start}T00:00:00Z`, day, next, months, invoiceId, inv.sold_by, ids[0] || null],
     );
     ids.push(o.id);
   }
@@ -2054,8 +2059,9 @@ const otherName = (it) => it.batch_name || (it.inbox_type === 'other' ? it.descr
 // "Other" lines ticked Recurring (e.g. a warmup service). Each becomes its own
 // batch that renews alongside the linked one, so it counts on the client's
 // dashboard; saving the invoice again updates that batch rather than adding
-// another. A mailbox line the client already has a batch for (same type and
-// quantity) is left alone.
+// another. These are parts of the linked batch (parent_order_id): they renew
+// on its invoice. A mailbox line the client already has a batch for (same
+// type and quantity) is left alone.
 async function syncRecurringOtherLines(invoiceId) {
   const { rows: [inv] } = await query('SELECT * FROM invoices WHERE id = $1', [invoiceId]);
   if (!inv || !inv.order_id || inv.status === 'void') return [];
@@ -2098,11 +2104,12 @@ async function syncRecurringOtherLines(invoiceId) {
     }
     const { rows: [o] } = await query(
       `INSERT INTO orders (user_id, inbox_type, quantity, price_per_mailbox, domains, usernames, domain_access_method,
-         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by)
-       VALUES ($1, $12, $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10, $11) RETURNING id`,
+         sequencer, batch_name, status, activated_at, billing_day, next_billing_date, created_at, billing_months, from_invoice_id, sold_by, parent_order_id)
+       VALUES ($1, $12, $2, $3, '', '', '', '', $4, $5, $6, $7, $8, $6, $9, $10, $11, $13) RETURNING id`,
       [inv.user_id, it.quantity, price, name, base.status === 'active' ? 'active' : base.status,
-       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId, inv.sold_by || base.sold_by, it.inbox_type]);
+       `${start}T00:00:00Z`, day, base.status === 'active' ? next : null, months, invoiceId, inv.sold_by || base.sold_by, it.inbox_type, base.parent_order_id || base.id]);
     ids.push(o.id);
+    await billing.addPartToUpcomingInvoices(o.id);
   }
   return ids;
 }
@@ -3282,6 +3289,42 @@ async function linkStandaloneInvoices() {
 }
 
 // One-time: recurring Other lines saved on batch invoices before they became batches.
+// One batch with several types: batches made from one invoice's lines become
+// parts of that invoice's batch, and parts' own upcoming unpaid renewal
+// invoices merge into the batch's invoice for the same period.
+async function linkBatchParts() {
+  const linked = await query(
+    `UPDATE orders o SET parent_order_id = i.order_id FROM invoices i, orders b
+      WHERE o.from_invoice_id = i.id AND i.order_id IS NOT NULL AND o.id <> i.order_id AND b.id = i.order_id
+        AND b.parent_order_id IS NULL AND o.parent_order_id IS NULL AND o.user_id = b.user_id RETURNING o.id, i.order_id`);
+  for (const r of linked.rows) console.log(`Batch ${r.id} is now part of batch ${r.order_id}`);
+  const linkedIds = linked.rows.map((r) => r.id);
+  const { rows: own } = await query(
+    `SELECT pi.id, pi.order_id AS part, pi.period_start, o.parent_order_id AS parent FROM invoices pi JOIN orders o ON o.id = pi.order_id
+      WHERE o.parent_order_id IS NOT NULL AND pi.status = 'unpaid' AND pi.period_start IS NOT NULL AND pi.period_start >= $1`, [billing.today()]);
+  for (const p of own) {
+    const { rows: [main] } = await query('SELECT id, status FROM invoices WHERE order_id = $1 AND period_start = $2', [p.parent, p.period_start]);
+    if (main && main.status !== 'unpaid') continue;
+    if (main) {
+      // Move the part's lines onto the batch's invoice.
+      const { rows: [{ n }] } = await query('SELECT count(*)::int AS n FROM invoice_items WHERE invoice_id = $1', [main.id]);
+      await query('UPDATE invoice_items SET invoice_id = $1, sort_order = sort_order + $3 WHERE invoice_id = $2', [main.id, p.id, n]);
+      await query('UPDATE invoices SET amount = (SELECT COALESCE(SUM(quantity * unit_price), 0) FROM invoice_items WHERE invoice_id = $1) - discount WHERE id = $1', [main.id]);
+      await query('DELETE FROM invoices WHERE id = $1', [p.id]);
+      await billing.resellerCost(main.id);
+      console.log(`Invoice #${p.id} merged into batch ${p.parent}'s invoice #${main.id}`);
+    } else {
+      await query("UPDATE invoices SET status = 'void' WHERE id = $1", [p.id]);
+      console.log(`Invoice #${p.id} voided: batch ${p.part} now renews on batch ${p.parent}'s invoice`);
+    }
+  }
+  // The batch's upcoming renewal invoice gets newly linked parts' lines.
+  for (const id of linkedIds) {
+    const n = await billing.addPartToUpcomingInvoices(id);
+    if (n) console.log(`Batch ${id}: added to its batch's upcoming renewal invoice`);
+  }
+}
+
 async function syncExistingOtherLines() {
   // One-time undo: the first version of the repair below also made a batch from
   // the only mailbox line of invoices whose line type differs from their batch
@@ -3357,6 +3400,7 @@ async function scheduledBilling() {
   await ensureAdmin();
   await linkStandaloneInvoices();
   await syncExistingOtherLines();
+  await linkBatchParts();
   await moveSoldByToClients();
   const fixedLocations = await geo.forgetCloudflareLocations();
   if (fixedLocations) console.log(`Cleared ${fixedLocations} location(s) recorded from Cloudflare addresses`);

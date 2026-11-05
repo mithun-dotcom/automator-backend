@@ -112,11 +112,20 @@ async function notify(user, title, body, { always = false, emailExtra = '', butt
 
 // ---- Invoices
 
-// Issues the invoice for one billing period of a batch, with a matching line
-// item. Does nothing if that period is already invoiced.
+// The active parts of a batch (other mailbox types / services in the same batch).
+async function batchParts(orderId) {
+  const { rows } = await query(
+    `SELECT o.*, p.label FROM orders o JOIN pricing p ON p.inbox_type = o.inbox_type
+      WHERE o.parent_order_id = $1 AND o.status = 'active' ORDER BY o.id`, [orderId]);
+  return rows;
+}
+
+// Issues the invoice for one billing period of a batch, with a line for it and
+// for each of its parts. Does nothing if that period is already invoiced.
 async function createOrderInvoice(order, periodStart, description, itemDescription) {
   const months = cycleMonths(order);
-  const amount = cycleAmount(order);
+  const parts = await batchParts(order.id);
+  const amount = Math.round([order, ...parts].reduce((t, o) => t + cycleAmount(o), 0) * 100) / 100;
   const { rows: [inv] } = await query(
     `INSERT INTO invoices (user_id, order_id, period_start, description, amount, due_date, issue_date, sold_by)
      VALUES ($1, $2, $3, $4, $5, $3, $6, $7)
@@ -125,13 +134,17 @@ async function createOrderInvoice(order, periodStart, description, itemDescripti
     [order.user_id, order.id, periodStart, description, amount, today(), order.sold_by || ''],
   );
   if (inv) {
-    await query(
-      `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [inv.id, order.inbox_type, order.batch_name || `Batch #${order.id}`,
-       months === 1 ? itemDescription : `${itemDescription} (${periodLabel(months)} × ${money(order.price_per_mailbox)}/month)`,
-       order.quantity, order.price_per_mailbox * months],
-    );
+    let sort = 0;
+    for (const o of [order, ...parts]) {
+      await query(
+        `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price, recurring, sort_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [inv.id, o.inbox_type, order.batch_name || `Batch #${order.id}`,
+         `${o.inbox_type === 'other' && o.batch_name && o.id !== order.id ? `${o.batch_name}: ` : ''}${months === 1 ? itemDescription : `${itemDescription} (${periodLabel(months)} × ${money(o.price_per_mailbox)}/month)`}`,
+         o.quantity, o.price_per_mailbox * months, o.inbox_type === 'other', sort],
+      );
+      sort += 1;
+    }
     await resellerCost(inv.id);
   }
   return inv;
@@ -162,9 +175,40 @@ const whatLabel = (order) => (order.inbox_type === 'other'
   ? `${order.quantity > 1 ? `${order.quantity} × ` : ''}${order.batch_name || 'Other service'}`
   : `${order.quantity} × ${order.label} mailboxes`);
 
-function ensureRenewalInvoice(order, periodStart) {
+// A part added to a batch whose next renewal invoice already exists (unpaid):
+// add the part's line to it, unless it has one of that type and size already.
+async function addPartToUpcomingInvoices(partId) {
+  const { rows: [part] } = await query('SELECT * FROM orders WHERE id = $1', [partId]);
+  if (!part || !part.parent_order_id || part.status !== 'active') return 0;
+  const { rows: invs } = await query(
+    `SELECT i.id, o.batch_name, o.billing_months, i.period_start FROM invoices i JOIN orders o ON o.id = i.order_id
+      WHERE i.order_id = $1 AND i.status = 'unpaid' AND i.period_start IS NOT NULL AND i.period_start >= $2`, [part.parent_order_id, today()]);
+  let added = 0;
+  for (const inv of invs) {
+    const months = Math.max(1, Number(inv.billing_months) || 1);
+    const { rows: [has] } = await query('SELECT 1 FROM invoice_items WHERE invoice_id = $1 AND inbox_type = $2 AND quantity = $3', [inv.id, part.inbox_type, part.quantity]);
+    if (has) continue;
+    await query(
+      `INSERT INTO invoice_items (invoice_id, inbox_type, batch_name, description, quantity, unit_price, recurring, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM invoice_items WHERE invoice_id = $1))`,
+      [inv.id, part.inbox_type, inv.batch_name || `Batch #${part.parent_order_id}`, `Renewal from ${prettyDate(inv.period_start)}`,
+       part.quantity, part.price_per_mailbox * months, part.inbox_type === 'other']);
+    await query('UPDATE invoices SET amount = (SELECT COALESCE(SUM(quantity * unit_price), 0) FROM invoice_items WHERE invoice_id = $1) - discount WHERE id = $1', [inv.id]);
+    await resellerCost(inv.id);
+    added += 1;
+  }
+  return added;
+}
+
+// "3 × Google Workspace + 3 × Microsoft 365 mailboxes" for a batch with parts.
+async function batchLabel(order) {
+  const parts = await batchParts(order.id);
+  return parts.length ? [order, ...parts].map(whatLabel).join(' + ') : whatLabel(order);
+}
+
+async function ensureRenewalInvoice(order, periodStart) {
   return createOrderInvoice(order, periodStart,
-    `Batch #${order.id} renewal: ${whatLabel(order)} (from ${prettyDate(periodStart)})`,
+    `Batch #${order.id} renewal: ${await batchLabel(order)} (from ${prettyDate(periodStart)})`,
     `Renewal from ${prettyDate(periodStart)}`);
 }
 
@@ -174,7 +218,8 @@ function ensureRenewalInvoice(order, periodStart) {
 async function runBilling() {
   const now = today();
   const { rows: orders } = await query(
-    `SELECT o.*, p.label, u.email, u.name
+    `SELECT o.*, p.label, u.email, u.name,
+            (SELECT po.status FROM orders po WHERE po.id = o.parent_order_id) AS parent_status
        FROM orders o
        JOIN pricing p ON p.inbox_type = o.inbox_type
        JOIN users u ON u.id = o.user_id
@@ -185,10 +230,12 @@ async function runBilling() {
   for (const order of orders) {
     let billingDate = order.next_billing_date;
     const billingDay = order.billing_day || parse(billingDate).day;
+    // A part of another active batch renews on that batch's invoice and reminders.
+    const isPart = Boolean(order.parent_order_id) && order.parent_status === 'active';
 
     // Renewal dates that have arrived: make sure each has an invoice, then move on.
     while (billingDate <= now) {
-      await ensureRenewalInvoice(order, billingDate);
+      if (!isPart) await ensureRenewalInvoice(order, billingDate);
       billingDate = nextBillingDate(billingDate, billingDay, cycleMonths(order));
     }
     if (billingDate !== order.next_billing_date) {
@@ -196,7 +243,7 @@ async function runBilling() {
     }
 
     const daysLeft = daysBetween(now, billingDate);
-    if (daysLeft > REMINDER_DAYS[0]) continue;
+    if (isPart || daysLeft > REMINDER_DAYS[0]) continue;
 
     await ensureRenewalInvoice(order, billingDate);
 
@@ -217,9 +264,9 @@ async function runBilling() {
     );
     const dayWord = daysLeft === 1 ? '1 day' : `${daysLeft} days`;
     let body =
-      `Your batch #${order.id} (${order.inbox_type === 'other' ? whatLabel(order) : `${order.label}, ${order.quantity} mailboxes`}) will renew in ${dayWord}, ` +
+      `Your batch #${order.id} (${(await batchParts(order.id)).length ? await batchLabel(order) : order.inbox_type === 'other' ? whatLabel(order) : `${order.label}, ${order.quantity} mailboxes`}) will renew in ${dayWord}, ` +
       `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
-    const domainNote = domainsLine(await subscriptionDomains(order.user_id, [order.id]), 'Domains on this batch');
+    const domainNote = domainsLine(await subscriptionDomains(order.user_id, [order.id, ...(await batchParts(order.id)).map((p) => p.id)]), 'Domains on this batch');
     const paid = invoice && invoice.status === 'paid';
     const user = { id: order.user_id, email: order.email, name: order.name };
     const brand = paid || !invoice ? null : await brands.forClient(order.user_id);
@@ -228,7 +275,7 @@ async function runBilling() {
       body += ' We have already received your payment for this period. Thank you!';
     } else if (threshold === 1) {
       // The last reminder, still unpaid: the critical alert.
-      const amount = money(invoice ? invoice.amount : cycleAmount(order));
+      const amount = money(invoice ? invoice.amount : [order, ...(await batchParts(order.id))].reduce((t, o) => t + cycleAmount(o), 0));
       body += ' Please make the payment if not made. Today is the last day to renew: if payment is not made by today, ' +
         'your accounts will be cancelled tomorrow. To keep your mailboxes active, please complete the payment now.';
       if (domainNote) body += `\n\n${domainNote}`;
@@ -381,7 +428,7 @@ const payButtons = (inv, fallbackNote = '') => {
 };
 
 module.exports = {
-  payButtons, whatLabel, periodsSince, resellerCost, subscriptionDomains, domainsLine,
+  payButtons, whatLabel, periodsSince, resellerCost, subscriptionDomains, domainsLine, batchParts, batchLabel, addPartToUpcomingInvoices,
   PAYMENT_NOTE, today, nextBillingDate, daysBetween, prettyDate, money, notify, runBilling, createOrderInvoice,
   cycleMonths, cycleLabel, cycleAmount,
 };

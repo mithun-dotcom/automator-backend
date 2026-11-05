@@ -446,3 +446,9 @@ ALTER TABLE resellers ADD COLUMN IF NOT EXISTS use_mixxbee BOOLEAN NOT NULL DEFA
 -- this service): opening it shows their brand; their clients' links use it.
 ALTER TABLE resellers ADD COLUMN IF NOT EXISTS custom_domain TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS resellers_custom_domain ON resellers (lower(custom_domain)) WHERE custom_domain <> '';
+
+-- One batch, several mailbox types: the extra types are parts of the main
+-- batch (parent_order_id). Only the main batch renews with an invoice and
+-- reminders; its invoice has a line per part.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_order_id INT REFERENCES orders(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS orders_parent ON orders (parent_order_id) WHERE parent_order_id IS NOT NULL;

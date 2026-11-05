@@ -522,20 +522,42 @@ async function renderClient(page, arg, sub) {
   return renderDashboard();
 }
 
+// A batch with several mailbox types is one batch: its parts (parent_order_id)
+// show as sections of it, with one total.
+function groupBatches(orders) {
+  const byId = new Map(orders.map((o) => [o.id, o]));
+  const groups = [];
+  const seen = new Set();
+  for (const o of orders) {
+    if (o.parent_order_id && byId.has(o.parent_order_id)) continue;
+    const parts = orders.filter((p) => p.parent_order_id === o.id);
+    groups.push({ main: o, all: [o, ...parts] });
+    seen.add(o.id); parts.forEach((p) => seen.add(p.id));
+  }
+  orders.filter((o) => !seen.has(o.id)).forEach((o) => groups.push({ main: o, all: [o] }));
+  return groups;
+}
+
 function batchesTable(orders) {
   if (!orders.length) return `<div class="empty">${state.me && state.me.resellerClient ? 'No mailboxes yet.' : 'No orders yet. Place your first order to get mailboxes set up.'}</div>`;
   return `<div class="table-wrap"><table>
     <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Status</th><th class="num">Amount</th><th>Next renewal</th><th>Ordered</th><th></th></tr></thead>
-    <tbody>${orders.map((o) => `<tr>
+    <tbody>${groupBatches(orders).map(({ main: o, all }) => {
+      const live = all.filter((p) => p.status !== 'cancelled');
+      const multi = all.length > 1;
+      const mailboxes = all.filter((p) => p.inbox_type !== 'other').reduce((n, p) => n + p.quantity, 0);
+      return `<tr>
       <td>${o.batch_name ? `<strong>${esc(o.batch_name)}</strong><div class="muted small">#${o.id}</div>` : `#${o.id}`}</td>
-      <td>${esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
-      <td class="num">${o.quantity}</td>
+      <td>${multi ? all.map((p) => `<div class="batch-part"><strong>${p.inbox_type === 'other' ? esc(p.batch_name || 'Other service') : esc(p.inbox_label)}</strong> <span class="muted small">× ${p.quantity}${p.status === 'cancelled' ? ' · cancelled' : ''} · ${money(cycleAmount(p))}</span></div>`).join('')
+        : esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
+      <td class="num">${multi ? mailboxes : o.quantity}</td>
       <td>${badge(o.status)}</td>
-      <td class="num">${o.status === 'cancelled' ? '<span class="muted">—</span>' : money(cycleAmount(o))}</td>
+      <td class="num">${o.status === 'cancelled' ? '<span class="muted">—</span>' : money(live.reduce((t, p) => t + cycleAmount(p), 0))}</td>
       <td>${o.status === 'active' ? fmtDate(o.next_billing_date) : '—'}</td>
       <td>${fmtDate(o.created_at)}</td>
       <td>${o.status !== 'cancelled' ? `<button class="btn btn-sm btn-danger" data-cancel="${o.id}">Cancel</button>` : ''}</td>
-    </tr>`).join('')}</tbody></table></div>`;
+    </tr>`;
+    }).join('')}</tbody></table></div>`;
 }
 
 // Billing cycles: prices are per mailbox per month; a cycle is 1 (monthly),
@@ -1032,13 +1054,17 @@ const reloadAdmin = () => route();
 // the renewal invoice is paid. (Renewal invoices are issued 7 days ahead.)
 function upcomingRenewalsCard(orders, invoices, today) {
   const days = (d) => Math.round((Date.parse(`${d}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  // Parts of a multi-type batch are billed on their parent's invoice: one row each batch.
+  const parts = (o) => orders.filter((p) => p.parent_order_id === o.id && p.status === 'active');
   const rows = orders
     .filter((o) => o.status === 'active' && o.next_billing_date && days(o.next_billing_date) <= 30)
+    .filter((o) => !(o.parent_order_id && orders.some((p) => p.id === o.parent_order_id && p.status === 'active')))
+    .map((o) => { const ps = parts(o); return ps.length ? { ...o, quantity: o.quantity + ps.reduce((n, p) => n + p.quantity, 0), inbox_label: [o, ...ps].map((p) => `${p.quantity} × ${p.inbox_label}`).join(' + '), _amount: [o, ...ps].reduce((n, p) => n + cycleAmount(p), 0), _multi: true } : o; })
     .sort((a, b) => a.next_billing_date.localeCompare(b.next_billing_date));
   const invoiceFor = (o) => invoices.find((i) => i.order_id === o.id && i.period_start === o.next_billing_date && i.status !== 'void');
   return `<div class="card">
     <div class="card-head"><div><h2>Upcoming renewals</h2><div class="muted small">Next 30 days · clients are reminded 7, 3 and 1 day before</div></div>
-      <span class="muted small">${rows.length} batch${rows.length === 1 ? '' : 'es'} · ${money(rows.reduce((n, o) => n + cycleAmount(o), 0))}</span></div>
+      <span class="muted small">${rows.length} batch${rows.length === 1 ? '' : 'es'} · ${money(rows.reduce((n, o) => n + (o._amount ?? cycleAmount(o)), 0))}</span></div>
     ${rows.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Renews</th><th>Client</th><th>Batch</th><th>Cycle</th><th class="num">Amount</th><th>Invoice</th></tr></thead>
       <tbody>${rows.map((o) => {
@@ -1047,9 +1073,9 @@ function upcomingRenewalsCard(orders, invoices, today) {
         return `<tr>
           <td><strong>${fmtDate(o.next_billing_date)}</strong><div class="muted small">${d <= 0 ? 'today' : d === 1 ? 'tomorrow' : `in ${d} days`}</div></td>
           <td>${esc(o.company || o.name || o.email)}<div class="muted small">${esc(o.email)}</div></td>
-          <td>${esc(batchTitle(o))}<div class="muted small">${o.quantity} × ${esc(o.inbox_label)}</div></td>
+          <td>${esc(batchTitle(o))}<div class="muted small">${o._multi ? esc(o.inbox_label) : `${o.quantity} × ${esc(o.inbox_label)}`}</div></td>
           <td>${cycleName(cycleOf(o))}</td>
-          <td class="num">${money(cycleAmount(o))}</td>
+          <td class="num">${money(o._amount ?? cycleAmount(o))}</td>
           <td>${inv ? `<a href="#/admin/invoice/${inv.id}">${badge(inv.status)}</a>` : '<span class="muted small">Issued 7 days before</span>'}</td>
         </tr>`;
       }).join('')}</tbody></table></div>` : '<div class="empty">Nothing renews in the next 30 days.</div>'}
@@ -1089,7 +1115,7 @@ function adminOrders(focusId) {
       <details class="order" id="order-${o.id}" ${o.id === focusId ? 'open' : ''}>
         <summary>
           <strong>#${o.id}</strong>
-          <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}${o.seller ? ` · Sold by ${esc(o.seller)}` : ''}</div></span>
+          <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.parent_order_id ? `<strong>Part of batch #${o.parent_order_id}</strong> (same invoice) · ` : ''}${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}${o.seller ? ` · Sold by ${esc(o.seller)}` : ''}</div></span>
           <span class="hide-sm">${esc(o.inbox_label)}</span>
           <span class="hide-sm num">${o.quantity} boxes</span>
           <span class="hide-sm">${o.status === 'active' && o.next_billing_date ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : `<span class="muted small">Ordered</span> ${fmtDate(o.created_at)}`}</span>
@@ -1099,6 +1125,7 @@ function adminOrders(focusId) {
           <div class="stack" style="gap:14px">
             ${o.domains ? `<div><h3>Domains</h3><pre>${esc(o.domains)}</pre></div>` : ''}
             ${o.usernames ? `<div><h3>Usernames</h3><pre>${esc(o.usernames)}</pre></div>` : ''}
+            ${o.parent_order_id ? `<div class="note note-info"><div>Part of <a href="#/admin/orders/${o.parent_order_id}">batch #${o.parent_order_id}</a>: billed on the same invoice and payment link, renews and cancels with it.</div></div>` : ''}
             <dl class="kv">
               ${kv('Type', o.inbox_label)}
               ${o.seller ? kv('Sold by', `${o.seller} (set on the client)`) : ''}
