@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DKIM Automator</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #16181d; --muted: #646b78; --line: #e3e6eb;
+    --accent: #1a73e8; --accent-text: #fff; --ok: #188038; --ok-bg: #e6f4ea; --warn: #b06000; --warn-bg: #fef7e0;
+    --err: #c5221f; --err-bg: #fce8e6; --info-bg: #e8f0fe; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111317; --card: #1a1d23; --text: #e8eaed; --muted: #9aa0a6; --line: #2c3038;
+      --accent: #8ab4f8; --accent-text: #0b1a33; --ok: #81c995; --ok-bg: #1e3326; --warn: #fdd663; --warn-bg: #3a3218;
+      --err: #f28b82; --err-bg: #3c1f1e; --info-bg: #1c2a40; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 16px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .hint { font-size: 12px; color: var(--muted); font-weight: 400; }
+  input, select, textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 120px; font-family: var(--mono); font-size: 13px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .check { display: flex; gap: 8px; align-items: center; font-weight: 500; font-size: 14px; }
+  .check input { width: auto; }
+  button { border: 0; border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; background: var(--accent); color: var(--accent-text); }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 6px 12px; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 14px; display: none; }
+  .msg.err { display: block; background: var(--err-bg); color: var(--err); }
+  .msg.ok { display: block; background: var(--ok-bg); color: var(--ok); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .job { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+  .job:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+  .jobhead { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .jobhead .meta { color: var(--muted); font-size: 13px; }
+  .table-wrap { overflow-x: auto; margin-top: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--info-bg); color: var(--accent); }
+  .pill.active { background: var(--ok-bg); color: var(--ok); }
+  .pill.failed { background: var(--err-bg); color: var(--err); }
+  .pill.needs_action, .pill.cancelled { background: var(--warn-bg); color: var(--warn); }
+  .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .txt { max-width: 340px; }
+  .err { color: var(--err); font-size: 12px; margin-top: 4px; }
+  .err a { color: inherit; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .log { font-family: var(--mono); font-size: 11px; color: var(--muted); max-height: 160px; overflow: auto; white-space: pre-wrap; }
+  .empty { color: var(--muted); text-align: center; padding: 20px; }
+  .copy { cursor: pointer; border-bottom: 1px dashed var(--muted); }
+  @media (max-width: 640px) { .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>DKIM Automator</h1>
+  <p class="sub">Generates Google Workspace DKIM keys, publishes the TXT record to Cloudflare, waits until the record is visible in DNS, then starts authentication.</p>
+
+  <div class="stats" id="stats"></div>
+
+  <section class="card">
+    <h2>New DKIM job</h2>
+    <form id="form" autocomplete="off">
+      <div class="grid">
+        <div>
+          <label>Google Admin email</label>
+          <input name="adminEmail" type="email" placeholder="admin@yourdomain.com" required>
+        </div>
+        <div>
+          <label>Google Admin password <span class="hint">(2-Step Verification must be off)</span></label>
+          <input name="adminPassword" type="password" autocomplete="new-password">
+        </div>
+        <div>
+          <label>DNS provider</label>
+          <select name="dnsProvider" id="dnsProvider">
+            <option value="cloudflare">Cloudflare (automatic)</option>
+            <option value="manual">Manual (I'll add the records)</option>
+          </select>
+        </div>
+        <div id="cfBox">
+          <label>Cloudflare API token <span class="hint">(Zone:Read + DNS:Edit)</span></label>
+          <input name="cloudflareToken" type="password" autocomplete="new-password">
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label>Domains <span class="hint">one per line, all on this Google Workspace account</span></label>
+        <textarea name="domains" placeholder="example.com&#10;example.org"></textarea>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <div>
+          <label>Selector (prefix)</label>
+          <input name="selector" value="google">
+        </div>
+        <div>
+          <label>Key length</label>
+          <select name="keyLength"><option>2048</option><option>1024</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px; justify-content: space-between">
+        <div class="row">
+          <label class="check"><input type="checkbox" name="regenerate"> Regenerate even if a key exists</label>
+          <label class="check"><input type="checkbox" name="simulate"> Simulate (test without Google/DNS)</label>
+        </div>
+        <button id="submit">Start DKIM automation</button>
+      </div>
+      <div class="msg" id="msg"></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="jobhead"><h2 style="margin:0">Jobs</h2><span class="meta">Updates every 3 seconds</span></div>
+    <div id="jobs" style="margin-top:12px"><div class="empty">No jobs yet.</div></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const LABEL = { queued: 'Queued', record_ready: 'Record ready', waiting_dns: 'Waiting for DNS', activating: 'Activating',
+  active: 'Active', failed: 'Failed', needs_action: 'Needs action', cancelled: 'Cancelled' };
+
+$('#dnsProvider').onchange = e => { $('#cfBox').style.display = e.target.value === 'cloudflare' ? '' : 'none'; };
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+$('#form').onsubmit = async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const body = Object.fromEntries(f.entries());
+  body.regenerate = f.has('regenerate');
+  body.simulate = f.has('simulate');
+  const msg = $('#msg');
+  msg.className = 'msg';
+  $('#submit').disabled = true;
+  try {
+    const r = await api('POST', '/api/jobs', body);
+    const extra = [r.skipped?.length ? `skipped (already running): ${r.skipped.join(', ')}` : '', r.invalid?.length ? `invalid: ${r.invalid.join(', ')}` : ''].filter(Boolean).join(' · ');
+    msg.textContent = `Job started for ${r.job.total} domain(s).${extra ? ' ' + extra : ''}`;
+    msg.className = 'msg ok';
+    e.target.domains.value = '';
+    refresh();
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = 'msg err';
+  } finally {
+    $('#submit').disabled = false;
+  }
+};
+
+const open = new Set();
+function renderTask(job, t) {
+  const err = t.error ? `<div class="err">${esc(t.error).replace(/\[debug: ([^\]]+)\]/, (m, f) => `<a href="/api/debug/${encodeURIComponent(f)}" target="_blank">screenshot</a>`)}</div>` : '';
+  const retry = ['failed', 'needs_action', 'cancelled'].includes(t.state) || t.error
+    ? `<button class="ghost" data-retry="${job.id}" data-domain="${esc(t.domain)}">Retry</button>` : '';
+  const next = t.nextRunAt && t.nextRunAt > Date.now() && !['active','failed','needs_action','cancelled'].includes(t.state)
+    ? `<div class="hint">next check ${new Date(t.nextRunAt).toLocaleTimeString()}</div>` : '';
+  const logKey = job.id + t.domain;
+  const log = t.log?.length ? `<details data-log="${esc(logKey)}" ${open.has(logKey) ? 'open' : ''}><summary>log</summary><div class="log">${t.log.map(l => `${l.at.slice(11, 19)} ${esc(l.msg)}`).join('\n')}</div></details>` : '';
+  return `<tr>
+    <td><b>${esc(t.domain)}</b>${err}${log}</td>
+    <td><span class="pill ${t.state}">${LABEL[t.state] || t.state}</span>${t.phase ? `<div class="hint">${esc(t.phase)}…</div>` : ''}${next}</td>
+    <td class="mono hide-sm">${esc(t.hostname || '')}</td>
+    <td class="mono txt hide-sm">${t.txtValue ? `<span class="copy" title="Click to copy" data-copy="${esc(t.txtValue)}">${esc(t.txtValue.slice(0, 60))}…</span>` : '—'}</td>
+    <td>${retry}</td>
+  </tr>`;
+}
+
+function renderJob(j) {
+  const c = j.counts;
+  const summary = Object.entries(c).map(([k, v]) => `${v} ${(LABEL[k] || k).toLowerCase()}`).join(' · ');
+  return `<div class="job">
+    <div class="jobhead">
+      <div><b>${esc(j.tenant)}</b> <span class="meta">· ${new Date(j.createdAt).toLocaleString()} · ${j.dnsProvider}${j.options.simulate ? ' · simulated' : ''} · ${summary}</span></div>
+      <div class="row">
+        <a href="/api/jobs/${j.id}/export.csv"><button class="ghost">CSV</button></a>
+        ${j.cancelled || !j.tasks.some(t => !['active','failed','needs_action','cancelled'].includes(t.state)) ? '' : `<button class="ghost" data-cancel="${j.id}">Cancel</button>`}
+        <button class="ghost" data-delete="${j.id}">Delete</button>
+      </div>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Domain</th><th>Status</th><th class="hide-sm">TXT host</th><th class="hide-sm">TXT value</th><th></th></tr></thead>
+      <tbody>${j.tasks.map(t => renderTask(j, t)).join('')}</tbody>
+    </table></div>
+  </div>`;
+}
+
+async function refresh() {
+  try {
+    const [stats, list] = await Promise.all([api('GET', '/api/stats'), api('GET', '/api/jobs')]);
+    const full = await Promise.all(list.slice(0, 15).map(j => api('GET', `/api/jobs/${j.id}`)));
+    const s = stats.counts;
+    $('#stats').innerHTML = [
+      ['Domains', stats.total], ['Active', s.active || 0],
+      ['In progress', (s.queued || 0) + (s.record_ready || 0) + (s.waiting_dns || 0) + (s.activating || 0)],
+      ['Need action', (s.needs_action || 0) + (s.failed || 0)],
+      ['Success rate', stats.successRate == null ? '—' : stats.successRate + '%'],
+      ['Avg. time to active', stats.avgSecondsToActive == null ? '—' : Math.round(stats.avgSecondsToActive / 60) + ' min'],
+    ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+    $('#jobs').innerHTML = full.length ? full.map(renderJob).join('') : '<div class="empty">No jobs yet.</div>';
+  } catch (e) { console.error(e); }
+}
+
+document.addEventListener('toggle', e => {
+  const k = e.target.dataset?.log; if (!k) return;
+  e.target.open ? open.add(k) : open.delete(k);
+}, true);
+
+document.addEventListener('click', async e => {
+  const d = e.target.dataset;
+  try {
+    if (d.copy) { await navigator.clipboard.writeText(d.copy); e.target.title = 'Copied'; }
+    else if (d.retry) {
+      const pw = confirm('Retry this domain? Press Cancel to also enter a new admin password.') ? null : prompt('New Google Admin password (leave empty to keep current):');
+      await api('POST', `/api/jobs/${d.retry}/retry`, { domain: d.domain, ...(pw ? { adminPassword: pw } : {}) });
+    }
+    else if (d.cancel) { if (confirm('Cancel all pending domains in this job?')) await api('POST', `/api/jobs/${d.cancel}/cancel`); }
+    else if (d.delete) { if (confirm('Delete this job?')) await api('DELETE', `/api/jobs/${d.delete}`); }
+    else return;
+    refresh();
+  } catch (err) { alert(err.message); }
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

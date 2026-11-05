@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: dkim-automator
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_PASSWORD
+        generateValue: true
+      - key: SECRET_KEY
+        generateValue: true
+      - key: WORKERS
+        value: "1"
