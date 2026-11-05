@@ -641,5 +641,259 @@ app.post('/run', async (req, res) => {
   })();
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── DKIM automation for google ───────────────────────────────────────────────
+// Admin console → Apps → Google Workspace → Gmail → Authenticate email
+// ══════════════════════════════════════════════════════════════════════════════
+const dns = require('dns').promises;
+
+const DKIM_URL = 'https://admin.google.com/ac/apps/gmail/authenticateemail';
+let dkimResults = [];   // last run's results, exposed via GET /dkim/results
+let dkimRunning = false;
+
+// Look up the published DKIM TXT record for selector._domainkey.domain
+async function lookupDkimTxt(domain, selector) {
+  try {
+    const records = await dns.resolveTxt(`${selector}._domainkey.${domain}`);
+    return records.map(r => r.join('')).find(t => t.includes('v=DKIM1')) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function openDkimPage(page) {
+  await page.goto(DKIM_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+  await delay(3000);
+}
+
+// Choose the domain in the "Selected domain" dropdown on the Authenticate email page
+async function selectDkimDomain(page, domain) {
+  const d = domain.toLowerCase();
+
+  // Native <select> first
+  const native = await page.evaluate((d) => {
+    for (const s of Array.from(document.querySelectorAll('select')).filter(s => s.offsetParent !== null)) {
+      const opt = Array.from(s.options).find(o => o.text.toLowerCase().trim() === d || o.value.toLowerCase() === d);
+      if (opt) {
+        s.value = opt.value;
+        s.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+    }
+    return false;
+  }, d);
+  if (native) { await delay(2500); return true; }
+
+  // Custom listbox: open it, then click the matching option
+  const opened = await page.evaluate(() => {
+    const trigger = Array.from(document.querySelectorAll('[role="listbox"], [role="combobox"], [aria-haspopup="listbox"]'))
+      .find(el => el.offsetParent !== null);
+    if (trigger) { trigger.click(); return true; }
+    return false;
+  });
+  if (opened) {
+    await delay(800);
+    const picked = await page.evaluate((d) => {
+      const opt = Array.from(document.querySelectorAll('[role="option"], li'))
+        .find(el => el.offsetParent !== null && el.textContent.toLowerCase().trim() === d);
+      if (opt) { opt.click(); return true; }
+      return false;
+    }, d);
+    if (picked) { await delay(2500); return true; }
+    await page.keyboard.press('Escape');
+  }
+
+  // Already selected (single-domain tenants have no dropdown)
+  const shown = await page.evaluate((d) => document.body.innerText.toLowerCase().includes(d), d);
+  return shown;
+}
+
+// Read the TXT record + status currently displayed on the page
+async function readDkimPanel(page) {
+  return await page.evaluate(() => {
+    const text = document.body.innerText;
+    let txt = null;
+    for (const el of Array.from(document.querySelectorAll('textarea, input'))) {
+      if ((el.value || '').includes('v=DKIM1')) { txt = el.value.trim(); break; }
+    }
+    if (!txt) {
+      const m = text.match(/v=DKIM1;[^\n]+/);
+      if (m) txt = m[0].trim();
+    }
+    const hostMatch = text.match(/([a-z0-9-]+)\._domainkey/i);
+    const lower = text.toLowerCase();
+    let status = 'unknown';
+    if (lower.includes('authenticating email with dkim')) status = 'authenticating';
+    else if (lower.includes('not authenticating')) status = 'not_authenticating';
+    return { txtValue: txt, selector: hostMatch ? hostMatch[1] : null, status };
+  });
+}
+
+// Click GENERATE NEW RECORD, set key length + selector, then GENERATE
+async function generateDkimRecord(page, selector, keyLength) {
+  const opened = await clickByText(page, 'GENERATE NEW RECORD', 8000) || await clickByText(page, 'Generate new record', 3000);
+  if (!opened) throw new Error('"Generate new record" button not found');
+  await delay(1500);
+
+  // Key bit length — radio or select
+  await page.evaluate((bits) => {
+    const radios = Array.from(document.querySelectorAll('input[type="radio"]')).filter(r => r.offsetParent !== null);
+    for (const r of radios) {
+      const lbl = ((r.closest('label') || r.parentElement || {}).textContent || '') + ' ' + (r.value || '');
+      if (lbl.includes(String(bits))) { r.click(); return; }
+    }
+    for (const s of Array.from(document.querySelectorAll('select')).filter(s => s.offsetParent !== null)) {
+      const opt = Array.from(s.options).find(o => o.text.includes(String(bits)));
+      if (opt) { s.value = opt.value; s.dispatchEvent(new Event('change', { bubbles: true })); return; }
+    }
+  }, keyLength);
+  await delay(400);
+
+  // Prefix selector (defaults to "google")
+  const filled = await page.evaluate(() => {
+    const input = Array.from(document.querySelectorAll('[role="dialog"] input[type="text"], [role="dialog"] input:not([type])'))
+      .find(i => i.offsetParent !== null);
+    if (input) { input.focus(); input.click(); return true; }
+    return false;
+  });
+  if (filled) {
+    await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type(selector, { delay: 60 });
+    await delay(300);
+  }
+
+  // Confirm
+  const confirmed = await page.evaluate(() => {
+    const scope = document.querySelector('[role="dialog"]') || document;
+    const btn = Array.from(scope.querySelectorAll('button, [role="button"]'))
+      .find(b => b.offsetParent !== null && b.textContent.trim().toUpperCase() === 'GENERATE');
+    if (btn) { btn.click(); return true; }
+    return false;
+  });
+  if (!confirmed) throw new Error('"Generate" confirm button not found');
+  await delay(5000);
+}
+
+async function clickStartAuthentication(page) {
+  const clicked = await clickByText(page, 'START AUTHENTICATION', 6000) || await clickByText(page, 'Start authentication', 3000);
+  if (!clicked) throw new Error('"Start authentication" button not found');
+  await delay(5000);
+  // Google shows an error banner if the TXT record is not visible yet
+  const errText = await page.evaluate(() => {
+    const m = document.body.innerText.match(/[^\n]*(DNS record|could not|couldn't|unable)[^\n]*/i);
+    return m ? m[0].trim() : null;
+  });
+  return errText;
+}
+
+// Full DKIM flow for one domain
+// action: 'generate' → create/read the record
+//         'start'    → start authentication (record must already be in DNS)
+//         'both'     → generate, then start if DNS already has the record
+async function runDkimForDomain(page, domain, { selector, keyLength, action, regenerate }) {
+  const result = { domain, selector, hostname: `${selector}._domainkey`, txtValue: null, status: 'unknown', dnsPublished: false, error: null };
+
+  await openDkimPage(page);
+  if (!(await selectDkimDomain(page, domain))) throw new Error(`Domain ${domain} not found in Authenticate email page`);
+
+  let panel = await readDkimPanel(page);
+
+  if (action !== 'start' && (regenerate || !panel.txtValue)) {
+    sendStatus(`Generating ${keyLength}-bit DKIM key for ${domain}...`, 'info');
+    await generateDkimRecord(page, selector, keyLength);
+    panel = await readDkimPanel(page);
+  }
+
+  result.txtValue = panel.txtValue;
+  result.status = panel.status;
+  if (panel.selector) { result.selector = panel.selector; result.hostname = `${panel.selector}._domainkey`; }
+  if (!result.txtValue) throw new Error('Could not read the DKIM TXT record value');
+
+  const published = await lookupDkimTxt(domain, result.selector);
+  result.dnsPublished = !!published && published.replace(/\s/g, '') === result.txtValue.replace(/\s/g, '');
+
+  if (action !== 'generate' && result.status !== 'authenticating') {
+    if (!result.dnsPublished && action === 'both') {
+      sendStatus(`⚠ ${domain}: TXT record not in DNS yet — add it, then run again with action "start"`, 'warn');
+    } else {
+      sendStatus(`Starting DKIM authentication for ${domain}...`, 'info');
+      const err = await clickStartAuthentication(page);
+      panel = await readDkimPanel(page);
+      result.status = panel.status;
+      if (result.status !== 'authenticating' && err) result.error = err;
+    }
+  }
+  return result;
+}
+
+// ── POST /dkim ───────────────────────────────────────────────────────────────
+// body: { googleEmail, googlePassword, domains: ["a.com", ...],
+//         selector?: "google", keyLength?: 2048, action?: "generate"|"start"|"both",
+//         regenerate?: false }
+app.post('/dkim', async (req, res) => {
+  const { googleEmail, googlePassword } = req.body;
+  const selector = (req.body.selector || 'google').trim();
+  const keyLength = Number(req.body.keyLength) === 1024 ? 1024 : 2048;
+  const action = ['generate', 'start', 'both'].includes(req.body.action) ? req.body.action : 'generate';
+  const regenerate = !!req.body.regenerate;
+  const domains = [...new Set((req.body.domains || []).map(d => String(d).trim().toLowerCase()).filter(Boolean))];
+
+  if (!domains.length)  return res.status(400).json({ error: 'No domains provided' });
+  if (!googleEmail)     return res.status(400).json({ error: 'Google Admin email required' });
+  if (!googlePassword)  return res.status(400).json({ error: 'Google Admin password required' });
+  if (!/^[a-z0-9-]+$/i.test(selector)) return res.status(400).json({ error: 'Selector may only contain letters, digits and hyphens' });
+  if (dkimRunning)      return res.status(409).json({ error: 'A DKIM run is already in progress' });
+
+  dkimRunning = true;
+  dkimResults = [];
+  res.json({ ok: true, total: domains.length, action });
+
+  (async () => {
+    let browser;
+    try {
+      sendStatus('DKIM automation for google: launching browser...', 'info', 0);
+      browser = await launchBrowser();
+      const page = await newPage(browser);
+      await loginGoogleAdmin(page, googleEmail, googlePassword);
+
+      for (let i = 0; i < domains.length; i++) {
+        const domain = domains[i];
+        const pct = Math.round(5 + (i / domains.length) * 90);
+        sendStatus(`[${i + 1}/${domains.length}] DKIM: ${domain}`, 'info', pct);
+        try {
+          const r = await runDkimForDomain(page, domain, { selector, keyLength, action, regenerate });
+          dkimResults.push(r);
+          sendStatus(`✓ ${domain}: TXT ${r.hostname} → ${r.txtValue.substring(0, 40)}... (status: ${r.status}, in DNS: ${r.dnsPublished})`, 'success', pct + 1);
+        } catch (e) {
+          dkimResults.push({ domain, selector, error: e.message });
+          sendStatus(`✗ DKIM failed for ${domain} — ${e.message}`, 'error', pct);
+          console.error(e.stack);
+        }
+      }
+      await page.close();
+      sendStatus('🎉 DKIM automation complete — fetch GET /dkim/results for the TXT records', 'success', 100);
+    } catch (e) {
+      sendStatus(`❌ DKIM fatal error: ${e.message}`, 'error');
+      console.error('DKIM fatal:', e.stack);
+    } finally {
+      dkimRunning = false;
+      if (browser) await browser.close().catch(() => {});
+    }
+  })();
+});
+
+// ── GET /dkim/results ────────────────────────────────────────────────────────
+app.get('/dkim/results', (req, res) => res.json({ running: dkimRunning, results: dkimResults }));
+
+// ── GET /dkim/check?domain=a.com&selector=google — DNS-only check ──────────
+app.get('/dkim/check', async (req, res) => {
+  const domain = String(req.query.domain || '').trim().toLowerCase();
+  const selector = String(req.query.selector || 'google').trim();
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+  const record = await lookupDkimTxt(domain, selector);
+  res.json({ domain, hostname: `${selector}._domainkey.${domain}`, published: !!record, record });
+});
+
 const PORT = process.env.PORT || 3456;
 app.listen(PORT, () => console.log(`\n✅ MithMill Automator running on port ${PORT}\n`));
