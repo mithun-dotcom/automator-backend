@@ -105,6 +105,10 @@
           <input name="adminPassword" type="password" autocomplete="new-password">
         </div>
         <div>
+          <label>Recovery email <span class="hint">(used when Google says "Verify it's you")</span></label>
+          <input name="recoveryEmail" id="recoveryEmail" type="email" value="team@mithmill.com" placeholder="recovery@yourcompany.com">
+        </div>
+        <div>
           <label>DNS provider</label>
           <select name="dnsProvider" id="dnsProvider">
             <option value="cloudflare">Cloudflare (automatic)</option>
@@ -162,13 +166,15 @@ function setMode() {
 }
 document.querySelectorAll('input[name=mode]').forEach(r => { r.onchange = setMode; });
 setMode();
+try { const r = localStorage.getItem('recoveryEmail'); if (r !== null) $('#recoveryEmail').value = r; } catch {}
+$('#recoveryEmail').onchange = e => { try { localStorage.setItem('recoveryEmail', e.target.value.trim()); } catch {} };
 
 function renderAgent(a) {
   const on = a.connected;
   const ag = a.agents.find(x => x.online);
   const oldWarn = a.outdated?.length
     ? `<div class="msg err" style="display:block; margin:0 0 10px">An <b>old version</b> of the extension (v${esc(a.outdated.join(', v'))}) is still installed in some Chrome profile and is being blocked.
-       Open <b>chrome://extensions</b> in every Chrome profile you use and <b>Remove</b> any DKIM Automator older than v1.2.0.</div>` : '';
+       Open <b>chrome://extensions</b> in every Chrome profile you use and <b>Remove</b> any DKIM Automator older than v1.3.0.</div>` : '';
   $('#agent').innerHTML = oldWarn + (on
     ? `<div class="row" style="justify-content:space-between"><div><span class="pill active">Chrome extension connected</span>
         <span class="hint" style="margin-left:8px">v${esc(ag?.version || '?')} · ${ag?.current ? 'working: ' + esc(ag.current) : 'idle, waiting for work'}</span></div>

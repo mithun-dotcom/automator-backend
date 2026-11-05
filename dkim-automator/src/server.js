@@ -62,6 +62,7 @@ app.post('/api/jobs', async (req, res) => {
   const { job, skipped } = queue.createJob({
     adminEmail: b.adminEmail.trim(), adminPassword: b.adminPassword || '', domains,
     dnsProvider, cloudflareToken: b.cloudflareToken, selector, keyLength, regenerate: b.regenerate, simulate, executor,
+    recoveryEmail: b.recoveryEmail,
   });
   if (!job.tasks.length) return res.status(409).json({ error: 'All these domains already have an active DKIM job', skipped });
   res.json({ ok: true, job: queue.publicJob(job), skipped, invalid });
@@ -92,6 +93,7 @@ app.post('/api/jobs/bulk', async (req, res) => {
   const keyLength = Number(b.keyLength) === 1024 ? 1024 : 2048;
   const dnsProvider = b.dnsProvider === 'manual' ? 'manual' : 'cloudflare';
   if (!/^[a-z0-9-]{1,63}$/.test(selector)) return res.status(400).json({ error: 'Invalid selector' });
+  if (b.recoveryEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(b.recoveryEmail)) return res.status(400).json({ error: 'Recovery email looks invalid' });
   if (dnsProvider === 'cloudflare' && !b.simulate) {
     if (!b.cloudflareToken) return res.status(400).json({ error: 'Cloudflare API token is required (or choose Manual DNS)' });
     try { await dns.cloudflareVerifyToken(b.cloudflareToken); }
@@ -102,6 +104,7 @@ app.post('/api/jobs/bulk', async (req, res) => {
     const r = queue.createJob({
       adminEmail: email, adminPassword: g.password, domains: [...new Set(g.domains)], dnsProvider,
       cloudflareToken: b.cloudflareToken, selector, keyLength, regenerate: b.regenerate, simulate: !!b.simulate, executor: 'extension',
+      recoveryEmail: b.recoveryEmail,
     });
     skipped.push(...r.skipped);
     if (r.job.tasks.length) created.push({ id: r.job.id, tenant: email, domains: r.job.tasks.length });
@@ -130,7 +133,7 @@ app.post('/api/jobs/:id/retry', (req, res) => {
 });
 
 // ── Chrome extension agent API ──────────────────────────────────────────────
-const MIN_EXTENSION_VERSION = '1.2.0';
+const MIN_EXTENSION_VERSION = '1.3.0';
 const vnum = v => String(v || '0').split('.').map(Number).reduce((a, n) => a * 1000 + (n || 0), 0);
 
 app.post('/api/agent/claim', (req, res) => {

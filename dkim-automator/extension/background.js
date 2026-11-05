@@ -126,7 +126,7 @@ async function signIn(tabId, item, log) {
       log('Signed in');
       return;
     }
-    const st = await page(tabId, 'signin', [item.tenant, item.password]).catch(() => ({ action: 'none' }));
+    const st = await page(tabId, 'signin', [item.tenant, item.password, false, item.recoveryEmail]).catch(() => ({ action: 'none' }));
     if (st.action === 'error') throw new StepError(st.message, 'auth', st.debug);
     if (st.action === 'challenge') { await waitForHuman(tabId, item, st.message, log); continue; }
     if (st.action !== 'none') log(`Sign-in: ${st.action}${st.clicked ? ` (${st.clicked})` : ''}`);
@@ -275,12 +275,14 @@ chrome.runtime.onMessage.addListener((msg, _s, reply) => {
 });
 
 // ── Runs INSIDE the admin.google.com page (must be self-contained) ──────────
-async function dkimPage(op, a1, a2, a3) {
+async function dkimPage(op, a1, a2, a3, a4) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const vis = e => !!e && e.offsetParent !== null;
   const text = () => (document.body ? document.body.innerText : '');
   const realClick = el => {
-    const t = el.closest('button, [role="button"], [role="option"], [role="menuitem"], [role="radio"], a, li, label') || el;
+    // a wrapper like Google's <div id="...Next"><button>Next</button></div>: click the real button inside
+    const inner = el.matches('button, [role="button"], a, input') ? null : el.querySelector('button, [role="button"]');
+    const t = inner || el.closest('button, [role="button"], [role="option"], [role="menuitem"], [role="radio"], a, li, label') || el;
     t.scrollIntoView({ block: 'center' });
     const o = { bubbles: true, cancelable: true, view: window };
     for (const ty of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) t.dispatchEvent(new MouseEvent(ty, o));
@@ -331,7 +333,7 @@ async function dkimPage(op, a1, a2, a3) {
   if (op === 'read') return read();
 
   if (op === 'signin') {
-    const [email, pw, inspectOnly] = [a1, a2, a3];
+    const [email, pw, inspectOnly, recovery] = [a1, a2, a3, String(a4 || '').trim()];
     const t = text();
     const q = sel => [...document.querySelectorAll(sel)].filter(vis);
     const set = (el, v) => {
@@ -342,7 +344,7 @@ async function dkimPage(op, a1, a2, a3) {
     };
     const next = () => {
       // prefer the real <button> inside Google's #identifierNext / #passwordNext wrappers
-      const b = [...document.querySelectorAll('#identifierNext button, #passwordNext button')].find(vis)
+      const b = [...document.querySelectorAll('#identifierNext button, #passwordNext button, [id$="Next"] button')].find(vis)
         || [...document.querySelectorAll('#identifierNext, #passwordNext')].find(vis)
         || findText(['Next', 'Continue', 'Sign in']);
       if (b) realClick(b);
@@ -355,6 +357,22 @@ async function dkimPage(op, a1, a2, a3) {
       return { action: 'challenge', message: 'type the CAPTCHA characters' };
     if (q('input[type="tel"], input[name="totpPin"], input[name="Pin"], input[autocomplete="one-time-code"], input#idvPin').length)
       return { action: 'challenge', message: 'enter the verification code' };
+    // "Verify it's you": answer with the account's recovery email when one is configured
+    if (recovery && !inspectOnly) {
+      const recInput = q('input[name="knowledgePreregisteredEmailResponse"], input[type="email"]:not(#identifierId)')
+        .find(i => /recovery email/i.test(t) && i.id !== 'identifierId');
+      if (recInput) {
+        if (window.__dkimRecoveryTried) return { action: 'error', message: `Google did not accept the recovery email ${recovery}` };
+        window.__dkimRecoveryTried = true;
+        set(recInput, recovery); await sleep(300); next();
+        return { action: 'entered recovery email' };
+      }
+      const opt = [...document.querySelectorAll('[role="link"], [role="button"], li, button, div[data-challengetype], div[data-action]')]
+        .filter(vis).find(e => /confirm your recovery email/i.test(e.textContent) && e.textContent.trim().length < 120);
+      if (opt) { realClick(opt); return { action: 'chose "Confirm your recovery email"' }; }
+    }
+    if (/incorrect|doesn.t match|wrong email/i.test(t) && /recovery email/i.test(t))
+      return { action: 'error', message: `Google did not accept the recovery email ${recovery || ''}`.trim() };
     if (/choose how you want to sign in|choose a way to verify|try another way/i.test(t) && !q('input[type="password"]').length)
       return { action: 'challenge', message: 'choose a verification method' };
     const pwEl = q('input[type="password"], input[name="Passwd"]')[0];

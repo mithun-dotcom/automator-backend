@@ -45,7 +45,7 @@ function activeDomains() {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
-function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflareToken, selector, keyLength, regenerate, simulate, executor }) {
+function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflareToken, selector, keyLength, regenerate, simulate, executor, recoveryEmail }) {
   const busy = activeDomains();
   const skipped = domains.filter(d => busy.has(d));
   const fresh = domains.filter(d => !busy.has(d));
@@ -55,7 +55,8 @@ function createJob({ adminEmail, adminPassword, domains, dnsProvider, cloudflare
     tenant: adminEmail.toLowerCase(),
     creds: encrypt(JSON.stringify({ email: adminEmail, password: adminPassword || '' })),
     dns: { provider: dnsProvider, token: cloudflareToken ? encrypt(cloudflareToken) : null },
-    options: { selector, keyLength, regenerate: !!regenerate, simulate: !!simulate, executor: executor === 'server' ? 'server' : 'extension' },
+    options: { selector, keyLength, regenerate: !!regenerate, simulate: !!simulate, executor: executor === 'server' ? 'server' : 'extension',
+      recoveryEmail: recoveryEmail ? String(recoveryEmail).trim().toLowerCase() : '' },
     cancelled: false,
     tasks: fresh.map(domain => ({
       domain, state: 'queued', attempts: 0, nextRunAt: 0, selector,
@@ -331,7 +332,7 @@ function claim(agentId, version) {
       return {
         jobId: job.id, domain: t.domain, action, tenant: job.tenant,
         selector: job.options.selector, keyLength: job.options.keyLength, regenerate: job.options.regenerate,
-        password, signOutAfter: !more,
+        password, signOutAfter: !more, recoveryEmail: job.options.recoveryEmail || '',
       };
     }
   }
