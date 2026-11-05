@@ -2064,8 +2064,10 @@ async function syncRecurringOtherLines(invoiceId) {
   const { rows: types } = await query("SELECT inbox_type FROM pricing WHERE inbox_type <> 'other'");
   const mailboxType = new Set(types.map((t) => t.inbox_type));
   const { rows: all } = await query('SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, id', [invoiceId]);
-  // The linked batch covers the first mailbox line of its own type.
-  const baseLine = all.find((it) => it.inbox_type === base.inbox_type && mailboxType.has(it.inbox_type));
+  // The linked batch covers the first mailbox line of its own type, or else the
+  // invoice's first mailbox line (its type may have been changed on the invoice).
+  const baseLine = all.find((it) => it.inbox_type === base.inbox_type && mailboxType.has(it.inbox_type))
+    || (mailboxType.has(base.inbox_type) ? all.find((it) => mailboxType.has(it.inbox_type)) : undefined);
   const items = all.filter((it) => it !== baseLine && ((it.inbox_type === 'other' && it.recurring) || mailboxType.has(it.inbox_type)));
   const months = billing.cycleMonths(base);
   const start = inv.period_start || inv.issue_date || billing.today();
@@ -3281,6 +3283,24 @@ async function linkStandaloneInvoices() {
 
 // One-time: recurring Other lines saved on batch invoices before they became batches.
 async function syncExistingOtherLines() {
+  // One-time undo: the first version of the repair below also made a batch from
+  // the only mailbox line of invoices whose line type differs from their batch
+  // (e.g. invoice #8). Remove those batches if nothing else uses them yet.
+  const undo = 'mailbox_lines_undo_v1';
+  const { rows: [undone] } = await query('SELECT 1 FROM settings WHERE key = $1', [undo]);
+  if (!undone) {
+    const { rows: wrong } = await query(
+      `SELECT o.id, o.from_invoice_id FROM orders o JOIN invoices i ON i.id = o.from_invoice_id
+        WHERE o.id <> i.order_id AND o.created_at >= '2026-11-05T17:20:00Z' AND o.created_at < '2026-11-05T18:00:00Z'
+          AND (SELECT count(*) FROM invoice_items it WHERE it.invoice_id = i.id AND it.inbox_type <> 'other') = 1
+          AND NOT EXISTS (SELECT 1 FROM invoices x WHERE x.order_id = o.id)
+          AND NOT EXISTS (SELECT 1 FROM mailboxes m WHERE m.order_id = o.id)`);
+    for (const w of wrong) {
+      await query('DELETE FROM orders WHERE id = $1', [w.id]);
+      console.log(`Invoice #${w.from_invoice_id}: removed batch ${w.id} (its only line belongs to the invoice's own batch)`);
+    }
+    await query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [undo, new Date().toISOString()]);
+  }
   // One-time: invoices linked to a batch that also carry another mailbox type.
   const flag2 = 'mailbox_lines_synced_v1';
   const { rows: [done2] } = await query('SELECT 1 FROM settings WHERE key = $1', [flag2]);
