@@ -144,7 +144,7 @@ async function waitForHuman(tabId, item, message, log) {
   await chrome.windows.update(tab.windowId, { focused: true, drawAttention: true }).catch(() => {});
   chrome.notifications?.create(`dkim-${Date.now()}`, {
     type: 'basic', iconUrl: 'icon.png', priority: 2, requireInteraction: true,
-    title: 'DKIM Automator needs you', message: `Finish Google sign-in for ${item.tenant}: ${message}`,
+    title: 'DKIM Automator needs you', message: `Finish Google sign-in for ${item.tenant}: ${message}. Do it in the pinned tab and don't close it.`,
   });
   const { base } = await adminBase();
   const end = Date.now() + 4 * 60 * 1000;
@@ -179,6 +179,20 @@ async function selectDomain(tabId, domain, log) {
 async function runItem(item) {
   const logs = [];
   const log = m => { logs.push(m); addLog(`${item.domain}: ${m}`); };
+  for (let attempt = 0; ; attempt++) {
+    const out = await runItemOnce(item, log, logs);
+    // the pinned work tab was closed mid-step: reopen it and start the step again (once)
+    if (!out.ok && /No tab with id|tab was closed|Frame with ID|No frame/i.test(out.error || '') && attempt === 0) {
+      log('The DKIM tab was closed — reopening it and starting again (please leave the pinned tab open)');
+      await chrome.storage.local.remove('tabId');
+      logs.length = 0;
+      continue;
+    }
+    return out;
+  }
+}
+
+async function runItemOnce(item, log, logs) {
   const tab = await workTab();
   try {
     await openForTenant(tab.id, item, log);

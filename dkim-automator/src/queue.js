@@ -301,9 +301,12 @@ function touchAgent(agentId, version) {
 function agentOnline() {
   return [...agents.values()].some(a => now() - a.lastSeen < 90e3);
 }
+const outdated = new Map(); // agentId -> { lastSeen, version }
+function noteOutdatedAgent(agentId, version) { outdated.set(agentId, { lastSeen: now(), version }); }
 function agentStatus() {
   const list = [...agents.entries()].map(([id, a]) => ({ id, ...a, online: now() - a.lastSeen < 90e3 }));
-  return { connected: list.some(a => a.online), agents: list };
+  const old = [...outdated.values()].filter(a => now() - a.lastSeen < 120e3).map(a => a.version || '?');
+  return { connected: list.some(a => a.online), agents: list, outdated: old };
 }
 
 function claim(agentId, version) {
@@ -391,4 +394,4 @@ async function answerChallenge(job, answer) {
   return { loggedIn: true, resumed };
 }
 
-module.exports = { createJob, start, retry, cancel, publicJob, stats, answerChallenge, claim, report, agentStatus, TERMINAL };
+module.exports = { createJob, start, retry, cancel, publicJob, stats, answerChallenge, claim, report, agentStatus, noteOutdatedAgent, TERMINAL };

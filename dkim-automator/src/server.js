@@ -130,9 +130,16 @@ app.post('/api/jobs/:id/retry', (req, res) => {
 });
 
 // ── Chrome extension agent API ──────────────────────────────────────────────
+const MIN_EXTENSION_VERSION = '1.2.0';
+const vnum = v => String(v || '0').split('.').map(Number).reduce((a, n) => a * 1000 + (n || 0), 0);
+
 app.post('/api/agent/claim', (req, res) => {
   const { agentId, version } = req.body || {};
   if (!agentId) return res.status(400).json({ error: 'agentId required' });
+  if (vnum(version) < vnum(MIN_EXTENSION_VERSION)) {
+    queue.noteOutdatedAgent(String(agentId).slice(0, 64), version);
+    return res.status(426).json({ error: `Outdated extension v${version || '?'}: remove it in chrome://extensions and install the new download from the dashboard` });
+  }
   res.json({ item: queue.claim(String(agentId).slice(0, 64), version) });
 });
 

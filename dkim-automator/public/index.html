@@ -166,9 +166,12 @@ setMode();
 function renderAgent(a) {
   const on = a.connected;
   const ag = a.agents.find(x => x.online);
-  $('#agent').innerHTML = on
+  const oldWarn = a.outdated?.length
+    ? `<div class="msg err" style="display:block; margin:0 0 10px">An <b>old version</b> of the extension (v${esc(a.outdated.join(', v'))}) is still installed in some Chrome profile and is being blocked.
+       Open <b>chrome://extensions</b> in every Chrome profile you use and <b>Remove</b> any DKIM Automator older than v1.2.0.</div>` : '';
+  $('#agent').innerHTML = oldWarn + (on
     ? `<div class="row" style="justify-content:space-between"><div><span class="pill active">Chrome extension connected</span>
-        <span class="hint" style="margin-left:8px">${ag?.current ? 'working: ' + esc(ag.current) : 'idle, waiting for work'}</span></div>
+        <span class="hint" style="margin-left:8px">v${esc(ag?.version || '?')} · ${ag?.current ? 'working: ' + esc(ag.current) : 'idle, waiting for work'}</span></div>
         <a href="/extension.zip"><button class="ghost">Re-download extension</button></a></div>`
     : `<div class="row" style="justify-content:space-between"><div><span class="pill needs_action">Chrome extension not connected</span></div>
         <a href="/extension.zip"><button>Download extension</button></a></div>
@@ -177,7 +180,7 @@ function renderAgent(a) {
         <li>In Chrome open <b>chrome://extensions</b>, switch on <b>Developer mode</b> (top right), click <b>Load unpacked</b> and pick the <b>dkim-automator-extension</b> folder.</li>
         <li>Tip: create a separate Chrome profile just for this (Chrome → profile icon → <b>Add</b>) and install it there, then tick <b>Sign out after each account</b> in the extension.</li>
         <li>Click the extension icon → it should say <b>Connected</b>. It's already set up with this dashboard's address and key.</li>
-       </ol>`;
+       </ol>`);
 }
 
 async function api(method, url, body) {
