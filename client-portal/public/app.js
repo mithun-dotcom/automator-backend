@@ -214,6 +214,9 @@ function tawkIdentify() {
 }
 
 const ICONS = {
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  lock: '<rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+  send: '<path d="M21 3 10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5z"/>',
   dashboard: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   order: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
   billing: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
@@ -3285,6 +3288,44 @@ function wireMailboxTable(pwUrl) {
   }
 }
 
+// ---- Domain hosts and sequencers: logos, a tile picker and account cards.
+const provLogo = (key, cls = '') => `<span class="prov-logo ${cls}"><img src="/brand-logo/${encodeURIComponent(key)}" alt="" loading="lazy" decoding="async"></span>`;
+// "Smartlead (beta)" -> { name: 'Smartlead', tag: 'beta' }
+const provName = (p) => { const m = String(p.name || p.key || '').match(/^(.*?)\s*\(([^)]+)\)$/); return m ? { name: m[1], tag: m[2] } : { name: p.name || p.key, tag: '' }; };
+function providerPicker(providers, id) {
+  return `<input type="hidden" name="provider" id="${id}">
+    <div class="prov-grid" data-picker="${id}">${providers.map((p, i) => {
+      const { name, tag } = provName(p);
+      return `<button type="button" class="prov-tile" data-prov="${esc(p.key)}" style="--i:${i}" aria-pressed="false">
+        ${provLogo(p.key)}<span class="prov-name">${esc(name)}</span>${tag ? `<span class="prov-tag">${esc(tag)}</span>` : ''}
+        <span class="prov-check" aria-hidden="true">${icon('check')}</span></button>`;
+    }).join('')}</div>`;
+}
+// Clicking a tile picks it and fills the form's fields; the rest of the form
+// stays folded away until then.
+function wirePicker(id, onPick) {
+  const input = document.getElementById(id);
+  const grid = document.querySelector(`[data-picker="${id}"]`);
+  if (!input || !grid) return;
+  const form = input.form;
+  grid.querySelectorAll('.prov-tile').forEach((t) => {
+    t.onclick = () => {
+      grid.querySelectorAll('.prov-tile').forEach((x) => { x.classList.toggle('sel', x === t); x.setAttribute('aria-pressed', String(x === t)); });
+      input.value = t.dataset.prov;
+      form.classList.add('picked');
+      onPick(t.dataset.prov);
+      const first = form.querySelector('.prov-body input:not([type=hidden])');
+      if (first) setTimeout(() => first.focus({ preventScroll: true }), 250);
+    };
+  });
+}
+// One connected account: logo, name, details, stats, actions.
+const acctCard = ({ key, title, meta, stats = '', actions = '', error = '' }) => `<div class="acct">
+  ${provLogo(key, 'prov-logo-lg')}
+  <div class="acct-main"><div class="acct-title">${title}<span class="acct-live" title="Connected"></span></div><div class="acct-meta">${meta}</div>${error}</div>
+  ${stats ? `<div class="acct-stats">${stats}</div>` : ''}
+  <div class="acct-actions">${actions}</div></div>`;
+
 // Client: their mailbox logins, and their sequencers (Instantly, …) to
 // connect the mailboxes to in the background with one click.
 let mbRefresh = null;
@@ -3298,22 +3339,26 @@ function renderMyMailboxes(rows, seqData = {}) {
       ${rows.length ? '<div class="row"><a class="btn" href="/api/mailboxes.csv">⬇ Download CSV</a></div>' : ''}</div>
     <div class="stack">
       <div class="card">
-        <div class="card-head"><div><h2>Sequencers</h2><div class="muted small">Connect your sequencer once, then add your mailboxes to it with one click. We sign each mailbox in to Google / Microsoft for you in the background.</div></div></div>
-        ${seqs.length ? `<div class="table-wrap"><table><tbody>${seqs.map((s) => `<tr>
-          <td><strong>${esc(s.label)}</strong><div class="muted small">${esc(prov(s.provider).name || s.provider)}${s.hint ? ` · key ${esc(s.hint)}` : ''}</div></td>
-          <td class="small">${prov(s.provider).csvOnly ? '<span class="muted">Import with the CSV</span>' : `<strong>${s.connected}</strong> connected${s.pending ? ` · <span class="conn-run">${s.pending} in progress</span>` : ''}${s.failed ? ` · <span class="access-off">${s.failed} failed</span>` : ''}`}</td>
-          <td><div class="row" style="flex-wrap:wrap;gap:6px;justify-content:flex-end">
-            ${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">⬇ CSV for ${esc(s.label)}</a>` : `
+        <div class="card-head"><div class="head-ico"><span class="head-badge">${icon('send')}</span><div><h2>Sequencers</h2><div class="muted small">Connect your sequencer once, then add your mailboxes to it with one click. We sign each mailbox in to Google / Microsoft for you in the background.</div></div></div></div>
+        ${seqs.length ? `<div class="acct-list">${seqs.map((s) => acctCard({
+          key: s.provider,
+          title: esc(s.label),
+          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}`,
+          stats: prov(s.provider).csvOnly ? '<span class="pill">Import with the CSV</span>' : `<span class="pill pill-ok"><strong>${s.connected}</strong> connected</span>${s.pending ? `<span class="pill pill-run"><span class="spin"></span>${s.pending} in progress</span>` : ''}${s.failed ? `<span class="pill pill-bad">${s.failed} failed</span>` : ''}`,
+          actions: `${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">⬇ CSV for ${esc(s.label)}</a>` : `
               <button class="btn btn-sm btn-primary" data-seq-all="${s.id}" ${rows.length ? '' : 'disabled'}>Connect all mailboxes</button>
               <button class="btn btn-sm" data-seq-sel="${s.id}" ${rows.length ? '' : 'disabled'}>Connect selected</button>
               ${s.failed ? `<button class="btn btn-sm" data-seq-retry="${s.id}">Retry failed</button>` : ''}`}
-            <button class="btn btn-sm btn-ghost" data-seq-del="${s.id}" data-name="${esc(s.label)}">Remove</button></div></td></tr>`).join('')}</tbody></table></div>` : ''}
-        <form class="card-pad" id="seq-form">
-          <div class="grid-2"><div class="field"><label for="seq-provider">Connect a sequencer</label><select id="seq-provider" name="provider" required><option value="">Choose…</option>
-            ${providers.map((p) => `<option value="${p.key}">${esc(p.name)}</option>`).join('')}</select></div><div></div></div>
-          <div id="seq-fields"></div>
-          <div class="row"><button class="btn btn-primary" type="submit">Test &amp; connect</button><span class="muted small">Keys are checked first, then stored encrypted.</span></div>
-          <div class="error"></div>
+            <button class="btn btn-sm btn-ghost" data-seq-del="${s.id}" data-name="${esc(s.label)}">Remove</button>`,
+        })).join('')}</div>` : ''}
+        <form class="card-pad prov-form" id="seq-form">
+          <div class="prov-head"><h3>${seqs.length ? 'Add another sequencer' : 'Connect your sequencer'}</h3><span class="muted small">Pick one. You'll paste its API key next.</span></div>
+          ${providerPicker(providers, 'seq-provider')}
+          <div class="prov-body">
+            <div id="seq-fields"></div>
+            <div class="row"><button class="btn btn-primary" type="submit">Test &amp; connect</button><span class="muted small secure-note">${icon('lock')} Keys are checked first, then stored encrypted.</span></div>
+            <div class="error"></div>
+          </div>
         </form>
       </div>
       ${rows.length ? `<div class="card">
@@ -3334,15 +3379,14 @@ function renderMyMailboxes(rows, seqData = {}) {
 
   const all = document.getElementById('mb-all');
   if (all) all.onchange = () => document.querySelectorAll('.mb-sel').forEach((c) => { if (!c.closest('tr').hidden) c.checked = all.checked; });
-  const sel = document.getElementById('seq-provider');
-  sel.onchange = () => {
-    const p = prov(sel.value);
+  wirePicker('seq-provider', (key) => {
+    const p = prov(key);
     document.getElementById('seq-fields').innerHTML = !p.key ? '' : `
       <p class="muted small" style="margin:0 0 10px">${esc(p.help)}</p>
       <div class="grid-2">${p.fields.map((f) => `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
         <input id="sf-${f.key}" name="cred_${f.key}" ${f.secret ? 'type="password"' : ''} autocomplete="off" required></div>`).join('')}
-        <div class="field"><label for="sf-label">Name it <span class="muted small">(optional)</span></label><input id="sf-label" name="label" placeholder="e.g. Instantly main workspace"></div></div>`;
-  };
+        <div class="field"><label for="sf-label">Name it <span class="muted small">(optional)</span></label><input id="sf-label" name="label" placeholder="e.g. ${esc(provName(p).name)} main workspace"></div></div>`;
+  });
   onSubmit(document.getElementById('seq-form'), async (d) => {
     const creds = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('cred_')).map(([k, v]) => [k.slice(5), v]));
     await api('POST', '/api/sequencers', { provider: d.provider, label: d.label, creds });
@@ -3508,21 +3552,27 @@ function renderMyDomains(rows, hostsData = {}) {
     <div class="stack">
       ${cloudflareReady ? `<div class="charts">
         <div class="card">
-          <div class="card-head"><div><h2>1. Your domain hosts</h2><div class="muted small">Where your domains are registered. Connect one with its API key so we can switch the nameservers for you.</div></div></div>
-          ${hosts.length ? `<div class="table-wrap"><table><tbody>${hosts.map((h) => `<tr>
-            <td><strong>${esc(h.label)}</strong><div class="muted small">${esc(prov(h.provider).name || h.provider)}${h.hint ? ` · key ${esc(h.hint)}` : ''}</div>${h.last_error ? `<div class="small access-off">${esc(h.last_error)}</div>` : ''}</td>
-            <td class="small">${h.domain_count} domain${h.domain_count === 1 ? '' : 's'}</td>
-            <td><button class="btn btn-sm btn-ghost" data-host-del="${h.id}" data-name="${esc(h.label)}">Remove</button></td></tr>`).join('')}</tbody></table></div>` : ''}
-          <form class="card-pad" id="host-form">
-            <div class="field"><label for="host-provider">Connect a domain host</label><select id="host-provider" name="provider" required><option value="">Choose…</option>
-              ${providers.map((p) => `<option value="${p.key}">${esc(p.name)}</option>`).join('')}</select></div>
-            <div id="host-fields"></div>
-            <div class="row"><button class="btn btn-primary" type="submit">Test &amp; connect</button><span class="muted small">Keys are checked first, then stored encrypted.</span></div>
-            <div class="error"></div>
+          <div class="card-head"><div class="head-ico"><span class="head-step">1</span><div><h2>Your domain hosts</h2><div class="muted small">Where your domains are registered. Connect one with its API key so we can switch the nameservers for you.</div></div></div></div>
+          ${hosts.length ? `<div class="acct-list">${hosts.map((h) => acctCard({
+            key: h.provider,
+            title: esc(h.label),
+            meta: `${esc(provName(prov(h.provider)).name || h.provider)}${h.hint ? ` · key <span class="mono">${esc(h.hint)}</span>` : ''}`,
+            stats: `<span class="pill"><strong>${h.domain_count}</strong> domain${h.domain_count === 1 ? '' : 's'}</span>`,
+            actions: `<button class="btn btn-sm btn-ghost" data-host-del="${h.id}" data-name="${esc(h.label)}">Remove</button>`,
+            error: h.last_error ? `<div class="small access-off">${esc(h.last_error)}</div>` : '',
+          })).join('')}</div>` : ''}
+          <form class="card-pad prov-form" id="host-form">
+            <div class="prov-head"><h3>${hosts.length ? 'Add another domain host' : 'Where are your domains registered?'}</h3><span class="muted small">Pick your registrar. You'll paste its API key next.</span></div>
+            ${providerPicker(providers, 'host-provider')}
+            <div class="prov-body">
+              <div id="host-fields"></div>
+              <div class="row"><button class="btn btn-primary" type="submit">Test &amp; connect</button><span class="muted small secure-note">${icon('lock')} Keys are checked first, then stored encrypted.</span></div>
+              <div class="error"></div>
+            </div>
           </form>
         </div>
         <form class="card card-pad" id="dom-client-add">
-          <h2 style="margin-bottom:4px">2. Add domains</h2>
+          <div class="head-ico" style="margin-bottom:10px"><span class="head-step">2</span><h2>Add domains</h2></div>
           <p class="muted small" style="margin:0 0 14px">We add each domain to our Cloudflare (keeping its current DNS records, so email keeps working) and switch its nameservers at your host. The domain is active once Cloudflare sees the new nameservers.</p>
           <div class="field"><label for="dc-text">Domains (one per line)</label><textarea id="dc-text" name="text" rows="5" placeholder="yourdomain.com&#10;getyourdomain.com" required></textarea></div>
           <div class="field"><label for="dc-host">Registered at</label><select id="dc-host" name="host_id" required>${hosts.length ? hosts.map((h) => `<option value="${h.id}">${esc(h.label)} (${esc(prov(h.provider).name || h.provider)})</option>`).join('') : '<option value="">Connect a domain host first</option>'}</select></div>
@@ -3549,16 +3599,15 @@ function renderMyDomains(rows, hostsData = {}) {
   const reload = async () => renderMyDomains((await api('GET', '/api/domains')).domains, await api('GET', '/api/domain-hosts'));
   const hostForm = document.getElementById('host-form');
   if (hostForm) {
-    const sel = document.getElementById('host-provider');
-    sel.onchange = () => {
-      const p = prov(sel.value);
+    wirePicker('host-provider', (key) => {
+      const p = prov(key);
       document.getElementById('host-fields').innerHTML = !p.key ? '' : `
         <p class="muted small" style="margin:0 0 10px">${esc(p.help)}</p>
         ${p.needsIp && serverIp ? `<div class="note note-info" style="margin:0 0 12px"><span>Whitelist this IP in Namecheap: <strong class="mono">${esc(serverIp)}</strong></span></div>` : ''}
         ${p.fields.map((f) => `<div class="field"><label for="hf-${f.key}">${esc(f.label)}${f.optional ? ' <span class="muted small">(optional)</span>' : ''}</label>
           <input id="hf-${f.key}" name="cred_${f.key}" ${f.secret ? 'type="password" autocomplete="off"' : 'autocomplete="off"'} ${f.optional ? '' : 'required'}></div>`).join('')}
-        <div class="field"><label for="hf-label">Name it <span class="muted small">(optional, e.g. "Main GoDaddy")</span></label><input id="hf-label" name="label"></div>`;
-    };
+        <div class="field"><label for="hf-label">Name it <span class="muted small">(optional)</span></label><input id="hf-label" name="label" placeholder="e.g. Main ${esc(provName(p).name)}"></div>`;
+    });
     onSubmit(hostForm, async (d) => {
       const creds = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('cred_')).map(([k, v]) => [k.slice(5), v]));
       await api('POST', '/api/domain-hosts', { provider: d.provider, label: d.label, creds });

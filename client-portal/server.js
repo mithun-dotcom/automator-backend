@@ -21,6 +21,7 @@ const brands = require('./brands');
 const policy = require('./reseller-policy');
 const agreementPdf = require('./agreementPdf');
 const geo = require('./geo');
+const brandlogos = require('./brandlogos');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -3230,6 +3231,9 @@ const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'index.html'),
   .replace('src="app.js"', `src="app.js?v=${ASSET_VERSION}"`);
 const sendIndex = (req, res) => res.set('Cache-Control', 'no-cache').type('html').send(INDEX_HTML);
 app.get(['/', '/index.html'], sendIndex);
+// Domain host and sequencer logos (public: they're on the login-free pages too).
+app.get('/brand-logo/:key', asyncRoute(brandlogos.handler));
+
 app.use(express.static(path.join(__dirname, 'public'), {
   index: false,
   setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
@@ -3426,6 +3430,7 @@ async function scheduledBilling() {
   const fromMailboxes = await domainsFromAllMailboxes();
   if (fromMailboxes) console.log(`Domains: added ${fromMailboxes} from uploaded mailboxes`);
   app.listen(PORT, () => console.log(`Mithmill client portal on :${PORT}`));
+  brandlogos.warm();
   scheduledBilling();
   setInterval(scheduledBilling, 60 * 60 * 1000);
   // After repairs, domains with problems are rechecked right away (the checks may have improved).
