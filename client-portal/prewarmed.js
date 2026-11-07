@@ -85,8 +85,8 @@ async function rdap(url) {
       await sleep(Math.min(60000, (Number.isFinite(after) && after > 0 ? after * 1000 : 20000)));
       continue;
     }
-    if (res.status === 404) { const e = new Error('Not found in the registry'); e.final = true; throw e; }
-    if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
+    if (res.status === 404) { const e = new Error('Not found in the registry'); e.notFound = true; e.url = url; throw e; }
+    if (!res.ok) { const e = new Error(`Lookup failed (${res.status})`); e.url = url; throw e; }
     p.gap = Math.max(700, Math.round(p.gap * 0.9));
     return res.json();
   }
@@ -98,6 +98,7 @@ async function rdap(url) {
 // WHOIS (port 43), the older lookup, as a fallback: the TLD's WHOIS server
 // comes from IANA, then "Registry Expiry Date:" from the registry's answer.
 const whoisServers = new Map();
+const loggedTld = new Set();
 function whoisQuery(server, q) {
   return new Promise((resolve, reject) => {
     const sock = require('net').connect(43, server);
@@ -120,9 +121,9 @@ async function whois(domain) {
   if (!server) throw new Error('No WHOIS server for this TLD');
   await waitTurn(`whois:${server}`);
   const text = await whoisQuery(server, domain);
-  if (/no match|not found|no data found|no entries found/i.test(text)) { const e = new Error('Not found in the registry'); e.final = true; throw e; }
+  if (/^\s*(no match|not found|no data found|no entries found|domain not found)/im.test(text) && !/expir/i.test(text)) { const e = new Error('Not found in the registry'); e.final = true; e.whoisText = text.slice(0, 300); throw e; }
   const m = text.match(/(?:Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|paid-till|expires?)\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
-  if (!m) throw new Error('WHOIS has no expiry date for this domain');
+  if (!m) { const e = new Error(`WHOIS (${server}) has no expiry date`); e.whoisText = text.slice(0, 300); throw e; }
   const reg = text.match(/^\s*Registrar:\s*(.+)$/mi);
   return { expires_on: m[1], registrar: reg ? reg[1].trim().slice(0, 120) : '' };
 }
@@ -133,11 +134,19 @@ async function lookup(domain) {
   let data;
   let firstErr = null;
   for (const url of [base && `${base}domain/${encodeURIComponent(domain)}`, `${FALLBACK}${encodeURIComponent(domain)}`].filter(Boolean)) {
-    try { data = await rdap(url); break; } catch (err) { firstErr = firstErr || err; if (err.final) throw err; }
+    try { data = await rdap(url); break; } catch (err) { firstErr = firstErr || err; }
   }
   if (!data) {
     if (process.env.RDAP_URL) throw firstErr || new Error('Lookup failed');
-    try { return await whois(domain); } catch (err) { if (err.final) throw err; throw firstErr && firstErr.rateLimited ? firstErr : err; }
+    // RDAP failed (or says not found): WHOIS has the last word.
+    try { return await whois(domain); } catch (err) {
+      if (!loggedTld.has(domain.split('.').pop())) {
+        loggedTld.add(domain.split('.').pop());
+        console.warn(`[prewarmed] ${domain}: RDAP ${firstErr ? `${firstErr.message} at ${firstErr.url || '?'}` : 'n/a'}; WHOIS: ${err.message}${err.whoisText ? ` | ${err.whoisText.replace(/\s+/g, ' ').slice(0, 200)}` : ''}`);
+      }
+      if (err.final) throw err;
+      throw firstErr && firstErr.rateLimited ? firstErr : err;
+    }
   }
   const ev = (data.events || []).find((e) => /expir/i.test(e.eventAction || ''));
   const reg = (data.entities || []).find((e) => (e.roles || []).includes('registrar'));

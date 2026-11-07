@@ -493,3 +493,5 @@ CREATE TABLE IF NOT EXISTS domain_expiry (
 UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LIKE 'Lookup failed (403)%';
 -- Domains the .co registry rate-limited (429) are looked up again, now paced.
 UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LIKE 'Lookup failed (429)%';
+-- .co lookups answered 'not found' by RDAP are retried with the WHOIS fallback.
+UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error = 'Not found in the registry' AND domain LIKE '%.co';
