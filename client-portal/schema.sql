@@ -521,3 +521,19 @@ UPDATE active_domains d SET sold_by = d.added_by FROM users u
 -- bought on another date). So the domain is no longer unique.
 DROP INDEX IF EXISTS active_domains_domain;
 CREATE INDEX IF NOT EXISTS active_domains_lower ON active_domains (lower(domain));
+
+-- Tags on active domains (e.g. "Client X", "Warm-up batch 3"), shared by the team.
+CREATE TABLE IF NOT EXISTS domain_tags (
+  id         SERIAL PRIMARY KEY,
+  name       TEXT NOT NULL,
+  color      TEXT NOT NULL DEFAULT 'indigo',
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS domain_tags_name ON domain_tags (lower(name));
+CREATE TABLE IF NOT EXISTS active_domain_tags (
+  domain_id INT NOT NULL REFERENCES active_domains(id) ON DELETE CASCADE,
+  tag_id    INT NOT NULL REFERENCES domain_tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (domain_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS active_domain_tags_tag ON active_domain_tags (tag_id);

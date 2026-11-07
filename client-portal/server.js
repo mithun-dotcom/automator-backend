@@ -3240,12 +3240,14 @@ async function teamMemberId(v) {
 
 admin.get('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
   const { rows } = await query(`SELECT d.*, a.name AS added_name, a.email AS added_email, c.name AS cancelled_name, c.email AS cancelled_email,
-      s.name AS sold_name, s.email AS sold_email
+      s.name AS sold_name, s.email AS sold_email,
+      COALESCE((SELECT array_agg(t.tag_id ORDER BY t.tag_id) FROM active_domain_tags t WHERE t.domain_id = d.id), '{}') AS tag_ids
     FROM active_domains d LEFT JOIN users a ON a.id = d.added_by LEFT JOIN users c ON c.id = d.cancelled_by LEFT JOIN users s ON s.id = d.sold_by
     WHERE ${domScope(req)} ORDER BY d.status, d.created_on DESC NULLS LAST, d.domain`);
   const team = req.user.role === 'admin'
     ? (await query("SELECT id, name, email FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows : [];
-  res.json({ rows, team, today: billing.today() });
+  const { rows: tags } = await query('SELECT id, name, color FROM domain_tags ORDER BY lower(name)');
+  res.json({ rows, team, tags, today: billing.today() });
 }));
 
 app.get('/api/active-domains-template.csv', (req, res) => {
@@ -3263,8 +3265,8 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
   const hasHeader = first.includes('domain');
   const col = (name, alts) => { const i = first.findIndex((h) => [name, ...alts].includes(h.replace(/[^a-z]/g, ''))); return i; };
   const idx = hasHeader
-    ? { domain: col('domain', ['domains']), users: col('users', ['user', 'usercount', 'mailboxes', 'inboxes', 'numberofusers']), created: col('created', ['createdon', 'creationdate', 'date', 'createdat']), provider: col('provider', ['type']), notes: col('notes', ['note']) }
-    : { domain: 0, users: 1, created: 2, provider: 3, notes: 4 };
+    ? { tags: col('tags', ['tag', 'labels', 'label']), domain: col('domain', ['domains']), users: col('users', ['user', 'usercount', 'mailboxes', 'inboxes', 'numberofusers']), created: col('created', ['createdon', 'creationdate', 'date', 'createdat']), provider: col('provider', ['type']), notes: col('notes', ['note']) }
+    : { tags: -1, domain: 0, users: 1, created: 2, provider: 3, notes: 4 };
   const formDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.created || '')) ? req.body.created : null;
   const formUsers = Number.parseInt(req.body.users, 10);
   const items = [];
@@ -3277,6 +3279,7 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
     const created = idx.created >= 0 && c[idx.created] ? mailboxes.parseDate(c[idx.created]) : null;
     if (created === undefined) throw new HttpError(400, `Couldn't read the date "${c[idx.created]}" for ${domain}. Use a date like 8-Sep-25, 9 Oct 2026 or 2025-09-08.`);
     items.push({ domain, users: Number.isFinite(users) ? Math.max(0, users) : (Number.isFinite(formUsers) ? formUsers : 0),
+      tags: idx.tags >= 0 ? String(c[idx.tags] || '').split(/[;,|]/).map((t) => t.trim()).filter(Boolean).slice(0, 10) : [],
       created: created || formDate || billing.today(), provider: (idx.provider >= 0 && String(c[idx.provider] || '').trim()) ? str(c[idx.provider], 80) : str(req.body.provider, 80), notes: idx.notes >= 0 ? str(c[idx.notes] || '', 300) : '' });
   }
   if (!items.length) throw new HttpError(400, bad.length ? `These aren't domains: ${bad.slice(0, 3).join(', ')}` : 'Add at least one domain');
@@ -3295,6 +3298,7 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
       }
     }
   };
+  const formTags = Array.isArray(req.body.tags) ? req.body.tags.map((t) => str(String(t), 40)).filter(Boolean).slice(0, 10) : [];
   let added = 0;
   const updated = 0;
   const taken = [];
@@ -3307,8 +3311,12 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
   for (const it of items) {
     const k = key(it.domain, it.users, it.created);
     if (have.get(k)) { have.set(k, have.get(k) - 1); skipped += 1; it.skip = true; continue; }
-    await q('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    const { rows: [ins] } = await q('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
       [it.domain, it.users, it.created, it.provider, it.notes, req.user.id, soldBy]);
+    for (const name of [...it.tags, ...formTags]) {
+      const tagId = await tagIdFor(name, req.user.id);
+      if (tagId) await q('INSERT INTO active_domain_tags (domain_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [ins.id, tagId]);
+    }
     added += 1;
   }
   if (added + updated) await audit.record(req.user, 'added', `${added + updated} active domain${added + updated === 1 ? '' : 's'}`,
@@ -3328,6 +3336,64 @@ admin.patch('/active-domains/:id', domainsAllowed, asyncRoute(async (req, res) =
     b.provider === undefined ? null : str(b.provider, 80), b.notes === undefined ? null : str(b.notes, 300)]);
   if (!d) throw new HttpError(404, 'Domain not found');
   res.json({ ok: true });
+}));
+
+// A tag's id by name, created when it doesn't exist yet.
+const TAG_COLORS = ['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'orange', 'teal', 'slate', 'pink'];
+async function tagIdFor(name, userId, color) {
+  const n = String(name || '').trim().slice(0, 40);
+  if (!n) return null;
+  const { rows: [t] } = await query('SELECT id FROM domain_tags WHERE lower(name) = lower($1)', [n]);
+  if (t) return t.id;
+  const { rows: [{ count }] } = await query('SELECT count(*)::int AS count FROM domain_tags');
+  const { rows: [c] } = await query(
+    'INSERT INTO domain_tags (name, color, created_by) VALUES ($1, $2, $3) ON CONFLICT (lower(name)) DO UPDATE SET name = domain_tags.name RETURNING id',
+    [n, TAG_COLORS.includes(color) ? color : TAG_COLORS[count % TAG_COLORS.length], userId]);
+  return c.id;
+}
+
+admin.post('/active-domains/tags', domainsAllowed, asyncRoute(async (req, res) => {
+  const name = str(req.body.name, 40);
+  if (!name) throw new HttpError(400, 'Name the tag');
+  const id = await tagIdFor(name, req.user.id, req.body.color);
+  res.status(201).json({ id });
+}));
+
+admin.patch('/active-domains/tags/:id', domainsAllowed, asyncRoute(async (req, res) => {
+  const name = req.body.name === undefined ? null : str(req.body.name, 40);
+  if (name === '') throw new HttpError(400, 'Name the tag');
+  const color = TAG_COLORS.includes(req.body.color) ? req.body.color : null;
+  try {
+    const r = await query('UPDATE domain_tags SET name = COALESCE($2, name), color = COALESCE($3, color) WHERE id = $1', [Number(req.params.id), name, color]);
+    if (!r.rowCount) throw new HttpError(404, 'Tag not found');
+  } catch (err) {
+    if (err.code === '23505') throw new HttpError(400, 'There is already a tag with that name');
+    throw err;
+  }
+  res.json({ ok: true });
+}));
+
+admin.delete('/active-domains/tags/:id', domainsAllowed, asyncRoute(async (req, res) => {
+  if (req.user.role !== 'admin') {
+    const { rows: [t] } = await query('SELECT created_by FROM domain_tags WHERE id = $1', [Number(req.params.id)]);
+    if (!t || t.created_by !== req.user.id) throw new HttpError(403, 'Only the owner or whoever created this tag can delete it');
+  }
+  await query('DELETE FROM domain_tags WHERE id = $1', [Number(req.params.id)]);
+  res.json({ ok: true });
+}));
+
+// Add or remove a tag on domains (only domains the caller can see).
+admin.post('/active-domains/tag', domainsAllowed, asyncRoute(async (req, res) => {
+  const ids = (Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);
+  if (!ids.length) throw new HttpError(400, 'Select the domains');
+  const tagId = req.body.tag_id ? Number(req.body.tag_id) : await tagIdFor(req.body.name, req.user.id);
+  if (!tagId) throw new HttpError(400, 'Choose a tag');
+  const { rows: visible } = await query(`SELECT id FROM active_domains d WHERE id = ANY($1) AND ${domScope(req)}`, [ids]);
+  const vis = visible.map((r) => r.id);
+  const r = req.body.remove === true
+    ? await query('DELETE FROM active_domain_tags WHERE tag_id = $1 AND domain_id = ANY($2)', [tagId, vis])
+    : await query('INSERT INTO active_domain_tags (domain_id, tag_id) SELECT unnest($2::int[]), $1 ON CONFLICT DO NOTHING', [tagId, vis]);
+  res.json({ changed: r.rowCount, tag_id: tagId });
 }));
 
 const domIds = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);

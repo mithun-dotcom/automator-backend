@@ -3808,8 +3808,12 @@ function renderMyDomains(rows, hostsData = {}) {
 // cancel (with each domain's creation date and users).
 function canActiveDomains() { return isOwner() || Boolean(state.me && state.me.role === 'staff' && state.me.domains_access); }
 function adminActiveDomains(data) {
-  const { rows, team, today } = data;
-  const ui = state.adUi || (state.adUi = { tab: 'active', q: '', by: '', page: 1, sel: new Set() });
+  const { rows, team, today, tags = [] } = data;
+  const ui = state.adUi || (state.adUi = { tab: 'active', q: '', by: '', tag: '', page: 1, sel: new Set() });
+  const tagById = new Map(tags.map((t) => [t.id, t]));
+  if (ui.tag && ui.tag !== 'none' && !tagById.has(Number(ui.tag))) ui.tag = '';
+  const tagsOf = (r) => (r.tag_ids || []).map((id) => tagById.get(id)).filter(Boolean);
+  const tagChip = (t, extra = '') => `<span class="dtag dtag-${esc(t.color)}" ${extra}>${esc(t.name)}</span>`;
   const PAGE = 50;
   const ids = new Set(rows.map((r) => r.id));
   [...ui.sel].forEach((id) => { if (!ids.has(id)) ui.sel.delete(id); });
@@ -3843,10 +3847,16 @@ function adminActiveDomains(data) {
           <div class="seg">${[['active', `Active · ${active.length}`], ['cancelled', `Cancelled · ${cancelled.length}`]].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-dmntab="${k}">${l}</button>`).join('')}</div>
           <input type="search" class="fb-q" id="dmn-q" placeholder="Search domain, provider, notes…" value="${esc(ui.q)}">
           ${owner && team.length > 1 ? `<select id="dmn-by"><option value="">Sold by: anyone</option><option value="none" ${ui.by === 'none' ? 'selected' : ''}>Not assigned</option>${team.map((t) => `<option value="${t.id}" ${String(ui.by) === String(t.id) ? 'selected' : ''}>${esc(t.name || t.email)}</option>`).join('')}</select>` : ''}
+          <select id="dmn-tagf"><option value="">Tag: any</option>${tags.map((t) => `<option value="${t.id}" ${String(ui.tag) === String(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}<option value="none" ${ui.tag === 'none' ? 'selected' : ''}>No tag</option></select>
+          <button type="button" class="btn btn-sm" id="dmn-tags">${icon('settings')}Tags</button>
           <button type="button" class="btn btn-sm" id="dmn-dl">${icon('download')}<span>Download</span></button>
         </div>
         <div class="pw-bulk" id="dmn-bulk" hidden><span id="dmn-count"></span>
           ${ui.tab === 'active' ? `<button class="btn btn-sm btn-danger-solid" id="dmn-cancel">${icon('close')}Cancel domains</button>` : `<button class="btn btn-sm" id="dmn-restore">${icon('refresh')}Restore</button>`}
+          <details class="menu tag-menu"><summary class="btn btn-sm">${icon('link')}Tag</summary><div class="menu-pop">
+            ${tags.length ? `<div class="menu-label">Add or remove</div>${tags.map((t) => `<button type="button" class="menu-item" data-dmn-tagtoggle="${t.id}">${tagChip(t)}</button>`).join('')}<div class="menu-sep"></div>` : ''}
+            <form class="tag-new" id="dmn-tagnew"><input name="name" maxlength="40" placeholder="New tag name…" autocomplete="off"><button class="btn btn-sm btn-primary" type="submit">Add</button></form>
+          </div></details>
           ${owner ? `<button class="btn btn-sm" id="dmn-push">${icon('send')}Push to team member</button>` : ''}
           <button class="btn btn-sm btn-ghost menu-danger" id="dmn-del">Delete</button>
           <button class="btn btn-sm btn-ghost" id="dmn-clear">Clear</button></div>
@@ -3857,10 +3867,11 @@ function adminActiveDomains(data) {
   const matches = () => {
     const words = ui.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     return rows.filter((r) => r.status === ui.tab && (!ui.by || (ui.by === 'none' ? !r.sold_by : String(r.sold_by) === String(ui.by)))
-      && words.every((w) => `${r.domain} ${r.provider} ${r.notes} ${who(r)} ${seller(r)}`.toLowerCase().includes(w)));
+      && (!ui.tag || (ui.tag === 'none' ? !(r.tag_ids || []).length : (r.tag_ids || []).includes(Number(ui.tag))))
+      && words.every((w) => `${r.domain} ${r.provider} ${r.notes} ${who(r)} ${seller(r)} ${tagsOf(r).map((t) => t.name).join(' ')}`.toLowerCase().includes(w)));
   };
-  const toCsv = (list) => [['domain', 'users', 'created', 'provider', 'notes', 'status', 'sold by', 'added by', 'cancelled on'],
-    ...list.map((r) => [r.domain, r.users_count, String(r.created_on || '').slice(0, 10), r.provider, r.notes, r.status, seller(r), who(r), r.cancelled_at ? String(r.cancelled_at).slice(0, 10) : ''])]
+  const toCsv = (list) => [['domain', 'users', 'created', 'tags', 'provider', 'notes', 'status', 'sold by', 'added by', 'cancelled on'],
+    ...list.map((r) => [r.domain, r.users_count, String(r.created_on || '').slice(0, 10), tagsOf(r).map((t) => t.name).join('; '), r.provider, r.notes, r.status, seller(r), who(r), r.cancelled_at ? String(r.cancelled_at).slice(0, 10) : ''])]
     .map((row) => row.map((v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }).join(',')).join('\n');
   const download = (list) => {
     if (!list.length) return toast('Nothing to download');
@@ -3894,7 +3905,7 @@ function adminActiveDomains(data) {
           const a = age(r.created_on);
           return `<tr data-id="${r.id}">
           <td class="mb-chk"><input type="checkbox" class="dmn-sel" value="${r.id}" ${ui.sel.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.domain)}"></td>
-          <td><div class="dmn-dom"><span class="dmn-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="dmn-name">${esc(r.domain)}</strong>${(buys.get(`${r.status}|${r.domain.toLowerCase()}`) || 0) > 1 ? `<button type="button" class="dmn-multi" data-dmn-domain="${esc(r.domain)}" title="Show all purchases of this domain">×${buys.get(`${r.status}|${r.domain.toLowerCase()}`)} purchases</button>` : ''}${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}</div>
+          <td><div class="dmn-dom"><span class="dmn-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="dmn-name">${esc(r.domain)}</strong>${(buys.get(`${r.status}|${r.domain.toLowerCase()}`) || 0) > 1 ? `<button type="button" class="dmn-multi" data-dmn-domain="${esc(r.domain)}" title="Show all purchases of this domain">×${buys.get(`${r.status}|${r.domain.toLowerCase()}`)} purchases</button>` : ''}${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}${tagsOf(r).length ? `<div class="dtags">${tagsOf(r).map((t) => tagChip(t, `data-dmn-tagfilter="${t.id}" title="Show only ${esc(t.name)}"`)).join('')}</div>` : ''}</div>
             <button class="icon-btn icon-btn-sm mb-copy" data-copy-ns="${esc(r.domain)}" data-copy-what="Domain" title="Copy domain">${icon('copy')}</button></div></td>
           <td class="nowrap">${r.created_on ? `<strong class="dmn-date">${fmtDate(String(r.created_on).slice(0, 10))}</strong><div class="pw-sub">${a === 0 ? 'today' : a > 0 ? `${a} day${a === 1 ? '' : 's'} ago` : 'in the future'}</div>` : '<span class="muted">—</span>'}</td>
           <td class="num"><span class="dmn-users">${icon('team')}${r.users_count}</span></td>
@@ -3915,6 +3926,13 @@ function adminActiveDomains(data) {
     document.querySelectorAll('[data-dmn-cancel]').forEach((b) => { b.onclick = () => openDomainCancel([Number(b.dataset.dmnCancel)], rows, reload); });
     document.querySelectorAll('[data-dmn-restore]').forEach((b) => { b.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [Number(b.dataset.dmnRestore)] }); toast('Restored to active'); await reload(); } catch (ex) { toast(ex.message); } }; });
     document.querySelectorAll('[data-dmn-del]').forEach((b) => { b.onclick = () => del([Number(b.dataset.dmnDel)]); });
+    document.querySelectorAll('[data-dmn-tagfilter]').forEach((b) => { b.onclick = () => { ui.tag = b.dataset.dmnTagfilter; ui.page = 1; document.getElementById('dmn-tagf').value = ui.tag; renderList(); }; });
+    // Tag menu: mark the tags all selected domains already have.
+    document.querySelectorAll('[data-dmn-tagtoggle]').forEach((b) => {
+      const id = Number(b.dataset.dmnTagtoggle);
+      const chosen = rows.filter((r) => ui.sel.has(r.id));
+      b.classList.toggle('on', Boolean(chosen.length) && chosen.every((r) => (r.tag_ids || []).includes(id)));
+    });
     document.querySelectorAll('[data-dmn-domain]').forEach((b) => { b.onclick = () => { ui.q = b.dataset.dmnDomain; ui.page = 1; document.getElementById('dmn-q').value = ui.q; renderList(); }; });
     document.querySelectorAll('[data-dmn-push]').forEach((b) => { b.onclick = () => openDomainPush([Number(b.dataset.dmnPush)], team, reload); });
     document.querySelectorAll('[data-dmn-edit]').forEach((b) => { b.onclick = () => openDomainEdit(rows.find((r) => r.id === Number(b.dataset.dmnEdit)), reload); });
@@ -3944,7 +3962,29 @@ function adminActiveDomains(data) {
   document.getElementById('dmn-del').onclick = () => del([...ui.sel]);
   const bp = document.getElementById('dmn-push');
   if (bp) bp.onclick = () => openDomainPush([...ui.sel], team, async () => { ui.sel.clear(); await reload(); });
-  document.getElementById('dmn-add').onclick = () => openDomainAdd(reload, owner ? team : null);
+  document.getElementById('dmn-add').onclick = () => openDomainAdd(reload, owner ? team : null, tags);
+  document.getElementById('dmn-tagf').onchange = (e) => { ui.tag = e.target.value; ui.page = 1; renderList(); };
+  document.getElementById('dmn-tags').onclick = () => openTagManager(tags, reload);
+  const applyTag = async (body) => {
+    try {
+      const r = await api('POST', '/api/admin/active-domains/tag', { ids: [...ui.sel], ...body });
+      toast(body.remove ? `Tag removed from ${r.changed}` : `Tagged ${r.changed}`);
+      await reload();
+    } catch (ex) { toast(ex.message); }
+  };
+  document.querySelectorAll('[data-dmn-tagtoggle]').forEach((b) => {
+    b.onclick = () => {
+      const id = Number(b.dataset.dmnTagtoggle);
+      const chosen = rows.filter((r) => ui.sel.has(r.id));
+      const allHave = chosen.length && chosen.every((r) => (r.tag_ids || []).includes(id));
+      applyTag({ tag_id: id, remove: allHave });
+    };
+  });
+  document.getElementById('dmn-tagnew').onsubmit = (e) => {
+    e.preventDefault();
+    const name = e.target.name.value.trim();
+    if (name) applyTag({ name });
+  };
 }
 
 function modalShell(title, body) {
@@ -3990,9 +4030,39 @@ function openDomainPush(ids, team, done) {
   });
 }
 
-function openDomainAdd(done, team) {
+function openTagManager(tags, done) {
+  const COLORS = ['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'orange', 'teal', 'slate', 'pink'];
+  const dlg = modalShell('Tags', `
+    <p class="muted small" style="margin:-6px 0 12px">Tags group your domains (e.g. a client, a campaign or a batch). Select domains and use <strong>Tag</strong> to add them, or put a <span class="mono">tags</span> column in the CSV.</p>
+    <div class="tag-list">${tags.length ? tags.map((t) => `<div class="tag-row" data-tag="${t.id}">
+      <span class="dtag dtag-${esc(t.color)}">${esc(t.name)}</span>
+      <input data-f="name" value="${esc(t.name)}" maxlength="40" aria-label="Tag name">
+      <div class="tag-colors">${COLORS.map((c) => `<button type="button" class="tag-dot dtag-${c} ${c === t.color ? 'on' : ''}" data-color="${c}" aria-label="${c}"></button>`).join('')}</div>
+      <button type="button" class="btn btn-sm" data-save>Save</button><button type="button" class="btn btn-sm btn-ghost menu-danger" data-del>Delete</button></div>`).join('') : '<div class="muted small">No tags yet.</div>'}</div>
+    <div class="tag-new" style="margin-top:14px"><input name="newname" maxlength="40" placeholder="New tag name…"><button class="btn btn-primary btn-sm" type="submit">${icon('order')}Create tag</button></div>`);
+  dlg.querySelectorAll('.tag-row').forEach((row) => {
+    let color = null;
+    row.querySelectorAll('[data-color]').forEach((b) => { b.onclick = () => { color = b.dataset.color; row.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('on', x === b)); row.querySelector('.dtag').className = `dtag dtag-${color}`; }; });
+    row.querySelector('[data-save]').onclick = async () => {
+      try { await api('PATCH', `/api/admin/active-domains/tags/${row.dataset.tag}`, { name: row.querySelector('[data-f=name]').value, ...(color ? { color } : {}) }); toast('Tag saved'); dlg.close(); await done(); } catch (ex) { toast(ex.message); }
+    };
+    row.querySelector('[data-del]').onclick = async () => {
+      if (!confirm('Delete this tag? Domains keep everything else; only the tag is removed from them.')) return;
+      try { await api('DELETE', `/api/admin/active-domains/tags/${row.dataset.tag}`); toast('Tag deleted'); dlg.close(); await done(); } catch (ex) { toast(ex.message); }
+    };
+  });
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    if (!d.newname.trim()) throw new Error('Name the tag');
+    await api('POST', '/api/admin/active-domains/tags', { name: d.newname });
+    toast('Tag created');
+    dlg.close();
+    await done();
+  });
+}
+
+function openDomainAdd(done, team, tags = []) {
   const dlg = modalShell('Add domains', `
-    <p class="muted small" style="margin:-6px 0 12px">Each line is a purchase: the same domain on several lines (more users bought on another date) is kept as separate purchases. One domain per line. Optionally add the users and creation date after a comma: <span class="mono">acme.com, 3, 2026-10-01</span>. Or upload a CSV with columns <span class="mono">domain, users, created, provider, notes</span>.</p>
+    <p class="muted small" style="margin:-6px 0 12px">Each line is a purchase: the same domain on several lines (more users bought on another date) is kept as separate purchases. One domain per line. Optionally add the users and creation date after a comma: <span class="mono">acme.com, 3, 2026-10-01</span>. Or upload a CSV with columns <span class="mono">domain, users, created, tags, provider, notes</span> (tags separated by ;).</p>
     <div class="field"><label>Domains</label><textarea name="text" style="min-height:140px" placeholder="acmeoutreach.com, 3, 2026-10-01&#10;tryacmeoutreach.com, 5"></textarea></div>
     <div class="field"><label>Or upload a CSV</label><input type="file" name="file" accept=".csv,text/csv"></div>
     <div class="grid-2">
@@ -4001,13 +4071,14 @@ function openDomainAdd(done, team) {
     </div>
     <div class="grid-2">
       <div class="field"><label>Provider <span class="muted small">(optional)</span></label><select name="provider"><option value="">—</option><option>Google Workspace</option><option>Microsoft 365</option><option>Azure</option><option>Other</option></select></div>
+      <div class="field"><label>Tags <span class="muted small">(optional, comma separated)</span></label><input name="tags" list="dmn-taglist" placeholder="e.g. Client X, Batch 3"><datalist id="dmn-taglist">${tags.map((t) => `<option value="${esc(t.name)}">`).join('')}</datalist></div>
       ${team ? `<div class="field"><label>Sold by <span class="muted small">(push to their portal)</span></label><select name="sold_by"><option value="">Not assigned</option>${team.map((t) => `<option value="${t.id}">${esc(t.name || t.email)}</option>`).join('')}</select></div>` : ''}
     </div>
     <div class="row"><button class="btn btn-primary" type="submit">${icon('check')}Add domains</button></div>`);
   onSubmit(dlg.querySelector('form'), async (d) => {
     const file = dlg.querySelector('[name=file]').files[0];
     const text = file ? await file.text() : d.text;
-    const r = await api('POST', '/api/admin/active-domains', { text, users: d.users, created: d.created, provider: d.provider, sold_by: d.sold_by ? Number(d.sold_by) : null });
+    const r = await api('POST', '/api/admin/active-domains', { text, users: d.users, created: d.created, provider: d.provider, sold_by: d.sold_by ? Number(d.sold_by) : null, tags: String(d.tags || '').split(',').map((t) => t.trim()).filter(Boolean) });
     toast(`${r.added} added${r.skipped ? ` · ${r.skipped} already on the list (same domain, users and date), skipped` : ''}`);
     dlg.close();
     await done();
