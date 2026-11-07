@@ -4377,7 +4377,7 @@ function uploadGuide(kind, open) {
       ['password', 'Its password. Required. The client sees it hidden until they click Show.'],
       ['admin', '<strong>yes</strong> for the admin mailbox; leave empty for the others.'],
       ['type', `Mailbox type, e.g. ${(state.admin && state.admin.pricing || []).slice(0, 3).map((p) => esc(p.label)).join(', ') || 'Google Workspace'}. Empty: the type chosen on the upload form, or the batch's.`],
-      ['created', 'Date the mailbox was created, e.g. 2026-11-01 (also 01/11/2026 or 1 Nov 2026). Optional.'],
+      ['created', 'Date the mailbox was created. Most formats work: 2026-11-01, 01/11/2026, 8-sep-25, 9 oct 26, Sep 8 2025, or an Excel date. Optional.'],
     ],
     steps: ['Download the sample CSV and open it in Google Sheets or Excel.', 'Replace the example rows with the client\'s mailboxes: one row per mailbox. Keep the header row.',
       'Save it as CSV (Google Sheets: File → Download → CSV. Excel: Save As → CSV UTF-8).', 'Open the client below, choose the file and click Upload. Their domains are added to Domains automatically.'],

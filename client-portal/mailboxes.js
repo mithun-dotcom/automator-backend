@@ -29,32 +29,54 @@ const TYPE_COLS = ['type', 'mailboxtype', 'inboxtype', 'product', 'plan', 'servi
 const DATE_COLS = ['created', 'createdat', 'createdon', 'creationdate', 'datecreated', 'created_date', 'date', 'warmupstarted', 'warmupstart', 'warmupdate', 'started', 'startdate'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
-// "2026-11-01", "01/11/2026" (day first unless that can't be), "1 Nov 2026",
-// "Nov 1, 2026" -> "2026-11-01"; "" -> null; anything else -> undefined.
+// Reads the dates people put in sheets -> "YYYY-MM-DD"; "" -> null; unreadable -> undefined.
+//   2026-11-01, 2026/11/1, 01/11/2026 and 1-11-26 (day first unless that can't be),
+//   8-sep-25, 8 Sep 25, 9 oct 26, 08-Sept-2025, 8/Sep/2025, 8th September 2025,
+//   Sep 8 25, September 8, 2025, Sep-8-2025, Excel serial numbers (45908), with a time after.
+const yearOf = (y) => (y.length <= 2 ? 2000 + Number(y) : Number(y));
 function parseDate(raw) {
-  const s = String(raw || '').trim();
+  let s = String(raw || '').trim().toLowerCase();
   if (!s) return null;
   const ok = (y, m, d) => {
     const dt = new Date(Date.UTC(y, m - 1, d));
     return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d && y > 2000 && y < 2100
       ? dt.toISOString().slice(0, 10) : undefined;
   };
-  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  // Excel stores dates as days since 1899-12-30.
+  if (/^\d{5}(\.\d+)?$/.test(s) && Number(s) > 36000 && Number(s) < 73000) {
+    return new Date(Date.UTC(1899, 11, 30) + Math.floor(Number(s)) * 86400000).toISOString().slice(0, 10);
+  }
+  s = s.replace(/[t\s]+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(z|am|pm|[+-]\d{2}:?\d{2})?$/, '').trim(); // drop a time
+  s = s.replace(/(\d)(st|nd|rd|th)\b/g, '$1').replace(/^(mon|tue|wed|thu|fri|sat|sun)[a-z]*[,.]?\s+/, '');
+  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (m) return ok(+m[1], +m[2], +m[3]);
-  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/);
   if (m) {
-    const y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+    const y = yearOf(m[3]);
     const [a, b] = [+m[1], +m[2]];
     return b > 12 ? ok(y, a, b) : ok(y, b, a);
   }
-  m = s.match(/^(\d{1,2})\s+([a-z]{3})[a-z]*\.?,?\s+(\d{4})$/i) || s.match(/^([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})$/i);
-  if (m) {
-    const [day, mon] = /^\d/.test(m[1]) ? [+m[1], m[2]] : [+m[2], m[1]];
-    const i = MONTHS.indexOf(mon.toLowerCase().slice(0, 3));
-    return i === -1 ? undefined : ok(+m[3], i + 1, day);
-  }
+  const SEP = '[\\s\\-/.,]+';
+  // 8-sep-25, 8 september 2025
+  m = s.match(new RegExp(`^(\\d{1,2})${SEP}([a-z]{3,9})\\.?${SEP}(\\d{2}|\\d{4})$`));
+  if (m) { const i = monthIndex(m[2]); return i === -1 ? undefined : ok(yearOf(m[3]), i + 1, +m[1]); }
+  // sep 8 25, september 8, 2025
+  m = s.match(new RegExp(`^([a-z]{3,9})\\.?${SEP}(\\d{1,2})${SEP}(\\d{2}|\\d{4})$`));
+  if (m) { const i = monthIndex(m[1]); return i === -1 ? undefined : ok(yearOf(m[3]), i + 1, +m[2]); }
+  // 2025-sep-08
+  m = s.match(new RegExp(`^(\\d{4})${SEP}([a-z]{3,9})\\.?${SEP}(\\d{1,2})$`));
+  if (m) { const i = monthIndex(m[2]); return i === -1 ? undefined : ok(+m[1], i + 1, +m[3]); }
   return undefined;
 }
+function monthIndex(word) {
+  const w = word.toLowerCase();
+  const i = MONTHS.indexOf(w.slice(0, 3));
+  if (i === -1) return -1;
+  // "sept", "june", "september" are fine; reject words that only start like a month ("marketing").
+  const FULL = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  return FULL[i].startsWith(w) || w === 'sept' ? i : -1;
+}
+
 const isAdminValue = (v) => /^(y|yes|true|1|x|✓|admin|administrator|superadmin|globaladmin)$/i.test(String(v).trim())
   || /admin/i.test(String(v));
 
