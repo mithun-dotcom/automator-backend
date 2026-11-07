@@ -135,7 +135,7 @@ function checkOnboardingCsv(text) {
 }
 
 function cancelNote() {
-  return `<div class="note note-info"><span class="note-icon">✉️</span><div><strong>Need to cancel?</strong> ${esc(state.dash.cancelNote)}</div></div>`;
+  return `<div class="note note-info"><span class="note-icon">${icon('mail')}</span><div><strong>Need to cancel?</strong> ${esc(state.dash.cancelNote)}</div></div>`;
 }
 
 // Team members ("staff") get the admin panel too; the owner ("admin") also
@@ -214,6 +214,24 @@ function tawkIdentify() {
 }
 
 const ICONS = {
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
+  upload: '<path d="M12 15V3M7 8l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
+  shield: '<path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>',
+  pause: '<circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/>',
+  alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+  flame: '<path d="M12 22c4 0 7-2.7 7-6.8 0-4.2-3.2-6.4-4.4-9.7-.3-.8-1.3-1-1.8-.3C11.5 7.3 13 9 11 10.6 10 9.7 9.6 8.6 9.4 7.7c-.1-.6-.9-.8-1.2-.2C7 9.4 5 11.8 5 15.2 5 19.3 8 22 12 22z"/>',
+  calendar: '<rect x="3" y="4.5" width="18" height="16.5" rx="2.5"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/>',
+  receipt: '<path d="M5 2.5h14v19l-2.3-1.5-2.4 1.5-2.3-1.5-2.3 1.5-2.4-1.5L5 21.5z"/><path d="M9 7.5h6M9 11.5h6M9 15.5h4"/>',
+  link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/>',
+  x: '<path d="M17 7 7 17M7 7l10 10"/>',
+  minus: '<path d="M6 12h12"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  refresh: '<path d="M20 11a8 8 0 0 0-14.8-3.5M4 4v4h4M4 13a8 8 0 0 0 14.8 3.5M20 20v-4h-4"/>',
+  sparkle: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+  inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   lock: '<rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
   send: '<path d="M21 3 10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5z"/>',
@@ -444,7 +462,7 @@ async function renderLogin() {
 function renderVpnBlocked() {
   if (document.getElementById('vpn-retry')) return;
   authCard(`
-    <div class="vpn-icon" aria-hidden="true">🛡️</div>
+    <div class="vpn-icon" aria-hidden="true">${icon('shield')}</div>
     <h1>Turn off your VPN to connect</h1>
     <p class="muted">We detected a VPN or proxy on your connection. For security, this account can only be used without one.</p>
     <ol class="vpn-steps">
@@ -458,7 +476,7 @@ function renderVpnBlocked() {
 
 function renderAccessPaused(message) {
   authCard(`
-    <div class="vpn-icon" aria-hidden="true">⏸️</div>
+    <div class="vpn-icon" aria-hidden="true">${icon('pause')}</div>
     <h1>Portal access paused</h1>
     <p class="muted">${esc(message || 'Your portal access is paused. Please contact MithMill.')}</p>
     <button class="btn btn-primary" style="width:100%" id="paused-retry">Try again</button>
@@ -688,8 +706,8 @@ function openCancelDialog(order) {
   const dlg = document.createElement('dialog');
   dlg.className = 'modal';
   dlg.innerHTML = `
-    <div class="modal-head"><h2>Cancel batch #${order.id}</h2><button class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
-    <div class="note"><span class="note-icon">⚠️</span><div><strong>Please copy this email and send it from your registered email, ${esc(user.email)}, to <a href="mailto:${esc(supportEmail)}">${esc(supportEmail)}</a>.</strong> Requests from other addresses can't be accepted. Your mailboxes stay active until we confirm the cancellation.</div></div>
+    <div class="modal-head"><h2>Cancel batch #${order.id}</h2><button class="btn btn-sm btn-ghost" data-close aria-label="Close">${icon('close')}</button></div>
+    <div class="note"><span class="note-icon">${icon('alert')}</span><div><strong>Please copy this email and send it from your registered email, ${esc(user.email)}, to <a href="mailto:${esc(supportEmail)}">${esc(supportEmail)}</a>.</strong> Requests from other addresses can't be accepted. Your mailboxes stay active until we confirm the cancellation.</div></div>
     <div class="field" style="margin:16px 0 8px"><label>Subject</label><input readonly value="${esc(subject)}" id="cx-subject"></div>
     <div class="field"><label>Email</label><textarea readonly id="cx-body" rows="14" style="font-family:inherit">${esc(body)}</textarea></div>
     <div class="row" style="justify-content:flex-end">
@@ -768,7 +786,7 @@ function renderBilling() {
           <thead><tr><th>Invoice</th><th>Description</th><th>Date</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
           <tbody>${invoices.map((i) => {
             const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
-            return `<tr><td><a href="#/invoice/${i.id}">#${i.id}</a></td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}${i.status === 'unpaid' ? `<div class="muted small">Due ${fmtDate(i.due_date)}</div>` : ''}</td><td>${badge(s)}${i.paid_at ? `<div class="muted small">${fmtDate(i.paid_at)}</div>` : ''}</td><td class="num">${money(i.amount)}</td><td><div class="row" style="flex-wrap:nowrap"><a class="btn btn-sm" href="#/invoice/${i.id}">View</a><a class="btn btn-sm" href="#/invoice/${i.id}/pdf" title="Download as PDF">⬇ PDF</a></div></td></tr>`;
+            return `<tr><td><a href="#/invoice/${i.id}">#${i.id}</a></td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}${i.status === 'unpaid' ? `<div class="muted small">Due ${fmtDate(i.due_date)}</div>` : ''}</td><td>${badge(s)}${i.paid_at ? `<div class="muted small">${fmtDate(i.paid_at)}</div>` : ''}</td><td class="num">${money(i.amount)}</td><td><div class="row" style="flex-wrap:nowrap"><a class="btn btn-sm" href="#/invoice/${i.id}">View</a><a class="btn btn-sm" href="#/invoice/${i.id}/pdf" title="Download as PDF">${icon('download')} PDF</a></div></td></tr>`;
           }).join('')}</tbody>
         </table></div>` : '<div class="empty">No invoices yet.</div>'}
       </div>
@@ -826,17 +844,17 @@ function renderOrder() {
         <h2>${esc(price.label)} details</h2>
         <p class="muted small" style="margin:4px 0 16px">${money(price.price_per_mailbox)} per mailbox / month</p>
 
-        ${own ? '' : `<div class="note note-info" style="margin-bottom:16px"><span class="note-icon">🔥</span><div><strong>${esc(price.label)} come ready on our own warmed-up domains.</strong> You don't need to give us any domains or DNS access. Just tell us how many mailboxes you need and invite us to your sequencer below.</div></div>`}
+        ${own ? '' : `<div class="note note-info" style="margin-bottom:16px"><span class="note-icon">${icon('flame')}</span><div><strong>${esc(price.label)} come ready on our own warmed-up domains.</strong> You don't need to give us any domains or DNS access. Just tell us how many mailboxes you need and invite us to your sequencer below.</div></div>`}
         <div class="csv-box" ${own ? '' : 'hidden'}>
           <div class="csv-head">
             <div><h3>Onboarding sheet (CSV)</h3>
               <div class="muted small">One row per mailbox user: domain, full name, username, passwords, domain and sequencer access, profile picture link and domain forward.
               ${state.dash.csvRequiredMin > 0 ? `<strong>Required for orders of ${state.dash.csvRequiredMin} or more mailboxes.</strong>` : ''}</div></div>
-            <a class="btn btn-sm" href="/api/onboarding-template.csv" download>⬇ Download sample CSV</a>
+            <a class="btn btn-sm" href="/api/onboarding-template.csv" download>${icon('download')} Download sample CSV</a>
           </div>
           <div class="row">
-            <label class="btn btn-sm btn-primary file-btn">⬆ Upload filled CSV<input type="file" id="csv-file" accept=".csv,text/csv" hidden></label>
-            <span class="small" id="csv-status">${data.onboarding_filename ? `✅ ${esc(data.onboarding_filename)}: ${data.csv_users} users across ${data.csv_domains} domain${data.csv_domains === 1 ? '' : 's'} <button type="button" class="btn btn-sm btn-ghost" id="csv-remove">Remove</button>` : '<span class="muted">No file uploaded</span>'}</span>
+            <label class="btn btn-sm btn-primary file-btn">${icon('upload')} Upload filled CSV<input type="file" id="csv-file" accept=".csv,text/csv" hidden></label>
+            <span class="small" id="csv-status">${data.onboarding_filename ? `<span class="ok-ico">${icon('check')}</span> ${esc(data.onboarding_filename)}: ${data.csv_users} users across ${data.csv_domains} domain${data.csv_domains === 1 ? '' : 's'} <button type="button" class="btn btn-sm btn-ghost" id="csv-remove">Remove</button>` : '<span class="muted">No file uploaded</span>'}</span>
           </div>
           <div class="error csv-err" id="csv-error" role="alert"></div>
         </div>
@@ -853,7 +871,7 @@ function renderOrder() {
         </div>
 
         <h3 class="section-title">Domain access</h3>
-        <div class="note note-info invite-note"><span class="note-icon">🌐</span><div>
+        <div class="note note-info invite-note"><span class="note-icon">${icon('globe')}</span><div>
           <strong>Invite us to manage your domains' DNS:</strong> at your domain registrar or DNS provider (GoDaddy, Namecheap, Cloudflare…), add
           <strong>${esc(support)}</strong> as a user / delegate with DNS access.
           <label class="check invite-check"><input type="checkbox" name="domain_invited" id="domain_invited" ${data.domain_invited ? 'checked' : ''}> I've sent the invitation to ${esc(support)}</label>
@@ -875,7 +893,7 @@ function renderOrder() {
         </div>
 
         <h3 class="section-title">Sequencer access</h3>
-        <div class="note note-info invite-note"><span class="note-icon">📨</span><div>
+        <div class="note note-info invite-note"><span class="note-icon">${icon('send')}</span><div>
           <strong>Invite us to your sequencer so we can connect the mailboxes:</strong> add <strong>${esc(support)}</strong> as a team member in your sequencer workspace.
           <label class="check invite-check"><input type="checkbox" name="sequencer_invited" id="sequencer_invited" ${data.sequencer_invited ? 'checked' : ''}> I've sent the invitation to ${esc(support)}</label>
         </div></div>
@@ -1172,8 +1190,8 @@ function adminOrders(focusId) {
               ${kv('Mailboxes', String(o.quantity))}
               ${kv('Price', `${money(o.price_per_mailbox)} / mailbox / month → ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`)}
               ${kv('Billing', `${cycleName(cycleOf(o))}${o.status === 'active' && o.next_billing_date ? `, next renewal ${fmtDate(o.next_billing_date)}` : ''}`)}
-              ${o.domain_invited ? kv('DNS invitation', 'Client says they invited our support email ✓') : ''}
-              ${o.sequencer_invited ? kv('Sequencer invitation', 'Client says they invited our support email ✓') : ''}
+              ${o.domain_invited ? kv('DNS invitation', 'Client says they invited our support email') : ''}
+              ${o.sequencer_invited ? kv('Sequencer invitation', 'Client says they invited our support email') : ''}
               ${o.domain_invited ? '' : kv('Domain access', ACCESS_LABEL[o.domain_access_method] || o.domain_access_method)}
               ${kv('Registrar', o.registrar)}
               ${kv('Registrar email', o.registrar_email)}
@@ -1184,11 +1202,11 @@ function adminOrders(focusId) {
               ${kv('Sequencer notes', o.sequencer_notes)}
               ${kv('Client notes', o.notes)}
             </dl>
-            ${isReseller() ? '' : o.csv_rows ? `<div><a class="btn btn-primary btn-sm" href="/api/admin/orders/${o.id}/onboarding.csv">⬇ Download onboarding CSV (${o.csv_rows} rows)</a></div>` : '<div class="muted small">No onboarding CSV uploaded.</div>'}
+            ${isReseller() ? '' : o.csv_rows ? `<div><a class="btn btn-primary btn-sm" href="/api/admin/orders/${o.id}/onboarding.csv">${icon('download')} Download onboarding CSV (${o.csv_rows} rows)</a></div>` : '<div class="muted small">No onboarding CSV uploaded.</div>'}
           </div>
           <form class="order-form" data-id="${o.id}">
             ${['pending', 'in_progress'].includes(o.status) ? `<div class="complete-box">
-              <button type="button" class="btn btn-success" data-complete="${o.id}">✓ Mark as completed</button>
+              <button type="button" class="btn btn-success" data-complete="${o.id}">${icon('check')} Mark as completed</button>
               <div class="hint">Use this once the mailboxes are delivered. It activates them for the client, creates the first invoice (${money(cycleAmount(o))} for ${perCycle(cycleOf(o)) === 'month' ? 'the first month' : `the first ${perCycle(cycleOf(o))}`}), starts the ${cycleName(cycleOf(o)).toLowerCase()} renewals from today and notifies the client.</div>
             </div>` : ''}
             <div class="field"><label>Status</label>
@@ -1313,7 +1331,7 @@ function openCancelSubDialog({ orders, url, invoice }) {
   const dlg = document.createElement('dialog');
   dlg.className = 'modal';
   dlg.innerHTML = `<form id="cx-form">
-    <div class="modal-head"><h2>Cancel subscription</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
+    <div class="modal-head"><h2>Cancel subscription</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">${icon('close')}</button></div>
     <p class="muted small" style="margin:-6px 0 14px">${esc(who)} · ${esc(orders[0].email)}</p>
     ${orders.length > 1 ? `<div class="field"><label>Batches to cancel</label>${orders.map((o) => `<label class="check"><input type="checkbox" name="order_ids" value="${o.id}" checked> ${esc(batchTitle(o))} · ${o.quantity} × ${esc(o.inbox_label)}</label>`).join('')}</div>`
       : `<div class="note note-info" style="margin-bottom:14px"><div><strong>${esc(batchTitle(orders[0]))}</strong> · ${orders[0].quantity} × ${esc(orders[0].inbox_label)} · ${money(cycleAmount(orders[0]))} per ${perCycle(cycleOf(orders[0]))}</div></div>`}
@@ -1374,7 +1392,7 @@ function openBatchDialog(userId) {
   dlg.className = 'modal modal-wide';
   dlg.innerHTML = `
     <form id="batch-form">
-      <div class="modal-head"><h2>Add batch</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">✕</button></div>
+      <div class="modal-head"><h2>Add batch</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">${icon('close')}</button></div>
       <p class="muted small" style="margin:-6px 0 16px">${isReseller() ? 'Mailboxes for one of your clients. Renewal invoices and reminders are sent to the client automatically.' : 'For mailboxes a client already has with you, or an order taken outside the portal. The client sees it as soon as they log in.'}</p>
       <div class="grid-2">
         <div class="field"><label>Client</label><select name="user_id" required><option value="">Choose…</option>
@@ -1396,14 +1414,14 @@ function openBatchDialog(userId) {
         <div class="field"><label>Start date</label><input name="start_date" type="date" value="${esc(today)}"><div class="hint">When the mailboxes went live / were purchased.</div></div>
         <div class="billing-only">${cycleFields(1)}</div>
       </div>
-      <div class="note note-info billing-only" style="margin:-4px 0 16px"><span class="note-icon">📅</span><div id="renew-preview"></div></div>
+      <div class="note note-info billing-only" style="margin:-4px 0 16px"><span class="note-icon">${icon('calendar')}</span><div id="renew-preview"></div></div>
       <div class="field billing-only"><label>Invoices</label><select name="current_period">
         <option value="all_paid_current_unpaid" selected>Current period unpaid (still to be paid), earlier periods paid</option>
         <option value="all_paid">Everything already paid, including the current period</option>
         <option value="unpaid">Only the current period, unpaid</option>
         <option value="paid">Only the current period, paid</option>
         <option value="none">Don't create invoices</option></select>
-        <div class="note note-info" style="margin-top:8px"><span class="note-icon">🧾</span><div id="inv-preview"></div></div></div>
+        <div class="note note-info" style="margin-top:8px"><span class="note-icon">${icon('receipt')}</span><div id="inv-preview"></div></div></div>
       <div class="grid-2">
         <div class="field"><label>Domains (optional)</label><textarea name="domains" style="min-height:70px" placeholder="One per line"></textarea></div>
         <div class="field"><label>Usernames (optional)</label><textarea name="usernames" style="min-height:70px" placeholder="One per line"></textarea></div>
@@ -1458,7 +1476,7 @@ function openBatchDialog(userId) {
 function openClientDialog(c) {
   const dlg = document.createElement('dialog');
   dlg.className = 'modal';
-  dlg.innerHTML = `<div class="modal-head"><h2>Edit client</h2><button class="btn btn-sm btn-ghost" type="button" id="c-close" aria-label="Close">✕</button></div>
+  dlg.innerHTML = `<div class="modal-head"><h2>Edit client</h2><button class="btn btn-sm btn-ghost" type="button" id="c-close" aria-label="Close">${icon('close')}</button></div>
     <form id="client-form">
     <div class="field"><label for="c-email">${isReseller() ? 'Email' : 'Login email'}</label>
       <input id="c-email" name="email" type="email" required value="${esc(c.email)}" ${isOwner() || isReseller() ? '' : 'readonly'}>
@@ -1623,7 +1641,7 @@ function adminClients() {
   wireFilterBar('clients');
   const showLink = (r, email) => {
     document.getElementById('inv-link').innerHTML = `
-      <div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="min-width:0;flex:1">
+      <div class="note" style="margin-top:12px"><span class="note-icon">${icon('link')}</span><div style="min-width:0;flex:1">
         <strong>${r.reset ? 'Password reset' : 'Invite'} link for ${esc(email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
         <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}" id="link-val"><button type="button" class="btn btn-sm" id="copy">Copy</button></div>
       </div></div>`;
@@ -1883,7 +1901,7 @@ function invoiceEditor(inv) {
       <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" min="0.01" required value="${esc(it.quantity)}" class="num"></td>
       <td><input data-i="${i}" data-k="unit_price" type="number" step="0.01" min="0" required value="${esc(it.unit_price)}" class="num"></td>
       <td class="num" data-total="${i}"></td>
-      <td><button type="button" class="btn btn-sm btn-ghost" data-remove="${i}" ${ed.items.length === 1 ? 'disabled' : ''} aria-label="Remove line">✕</button></td>
+      <td><button type="button" class="btn btn-sm btn-ghost" data-remove="${i}" ${ed.items.length === 1 ? 'disabled' : ''} aria-label="Remove line">${icon('close')}</button></td>
     </tr>`).join('');
     $('lines').querySelectorAll('[data-k]').forEach((el) => {
       const handler = () => {
@@ -2011,7 +2029,7 @@ function renderInvoiceView(inv, isAdmin) {
         ${isAdmin ? `${inv.order_id && !(isOwner() && inv.resellerName) ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
           ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
           ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
-        ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-danger" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">⚠ Urgent reminder</button>` : ''}
+        ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-danger" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">${icon('alert')} Urgent reminder</button>` : ''}
         ${isAdmin && inv.status !== 'void' ? `<button class="btn" id="send-inv" title="${inv.sent_at ? `Last sent ${esc(fmtDate(inv.sent_at))}` : 'Not sent yet'}">${inv.sent_at ? 'Send again' : 'Send invoice'}</button>` : ''}
         ${isAdmin && subOrders(inv).length ? '<button class="btn btn-danger" id="cancel-sub">Cancel subscription</button>' : ''}
         <button class="btn btn-primary" id="print">Print / Save PDF</button>
@@ -2045,7 +2063,7 @@ function renderInvoiceView(inv, isAdmin) {
         <div class="grand"><span>Total due</span><span>${money(inv.amount)}</span></div>
       </div>
       ${isAdmin && !inv.order_id && inv.items.some((it) => (it.inbox_type && it.inbox_type !== 'other') || (it.inbox_type === 'other' && it.recurring)) ? `<div class="note no-print" id="to-batch">
-        <span class="note-icon">⚠️</span>
+        <span class="note-icon">${icon('alert')}</span>
         <div style="flex:1"><strong>These mailboxes aren't on the client's dashboard.</strong> This invoice isn't linked to a batch, so the client's active mailboxes and billing don't include it.
           <div class="row" style="margin-top:10px;align-items:flex-end">
             <div style="min-width:260px">${cycleFields(1)}</div>
@@ -2171,7 +2189,7 @@ function renderTeam(team) {
   onSubmit(document.getElementById('team-form'), async (d) => {
     const r = await api('POST', `${API()}/team`, { ...d, separated: d.separated === 'on', block_vpn: d.block_vpn === 'on' });
     renderTeam(await api('GET', `${API()}/team`));
-    document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="flex:1;min-width:0">
+    document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">${icon('link')}</span><div style="flex:1;min-width:0">
       <strong>Team invite for ${esc(d.email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
       <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}"></div></div></div>`;
   });
@@ -2243,7 +2261,7 @@ function adminSettings() {
             <td><input data-f="price_per_mailbox" type="number" step="0.01" min="0" required value="${p.price_per_mailbox}" class="num"></td>
             <td><label class="check"><input type="checkbox" data-f="active" ${p.active !== false ? 'checked' : ''}> ${p.active !== false ? 'Yes' : 'Hidden'}</label></td>
             <td><label class="check" title="Untick for pre-warmed mailboxes on your own domains: clients then aren't asked for domains, usernames, domain access or the CSV"><input type="checkbox" data-f="needs_domains" ${p.needs_domains !== false ? 'checked' : ''}> ${p.needs_domains !== false ? 'Yes' : 'No (pre-warmed)'}</label></td>
-            <td><button type="button" class="btn btn-sm btn-ghost" data-del-type="${esc(p.inbox_type)}" title="Delete (only if never used)" aria-label="Delete">✕</button></td>
+            <td><button type="button" class="btn btn-sm btn-ghost" data-del-type="${esc(p.inbox_type)}" title="Delete (only if never used)" aria-label="Delete">${icon('close')}</button></td>
           </tr>`).join('')}
           <tr class="add-type-row">
             <td><input id="nt-label" placeholder="New type, e.g. Zoho Mail"></td>
@@ -2332,7 +2350,7 @@ function delta(now, before, { upIsGood = true } = {}) {
   if (!before) return `<span class="delta ${upIsGood ? 'up' : 'down'}">New</span>`;
   const pct = ((now - before) / before) * 100;
   const good = (pct > 0) === upIsGood;
-  return `<span class="delta ${good ? 'up' : 'down'}">${pct > 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(Math.abs(pct) < 10 ? 1 : 0)}%</span>`;
+  return `<span class="delta ${good ? 'up' : 'down'}">${icon(pct > 0 ? 'up' : 'down')}${Math.abs(pct).toFixed(Math.abs(pct) < 10 ? 1 : 0)}%</span>`;
 }
 
 let chartTip;
@@ -2685,7 +2703,7 @@ function resellerSettings(st) {
           <div class="muted small">Brand name, logo${st.sender_email ? ' and sending address' : ''} are set up by MithMill.</div></div></div>` : ''}
       </div>
       <div class="card card-pad agree-status"><div><h2>Reseller Agreement</h2><div class="muted small" style="margin-top:4px">You signed the Mithmill Reseller Agreement & Payment Policy.</div></div>
-        <a class="btn btn-sm" href="/api/reseller/agreement.pdf">⬇ Download signed PDF</a></div>
+        <a class="btn btn-sm" href="/api/reseller/agreement.pdf">${icon('download')} Download signed PDF</a></div>
       ${st.white_label ? `<form class="card card-pad" id="rs-form">
         <h2 style="margin-bottom:14px">Your clients' emails</h2>
         <div class="grid-2">
@@ -2757,7 +2775,7 @@ function renderResellers({ resellers, mailEnabled }) {
 function showResellerLink(r, email) {
   const box = document.getElementById('rs-link');
   if (!box) return;
-  box.innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">🔗</span><div style="min-width:0;flex:1">
+  box.innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">${icon('link')}</span><div style="min-width:0;flex:1">
     <strong>${r.reset ? 'Password reset' : 'Invite'} link for ${esc(email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
     <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}" id="rs-link-val"><button type="button" class="btn btn-sm" id="rs-copy">Copy</button></div></div></div>`;
   document.getElementById('rs-copy').onclick = async () => {
@@ -2785,7 +2803,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
           <div class="muted small" style="margin-top:4px">${agreement
             ? `Signed by <strong>${esc(agreement.signer_name)}</strong>${agreement.signer_title ? ` (${esc(agreement.signer_title)})` : ''} on ${fmtDate(agreement.signed_at)} · version ${esc(agreement.version)}${agreement.version !== agreementVersion ? ` · <strong>they'll be asked to sign the new version ${esc(agreementVersion)}</strong>` : ''}`
             : `Not signed yet. They'll be asked to read and sign version ${esc(agreementVersion)} when they next log in, before they can use their dashboard.`}</div></div>
-        ${agreement ? `<a class="btn btn-sm" href="/api/admin/resellers/${r.id}/agreement.pdf">⬇ Signed PDF</a>` : `<span class="badge b-pending">Not signed</span>`}
+        ${agreement ? `<a class="btn btn-sm" href="/api/admin/resellers/${r.id}/agreement.pdf">${icon('download')} Signed PDF</a>` : `<span class="badge b-pending">Not signed</span>`}
       </div>
 
       <form class="card card-pad" id="rs-brand">
@@ -2911,7 +2929,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
       const box = document.getElementById('rs-domain-result');
       try {
         const c = await api('POST', `/api/admin/resellers/${r.id}/domain-check`);
-        const line = (ok, label, detail) => `<div class="small" style="margin-top:4px">${ok ? '✅' : '❌'} <strong>${label}</strong> ${esc(detail)}</div>`;
+        const line = (ok, label, detail) => `<div class="small" style="margin-top:4px"><span class="${ok ? 'ok-ico' : 'bad-ico'}">${icon(ok ? 'check' : 'x')}</span> <strong>${label}</strong> ${esc(detail)}</div>`;
         box.innerHTML = line(c.dns.ok, 'DNS:', c.dns.ok ? `points to ${c.target}` : `${c.domain} should be a CNAME to ${c.target} (found: ${c.dns.found || 'nothing'})`)
           + line(c.https.ok, 'HTTPS:', c.https.ok ? `https://${c.domain} is live with their brand` : c.https.error)
           + (c.dns.ok && c.https.ok ? `<div class="small" style="margin-top:6px">All set. Their clients' links now use <a href="https://${esc(c.domain)}/#/login" target="_blank" rel="noopener">https://${esc(c.domain)}</a>.</div>` : '');
@@ -3236,7 +3254,8 @@ function deviceOf(ua) {
 // Mailbox logins with the password hidden until Show. pwUrl(id) fetches one
 // password; admin adds the batch column and Delete / admin switch.
 const CONN_LABEL = { queued: 'Queued', running: 'Connecting…', connected: 'Connected', failed: 'Failed' };
-const connChips = (m) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}">${c.status === 'connected' ? '✓' : c.status === 'failed' ? '✗' : '⏳'} ${esc(c.label)}${c.status !== 'connected' ? ` · ${CONN_LABEL[c.status] || c.status}` : ''}</span>${c.status === 'failed' && c.error ? `<div class="small access-off conn-err">${esc(c.error)}</div>` : ''}`).join('');
+const CONN_ICON = { queued: 'clock', running: 'refresh', connected: 'check', failed: 'x' };
+const connChips = (m) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}"><img class="conn-logo" src="/brand-logo/${encodeURIComponent(c.provider || 'other')}" alt=""><span>${esc(c.label)}</span><span class="conn-st">${icon(CONN_ICON[c.status] || 'clock')}${c.status !== 'connected' ? (CONN_LABEL[c.status] || c.status) : ''}</span></span>${c.status === 'failed' && c.error ? `<div class="small access-off conn-err">${esc(c.error)}</div>` : ''}`).join('');
 
 function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false }) {
   if (!rows.length) return '';
@@ -3336,7 +3355,7 @@ function renderMyMailboxes(rows, seqData = {}) {
   const pending = seqs.some((s) => s.pending);
   shell(CLIENT_TABS, '#/mailboxes', `
     <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p></div>
-      ${rows.length ? '<div class="row"><a class="btn" href="/api/mailboxes.csv">⬇ Download CSV</a></div>' : ''}</div>
+      ${rows.length ? `<div class="row"><a class="btn" href="/api/mailboxes.csv">${icon('download')} Download CSV</a></div>` : ''}</div>
     <div class="stack">
       <div class="card">
         <div class="card-head"><div class="head-ico"><span class="head-badge">${icon('send')}</span><div><h2>Sequencers</h2><div class="muted small">Connect your sequencer once, then add your mailboxes to it with one click. We sign each mailbox in to Google / Microsoft for you in the background.</div></div></div></div>
@@ -3345,7 +3364,7 @@ function renderMyMailboxes(rows, seqData = {}) {
           title: esc(s.label),
           meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}`,
           stats: prov(s.provider).csvOnly ? '<span class="pill">Import with the CSV</span>' : `<span class="pill pill-ok"><strong>${s.connected}</strong> connected</span>${s.pending ? `<span class="pill pill-run"><span class="spin"></span>${s.pending} in progress</span>` : ''}${s.failed ? `<span class="pill pill-bad">${s.failed} failed</span>` : ''}`,
-          actions: `${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">⬇ CSV for ${esc(s.label)}</a>` : `
+          actions: `${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">${icon('download')} CSV for ${esc(s.label)}</a>` : `
               <button class="btn btn-sm btn-primary" data-seq-all="${s.id}" ${rows.length ? '' : 'disabled'}>Connect all mailboxes</button>
               <button class="btn btn-sm" data-seq-sel="${s.id}" ${rows.length ? '' : 'disabled'}>Connect selected</button>
               ${s.failed ? `<button class="btn btn-sm" data-seq-retry="${s.id}">Retry failed</button>` : ''}`}
@@ -3423,7 +3442,7 @@ function adminMailboxes() {
   const clients = state.admin.clients;
   shell(ADMIN_TABS, '#/admin/mailboxes', `
     <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Upload each client's mailbox logins as a CSV. Clients see them on their Mailboxes page, with the password hidden until they click Show.</p></div>
-      <div class="row"><a class="btn" href="/api/mailboxes-template.csv">⬇ Sample CSV</a></div></div>
+      <div class="row"><a class="btn" href="/api/mailboxes-template.csv">${icon('download')} Sample CSV</a></div></div>
     <div class="stack">
     ${uploadGuide('mailboxes', !clients.some((c) => c.mailbox_count))}
     <div class="card">
@@ -3447,7 +3466,7 @@ function adminMailboxClient({ client, mailboxes: rows, batches, types }) {
   const pwUrl = (id) => `${API()}/mailboxes/${id}/password`;
   shell(ADMIN_TABS, '#/admin/mailboxes', `
     <div class="page-head"><div><p class="muted small" style="margin:0 0 4px"><a href="#/admin/mailboxes">← Mailboxes</a></p><h1>${esc(who)}</h1><p class="muted">${esc(client.email)} · ${rows.length} mailbox login${rows.length === 1 ? '' : 's'}</p></div>
-      <div class="row">${rows.length ? `<a class="btn" href="${API()}/clients/${client.id}/mailboxes.csv">⬇ Download CSV</a>` : ''}${watchBtn(client.id)}</div></div>
+      <div class="row">${rows.length ? `<a class="btn" href="${API()}/clients/${client.id}/mailboxes.csv">${icon('download')} Download CSV</a>` : ''}${watchBtn(client.id)}</div></div>
     <div class="stack">
       <form class="card card-pad" id="mb-upload">
         <h2 style="margin-bottom:4px">Upload mailbox logins</h2>
@@ -3462,7 +3481,7 @@ function adminMailboxClient({ client, mailboxes: rows, batches, types }) {
         </div>
         <label class="check"><input type="checkbox" name="notify" checked> Email ${esc(who)} that their mailboxes are ready${client.password_set ? '' : ' <span class="muted small">(they haven\'t joined yet, so it waits in their notifications)</span>'}</label>
         <label class="check"><input type="checkbox" name="replace"> Replace: remove this client's logins that aren't in the file${batches.length ? ' (only the chosen batch\'s, if one is chosen)' : ''}</label>
-        <div class="row" style="margin-top:12px"><button class="btn btn-primary" type="submit">Upload</button><a class="btn" href="/api/mailboxes-template.csv">⬇ Sample CSV</a><span class="muted small">Logins already here with the same email are updated.</span></div>
+        <div class="row" style="margin-top:12px"><button class="btn btn-primary" type="submit">Upload</button><a class="btn" href="/api/mailboxes-template.csv">${icon('download')} Sample CSV</a><span class="muted small">Logins already here with the same email are updated.</span></div>
         <div class="error"></div>
       </form>
       ${uploadGuide('mailboxes', !rows.length)}
@@ -3512,33 +3531,54 @@ function adminMailboxClient({ client, mailboxes: rows, batches, types }) {
 
 // ------------------------------------------------------------------ domains
 
-const DNS_BADGE = { ok: ['dns-st dns-ok', 'DNS OK'], warning: ['dns-st dns-warn', 'Needs attention'], error: ['dns-st dns-err', 'DNS problem'] };
 const PROVIDER_NAME = { google: 'Google Workspace', microsoft: 'Microsoft 365', zoho: 'Zoho', other: 'Other provider', none: 'No MX' };
 
 // MX / SPF / DMARC / DKIM chips from a domain's last DNS check.
-function dnsChips(d) {
+// The four DNS checks of a domain's last run: ok true / false, or null when
+// not checked for its provider.
+function dnsChecks(d) {
   const r = d.dns;
-  if (!r) return '<span class="muted small">Checking…</span>';
+  if (!r) return null;
   const has = (re) => r.issues.some((i) => re.test(i));
-  const chip = (label, ok, title) => `<span class="dns-chip ${ok === null ? 'dc-na' : ok ? 'dc-ok' : 'dc-bad'}" title="${esc(title || '')}">${ok === null ? '–' : ok ? '✓' : '✗'} ${label}</span>`;
-  return `<div class="dns-chips">${chip('MX', r.mx.length > 0 && !has(/^MX points/), r.mx.join(', ') || 'No MX records')}${chip('SPF', Boolean(r.spf) && !has(/^SPF/), r.spf || 'No SPF record')}${chip('DMARC', Boolean(r.dmarc), r.dmarc || 'No DMARC record')}${chip('DKIM', r.dkim, r.dkim === null ? 'Not checked for this provider' : r.dkim ? 'DKIM found' : 'DKIM not found')}</div>`;
+  return [
+    { label: 'MX', ok: r.mx.length > 0 && !has(/^MX points/), title: r.mx.join(', ') || 'No MX records' },
+    { label: 'SPF', ok: Boolean(r.spf) && !has(/^SPF/), title: r.spf || 'No SPF record' },
+    { label: 'DMARC', ok: Boolean(r.dmarc), title: r.dmarc || 'No DMARC record' },
+    { label: 'DKIM', ok: r.dkim, title: r.dkim === null ? 'Not checked for this provider' : r.dkim ? 'DKIM found' : 'DKIM not found' },
+  ];
 }
-const dnsBadge = (d) => (d.dns_status ? `<span class="badge ${DNS_BADGE[d.dns_status][0]}">${DNS_BADGE[d.dns_status][1]}</span>` : '<span class="badge b-in_progress">Checking</span>');
-const dnsIssues = (d) => (d.dns && d.dns.issues.length ? `<ul class="dns-issues">${d.dns.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '');
+function dnsChips(d) {
+  const checks = dnsChecks(d);
+  if (!checks) return '';
+  return `<div class="dns-chips">${checks.map((c) => `<span class="dns-chip ${c.ok === null ? 'dc-na' : c.ok ? 'dc-ok' : 'dc-bad'}" title="${esc(c.title)}"><span class="dc-ico">${icon(c.ok === null ? 'minus' : c.ok ? 'check' : 'x')}</span>${c.label}</span>`).join('')}</div>`;
+}
+// Overall health: a ring filled by the share of checks that pass, a label and the score.
+const DNS_HEALTH = { ok: ['dh-ok', 'Healthy'], warning: ['dh-warn', 'Needs attention'], error: ['dh-err', 'DNS problem'] };
+function dnsBadge(d) {
+  const checks = dnsChecks(d);
+  if (!d.dns_status || !checks) return '<span class="dns-health dh-wait"><span class="spin"></span><span class="dh-label">Checking DNS…</span></span>';
+  const counted = checks.filter((c) => c.ok !== null);
+  const passed = counted.filter((c) => c.ok).length;
+  const pct = counted.length ? Math.round((passed / counted.length) * 100) : 0;
+  const [cls, label] = DNS_HEALTH[d.dns_status] || DNS_HEALTH.warning;
+  return `<span class="dns-health ${cls}"><span class="dh-ring" style="--p:${pct}"><span>${icon(d.dns_status === 'ok' ? 'check' : d.dns_status === 'error' ? 'x' : 'alert')}</span></span><span class="dh-label">${label}</span><span class="dh-score">${passed}/${counted.length}</span></span>`;
+}
+const dnsIssues = (d) => (d.dns && d.dns.issues.length ? `<div class="dns-issues">${d.dns.issues.map((i) => `<div class="dns-issue">${icon('alert')}<span>${esc(i)}</span></div>`).join('')}</div>` : '');
 
 // Client: their domains and DNS health.
 // Cloudflare status of a domain: badge plus what's happening with the nameservers.
 function cfCell(d, { client = false } = {}) {
-  if (!d.cf_status) return '<span class="muted small">Not on Cloudflare</span>';
-  const ns = (d.cf_nameservers || []).map((n) => `<span class="mono">${esc(n)}</span>`).join('<br>');
+  if (!d.cf_status) return '<span class="cf-none">Not on Cloudflare</span>';
+  const logo = '<img class="cf-logo" src="/brand-logo/cloudflare" alt="Cloudflare">';
+  const ns = (d.cf_nameservers || []).map((n) => `<div class="cf-ns-row"><span class="mono">${esc(n)}</span><button class="icon-btn icon-btn-sm" type="button" data-copy-ns="${esc(n)}" title="Copy" aria-label="Copy ${esc(n)}">${icon('copy')}</button></div>`).join('');
   const host = d.host_label || '';
-  if (d.cf_status === 'error') return `<span class="badge dns-st dns-err">Cloudflare error</span><div class="small access-off" style="margin-top:4px">${esc(d.cf_error)}</div>`;
-  if (d.cf_status === 'active') return `<span class="badge dns-st dns-ok">Active on Cloudflare</span>`;
+  if (d.cf_status === 'error') return `<span class="cf-st cf-err">${logo}Cloudflare error</span><div class="cf-msg cf-msg-bad">${icon('alert')}<span>${esc(d.cf_error)}</span></div>`;
+  if (d.cf_status === 'active') return `<span class="cf-st cf-ok">${logo}Active on Cloudflare</span>`;
   let line = '';
-  if (d.ns_status === 'updated') line = `Nameservers switched${host ? ` at ${esc(host)}` : ''}${d.ns_updated_at ? ` on ${fmtDate(d.ns_updated_at)}` : ''}. Waiting for Cloudflare to see them (usually minutes, up to 24 hours).`;
-  else if (d.ns_status === 'failed') line = `<span class="access-off">Couldn't switch the nameservers. ${esc(d.ns_error)}</span>`;
-  else line = `${client ? 'Set these nameservers at your domain host' : 'The client sets these nameservers at their host'}${host ? ` (${esc(host)})` : ''}:`;
-  return `<span class="badge dns-st dns-warn">Pending</span><div class="small" style="margin-top:4px">${line}</div>${ns ? `<div class="cf-ns small">${ns}</div>` : ''}`;
+  if (d.ns_status === 'updated') line = `<div class="cf-msg">${icon('clock')}<span>Nameservers switched${host ? ` at ${esc(host)}` : ''}${d.ns_updated_at ? ` on ${fmtDate(d.ns_updated_at)}` : ''}. Waiting for Cloudflare to see them (usually minutes, up to 24 hours).</span></div>`;
+  else if (d.ns_status === 'failed') line = `<div class="cf-msg cf-msg-bad">${icon('alert')}<span>Couldn't switch the nameservers. ${esc(d.ns_error)}</span></div>`;
+  else line = `<div class="cf-msg">${icon('info')}<span>${client ? 'Set these nameservers at your domain host' : 'The client sets these nameservers at their host'}${host ? ` (${esc(host)})` : ''}:</span></div>`;
+  return `<span class="cf-st cf-wait">${logo}<span class="spin"></span>Pending</span>${line}${ns ? `<div class="cf-ns">${ns}</div>` : ''}`;
 }
 
 // Client: their domains, DNS health, and (when Cloudflare is set up) their
@@ -3647,7 +3687,7 @@ function adminDomains() {
   const clients = state.admin.clients;
   shell(ADMIN_TABS, '#/admin/domains', `
     <div class="page-head"><div><h1>Domains</h1><p class="muted">Each client's sending domains and the mailbox type on each. DNS (MX, SPF, DMARC, DKIM) is checked when a domain is added and again every day.</p></div>
-      <div class="row"><a class="btn" href="/api/domains-template.csv">⬇ Sample CSV</a></div></div>
+      <div class="row"><a class="btn" href="/api/domains-template.csv">${icon('download')} Sample CSV</a></div></div>
     <div class="stack">
     ${uploadGuide('domains', false)}
     <div class="card">
@@ -3786,7 +3826,7 @@ function uploadGuide(kind, open) {
       ${sample.length ? `<div class="muted small" style="margin:14px 0 6px">Sample file:</div>
       <div class="table-wrap ug-sample"><table><thead><tr>${sample[0].map((h) => `<th class="mono">${esc(h)}</th>`).join('')}</tr></thead>
         <tbody>${sample.slice(1).map((r) => `<tr>${r.map((v) => `<td class="mono">${v ? esc(v) : '<span class="muted">(empty)</span>'}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
-      <div class="row" style="margin-top:14px"><a class="btn btn-primary" href="${g.file}">⬇ Download sample CSV</a></div>
+      <div class="row" style="margin-top:14px"><a class="btn btn-primary" href="${g.file}">${icon('download')} Download sample CSV</a></div>
     </div>
   </details>`;
 }
@@ -3908,3 +3948,9 @@ new MutationObserver(() => {
   document.querySelectorAll('.wv:not([data-counted]), .stat .value:not([data-counted])').forEach((el) => { el.dataset.counted = '1'; countUp(el); });
 }).observe(document.getElementById('app'), { childList: true, subtree: true });
 pageEnter();
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-copy-ns]');
+  if (!b) return;
+  navigator.clipboard.writeText(b.dataset.copyNs).then(() => { toast('Nameserver copied'); b.classList.add('copied'); setTimeout(() => b.classList.remove('copied'), 1200); }).catch(() => toast(b.dataset.copyNs));
+});
