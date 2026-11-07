@@ -93,7 +93,7 @@ async function checkExpiry({ force = [] } = {}) {
            OR x.checked_at < now() - interval '7 days'
            OR (x.expires_on IS NULL AND x.checked_at < now() - interval '6 hours')
            OR (x.expires_on IS NOT NULL AND x.expires_on < current_date + 45 AND x.checked_at < now() - interval '1 day')
-        LIMIT 200`);
+        LIMIT 600`);
   let ok = 0;
   for (const { domain } of rows) {
     try {

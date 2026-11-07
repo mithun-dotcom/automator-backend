@@ -3320,6 +3320,23 @@ admin.post('/prewarmed/delete', asyncRoute(async (req, res) => {
   res.json({ deleted: r.rowCount });
 }));
 
+// CSV of chosen inboxes, with passwords (for handing over or importing elsewhere).
+admin.post('/prewarmed/export', asyncRoute(async (req, res) => {
+  const ids = pwIds(req.body.ids);
+  if (!ids.length) throw new HttpError(400, 'Select the inboxes to download');
+  const { rows } = await query(`SELECT p.email, p.password, p.domain, pr.label AS type, p.status, p.warmup_started, x.expires_on,
+      u.company, u.name, u.email AS client_email, p.sold_at
+    FROM prewarmed p LEFT JOIN pricing pr ON pr.inbox_type = p.inbox_type LEFT JOIN domain_expiry x ON x.domain = p.domain
+    LEFT JOIN users u ON u.id = p.sold_to WHERE p.id = ANY($1) ORDER BY x.expires_on NULLS LAST, p.domain, p.email`, [ids]);
+  const stage = { warming: 'Warming up', available: 'Available', premium: 'Premium warm-up', sold: 'Sold' };
+  const d = (v) => (v ? new Date(v).toISOString().slice(0, 10) : '');
+  const csv = onboarding.toCsv([['email', 'password', 'domain', 'type', 'stage', 'warmup started', 'domain expires', 'sold to', 'sold on'],
+    ...rows.map((r) => [r.email, onboarding.decrypt(r.password), r.domain, r.type || '', stage[r.status] || r.status, d(r.warmup_started), d(r.expires_on),
+      r.client_email ? `${r.company || r.name || ''} <${r.client_email}>`.trim() : '', d(r.sold_at)])]);
+  await audit.record(req.user, 'edited', `Downloaded ${rows.length} pre-warmed inbox${rows.length === 1 ? '' : 'es'} (with passwords)`, [], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.type('text/csv').attachment(`prewarmed-inboxes-${billing.today()}.csv`).send(csv);
+}));
+
 admin.post('/prewarmed/check-expiry', asyncRoute(async (req, res) => {
   const { rows } = await query('SELECT DISTINCT domain FROM prewarmed');
   prewarmed.checkExpiry({ force: rows.map((r) => r.domain) }).catch((err) => console.warn('[prewarmed] expiry check failed:', err.message));

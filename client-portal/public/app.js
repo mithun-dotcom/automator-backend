@@ -3804,98 +3804,168 @@ const PW_STAGES = [
 ];
 function adminPrewarmed(data) {
   const { rows, types, warmupDays, premiumAfterDays, today } = data;
-  let tab = sessionStorage.getItem('pwTab') || 'available';
-  if (!PW_STAGES.some(([k]) => k === tab)) tab = 'available';
+  const ui = state.pwUi || (state.pwUi = { tab: 'available', q: '', type: '', exp: '', page: 1, sel: new Set() });
+  if (!['all', ...PW_STAGES.map(([k]) => k)].includes(ui.tab)) ui.tab = 'available';
+  const PAGE = 50;
   const DAY = 86400000;
   const now = Date.now();
   const daysIn = (r) => Math.max(0, Math.floor((now - Date.parse(r.status_since)) / DAY));
   const addDays = (iso, n) => new Date(Date.parse(iso) + n * DAY).toISOString().slice(0, 10);
-  const expDays = (r) => (r.expires_on ? Math.round((Date.parse(`${r.expires_on}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY) : null);
+  const expDays = (r) => (r.expires_on ? Math.round((Date.parse(`${String(r.expires_on).slice(0, 10)}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY) : null);
   const counts = Object.fromEntries(PW_STAGES.map(([k]) => [k, rows.filter((r) => r.status === k).length]));
-  const expiringSoon = [...new Set(rows.filter((r) => r.status !== 'sold' && expDays(r) !== null && expDays(r) <= 30).map((r) => r.domain))];
+  const soonRows = rows.filter((r) => r.status !== 'sold' && expDays(r) !== null && expDays(r) <= 30);
+  const soonDomains = [...new Set(soonRows.map((r) => r.domain))];
   const hint = { warming: `Move to Available after ${warmupDays} days`, available: `Ready to sell · premium after ${premiumAfterDays} days`, premium: `Unsold for ${premiumAfterDays}+ days`, sold: 'Tagged to clients' };
+  const stageName = Object.fromEntries(PW_STAGES.map(([k, l]) => [k, l]));
+  const ids = new Set(rows.map((r) => r.id));
+  [...ui.sel].forEach((id) => { if (!ids.has(id)) ui.sel.delete(id); });
 
   const stageCell = (r) => {
     const d = daysIn(r);
+    const tag = ui.tab === 'all' ? `<span class="pw-stage-tag pw-t-${r.status}">${stageName[r.status]}</span>` : '';
     if (r.status === 'warming') {
       const pct = Math.min(100, Math.round((d / warmupDays) * 100));
-      return `<div class="pw-prog"><div class="pw-prog-top"><strong>Day ${Math.min(d + 1, warmupDays)}</strong><span>of ${warmupDays}</span></div><div class="pw-bar pw-amber"><span style="width:${pct}%"></span></div><div class="pw-sub">Available ${fmtDate(addDays(r.status_since, warmupDays))}</div></div>`;
+      return `${tag}<div class="pw-prog"><div class="pw-prog-top"><strong>Day ${Math.min(d + 1, warmupDays)}</strong><span>of ${warmupDays}</span></div><div class="pw-bar pw-amber"><span style="width:${pct}%"></span></div><div class="pw-sub">Available ${fmtDate(addDays(r.status_since, warmupDays))}</div></div>`;
     }
     if (r.status === 'available') {
       const left = Math.max(0, premiumAfterDays - d);
       const pct = Math.min(100, Math.round((d / premiumAfterDays) * 100));
-      return `<div class="pw-prog"><div class="pw-prog-top"><strong>${d} day${d === 1 ? '' : 's'}</strong><span>available</span></div><div class="pw-bar pw-green"><span style="width:${pct}%"></span></div><div class="pw-sub">${left ? `Premium in ${left} day${left === 1 ? '' : 's'}` : 'Moving to premium'}</div></div>`;
+      return `${tag}<div class="pw-prog"><div class="pw-prog-top"><strong>${d} day${d === 1 ? '' : 's'}</strong><span>available</span></div><div class="pw-bar pw-green"><span style="width:${pct}%"></span></div><div class="pw-sub">${left ? `Premium in ${left} day${left === 1 ? '' : 's'}` : 'Moving to premium'}</div></div>`;
     }
-    if (r.status === 'premium') return `<div class="pw-prog"><div class="pw-prog-top"><strong>Premium</strong><span>${d} day${d === 1 ? '' : 's'}</span></div><div class="pw-sub">Since ${fmtDate(String(r.status_since).slice(0, 10))}</div></div>`;
-    return `<div class="pw-sold">${personAvatar(r.sold_company || r.sold_name || r.sold_email || '?', r.sold_email || '', 'av-sm')}<div><strong>${esc(r.sold_company || r.sold_name || r.sold_email || 'Deleted client')}</strong><div class="pw-sub">${r.sold_at ? fmtDate(String(r.sold_at).slice(0, 10)) : ''}${r.sold_from ? ` · from ${r.sold_from === 'premium' ? 'premium' : r.sold_from}` : ''}</div></div></div>`;
+    if (r.status === 'premium') return `${tag}<div class="pw-prog"><div class="pw-prog-top"><strong>Premium</strong><span>${d} day${d === 1 ? '' : 's'}</span></div><div class="pw-sub">Since ${fmtDate(String(r.status_since).slice(0, 10))}</div></div>`;
+    return `${tag}<div class="pw-sold">${personAvatar(r.sold_company || r.sold_name || r.sold_email || '?', r.sold_email || '', 'av-sm')}<div><strong>${esc(r.sold_company || r.sold_name || r.sold_email || 'Deleted client')}</strong><div class="pw-sub">${r.sold_at ? fmtDate(String(r.sold_at).slice(0, 10)) : ''}${r.sold_from ? ` · from ${stageName[r.sold_from] || r.sold_from}` : ''}</div></div></div>`;
   };
   const expiryCell = (r) => {
     const n = expDays(r);
-    if (n === null) return r.expiry_error ? `<span class="exp exp-na" title="${esc(r.expiry_error)}">${icon('info')}Couldn't check</span>` : `<span class="exp exp-na"><span class="spin"></span>Checking…</span>`;
-    const cls = n < 0 ? 'exp-bad' : n <= 30 ? 'exp-bad' : n <= 60 ? 'exp-warn' : 'exp-ok';
-    return `<span class="exp ${cls}" title="${esc(r.registrar ? `Registrar: ${r.registrar}` : '')}">${icon(n <= 60 ? 'alert' : 'calendar')}${fmtDate(r.expires_on)}</span><div class="pw-sub">${n < 0 ? `Expired ${-n} day${n === -1 ? '' : 's'} ago` : n === 0 ? 'Expires today' : `in ${n} day${n === 1 ? '' : 's'}`}</div>`;
+    if (n === null) return r.expiry_error ? `<span class="exp exp-na" title="${esc(r.expiry_error)}">${icon('info')}Couldn't check</span>` : '<span class="exp exp-na"><span class="spin"></span>Checking…</span>';
+    const cls = n <= 30 ? 'exp-bad' : n <= 60 ? 'exp-warn' : 'exp-ok';
+    return `<span class="exp ${cls}" title="${esc(r.registrar ? `Registrar: ${r.registrar}` : '')}">${icon(n <= 60 ? 'alert' : 'calendar')}${fmtDate(String(r.expires_on).slice(0, 10))}</span><div class="pw-sub">${n < 0 ? `Expired ${-n} day${n === -1 ? '' : 's'} ago` : n === 0 ? 'Expires today' : `in ${n} day${n === 1 ? '' : 's'}`}</div>`;
   };
-  const list = rows.filter((r) => r.status === tab);
+  const matches = () => {
+    const words = ui.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return rows.filter((r) => {
+      if (ui.tab !== 'all' && r.status !== ui.tab) return false;
+      if (ui.type && r.inbox_type !== ui.type) return false;
+      const n = expDays(r);
+      if (ui.exp === 'soon' && !(n !== null && n <= 30)) return false;
+      if (ui.exp === '60' && !(n !== null && n <= 60)) return false;
+      if (ui.exp === 'expired' && !(n !== null && n < 0)) return false;
+      if (ui.exp === 'unknown' && n !== null) return false;
+      if (words.length) { const t = `${r.email} ${r.domain} ${r.sold_company || ''} ${r.sold_email || ''}`.toLowerCase(); if (!words.every((w) => t.includes(w))) return false; }
+      return true;
+    }).sort((a, b) => (ui.exp ? (expDays(a) ?? 1e9) - (expDays(b) ?? 1e9) : 0));
+  };
+  const tabTypes = types.filter((t) => rows.some((r) => r.inbox_type === t.inbox_type));
 
   shell(ADMIN_TABS, '#/admin/prewarmed', `
     <div class="page-head"><div><h1>Pre-warmed inboxes</h1><p class="muted">Your warmed inbox stock. Inboxes move from Warming up to Available after ${warmupDays} days, and to Premium warm-up if unsold for ${premiumAfterDays} days. Domain expiry is checked automatically.</p></div>
       <div class="row"><button class="btn" id="pw-exp">${icon('refresh')}Check expiry</button><a class="btn" href="/api/prewarmed-template.csv">${icon('download')}Sample CSV</a><button class="btn btn-primary" id="pw-up">${icon('upload')}Upload inboxes</button></div></div>
     <div class="stack">
-      <div class="pw-stages">${PW_STAGES.map(([k, label, ico, tone]) => `<button type="button" class="pw-stage ${tone} ${k === tab ? 'on' : ''}" data-tab="${k}">
+      <div class="pw-stages">${PW_STAGES.map(([k, label, ico, tone]) => `<button type="button" class="pw-stage ${tone} ${k === ui.tab ? 'on' : ''}" data-tab="${k}">
         <span class="pw-stage-ico">${icon(ico)}</span><span class="pw-stage-body"><span class="pw-stage-label">${label}</span><span class="pw-stage-n">${counts[k]}</span><span class="pw-stage-hint">${hint[k]}</span></span></button>`).join('')}</div>
-      ${expiringSoon.length ? `<div class="note"><span class="note-icon">${icon('alert')}</span><div><strong>${expiringSoon.length} domain${expiringSoon.length === 1 ? '' : 's'} expire${expiringSoon.length === 1 ? 's' : ''} within 30 days:</strong> ${expiringSoon.slice(0, 8).map(esc).join(', ')}${expiringSoon.length > 8 ? '…' : ''}. Renew ${expiringSoon.length === 1 ? 'it' : 'them'} at the registrar.</div></div>` : ''}
+      ${soonDomains.length ? `<div class="note"><span class="note-icon">${icon('alert')}</span><div style="flex:1"><strong>${soonDomains.length} domain${soonDomains.length === 1 ? '' : 's'} (${soonRows.length} unsold inbox${soonRows.length === 1 ? '' : 'es'}) expire within 30 days.</strong> Renew them at the registrar, or sell those inboxes first.</div><button class="btn btn-sm" id="pw-show-soon">Show them</button></div>` : ''}
       <div class="card">
-        ${list.length ? `${filterBar('pw', [
-          { name: 'type', label: 'Type: any', options: types.filter((t) => list.some((r) => r.inbox_type === t.inbox_type)).map((t) => [t.inbox_type, t.label]) },
-          { name: 'exp', label: 'Domain expiry: any', options: [['soon', 'Within 30 days'], ['60', 'Within 60 days'], ['unknown', 'Not known']] },
-        ])}
-        <div class="pw-bulk" id="pw-bulk" hidden><span id="pw-count">0 selected</span>
-          ${tab !== 'sold' ? `<button class="btn btn-sm btn-primary" id="pw-sell">${icon('team')}Sell to client</button>` : ''}
-          <select id="pw-move" class="pw-move"><option value="">Move to…</option>${PW_STAGES.filter(([k]) => k !== 'sold' && k !== tab).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
-          <button class="btn btn-sm btn-ghost menu-danger" id="pw-del">${icon('close')}Delete</button></div>
-        <div class="table-wrap mb-wrap"><table class="mb-table pw-table">
-          <thead><tr><th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th><th>Inbox</th><th>Password</th><th>Type</th><th>${tab === 'sold' ? 'Sold to' : 'Stage'}</th><th>Domain expiry</th></tr></thead>
-          <tbody>${list.map((r) => {
-            const n = expDays(r);
-            return `<tr data-mb="${r.id}" data-id="${r.id}" data-search="${searchText(r.email, r.domain, r.sold_company, r.sold_email)}" data-type="${esc(r.inbox_type || '')}" data-exp="${n === null ? 'unknown' : `${n <= 30 ? 'soon ' : ''}${n <= 60 ? '60' : ''}`}">
-            <td class="mb-chk"><input type="checkbox" class="mb-sel" value="${r.id}" aria-label="Select ${esc(r.email)}"></td>
-            <td class="mb-main"><div class="mb-email">${mailboxAvatar(r.email, r.inbox_type, r.inbox_label)}<span class="mb-addr" title="${esc(r.email)}"><span class="mb-local">${esc(r.email.split('@')[0])}</span><span class="mb-dom">@${esc(r.domain)}</span></span>
-              <button class="icon-btn icon-btn-sm mb-copy" data-copy-text="${esc(r.email)}" title="Copy email" aria-label="Copy ${esc(r.email)}">${icon('copy')}</button></div></td>
-            <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
-              <button class="pw-btn" data-show-pw="${r.id}" title="Show password">${icon('eye')}</button><button class="pw-btn" data-copy-pw="${r.id}" title="Copy password">${icon('copy')}</button></div></td>
-            <td>${typeChip(r.inbox_type, r.inbox_label)}</td>
-            <td>${stageCell(r)}</td>
-            <td class="nowrap">${expiryCell(r)}</td></tr>`;
-          }).join('')}</tbody></table></div>`
-          : `<div class="empty">${tab === 'sold' ? 'Nothing sold yet.' : tab === 'warming' ? 'Nothing warming up. Upload inboxes to start their warm-up.' : tab === 'premium' ? 'No premium warm-up inboxes yet.' : 'No inboxes available right now.'}</div>`}
+        <div class="filter-bar pw-filters">
+          <div class="seg">${[['all', `All · ${rows.length}`], ...PW_STAGES.map(([k, l]) => [k, `${l} · ${counts[k]}`])].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
+          <input type="search" class="fb-q" id="pw-q" placeholder="Search email, domain, client…" value="${esc(ui.q)}">
+          <select id="pw-type"><option value="">Type: any</option>${tabTypes.map((t) => `<option value="${esc(t.inbox_type)}" ${ui.type === t.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>
+          <select id="pw-expf"><option value="">Domain expiry: any</option>${[['soon', 'Within 30 days'], ['60', 'Within 60 days'], ['expired', 'Already expired'], ['unknown', 'Not known yet']].map(([v, l]) => `<option value="${v}" ${ui.exp === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <button type="button" class="btn btn-sm" id="pw-dl-all">${icon('download')}<span>Download</span></button>
+        </div>
+        <div class="pw-bulk" id="pw-bulk" hidden><span id="pw-count"></span>
+          <button class="btn btn-sm" id="pw-dl-sel">${icon('download')}Download CSV</button>
+          <button class="btn btn-sm btn-primary" id="pw-sell">${icon('team')}Sell to client</button>
+          <select id="pw-move" class="pw-move"><option value="">Move to…</option>${PW_STAGES.filter(([k]) => k !== 'sold').map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+          <button class="btn btn-sm btn-ghost menu-danger" id="pw-del">${icon('close')}Delete</button>
+          <button class="btn btn-sm btn-ghost" id="pw-clear">Clear</button></div>
+        <div id="pw-list"></div>
       </div>
     </div>`);
 
-  wireFilterBar('pw');
-  wireMailboxTable((id) => `/api/admin/prewarmed/${id}/password`);
-  document.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { sessionStorage.setItem('pwTab', b.dataset.tab); adminPrewarmed(data); }; });
-  const selected = () => [...document.querySelectorAll('.mb-sel:checked')].filter((c) => !c.closest('tr').hidden).map((c) => Number(c.value));
-  const bulk = document.getElementById('pw-bulk');
-  const sync = () => { if (!bulk) return; const n = selected().length; bulk.hidden = !n; document.getElementById('pw-count').textContent = `${n} selected`; };
-  const all = document.getElementById('mb-all');
-  if (all) all.onchange = () => { document.querySelectorAll('.mb-sel').forEach((c) => { if (!c.closest('tr').hidden) c.checked = all.checked; }); sync(); };
-  document.querySelectorAll('.mb-sel').forEach((c) => { c.onchange = sync; });
-  const reload = async () => adminPrewarmed(await api('GET', '/api/admin/prewarmed'));
-  const sellBtn = document.getElementById('pw-sell');
-  if (sellBtn) sellBtn.onclick = () => openSellDialog(selected(), reload);
-  const move = document.getElementById('pw-move');
-  if (move) move.onchange = async () => {
-    if (!move.value) return;
-    try { const r = await api('POST', '/api/admin/prewarmed/move', { ids: selected(), status: move.value }); toast(`${r.moved} moved`); await reload(); } catch (ex) { toast(ex.message); }
+  const download = async (list) => {
+    if (!list.length) return toast('Nothing to download');
+    try {
+      const res = await fetch('/api/admin/prewarmed/export', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: list }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Download failed');
+      const url = URL.createObjectURL(await res.blob());
+      const a = Object.assign(document.createElement('a'), { href: url, download: `prewarmed-inboxes-${today}.csv` });
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast(`${list.length} inbox${list.length === 1 ? '' : 'es'} downloaded`);
+    } catch (ex) { toast(ex.message); }
   };
-  const del = document.getElementById('pw-del');
-  if (del) del.onclick = async () => {
-    const ids = selected();
-    if (!confirm(`Delete ${ids.length} inbox${ids.length === 1 ? '' : 'es'} from the stock? This can't be undone.`)) return;
-    try { await api('POST', '/api/admin/prewarmed/delete', { ids }); toast('Deleted'); await reload(); } catch (ex) { toast(ex.message); }
+  const syncBulk = (filtered) => {
+    const n = ui.sel.size;
+    document.getElementById('pw-bulk').hidden = !n;
+    document.getElementById('pw-count').innerHTML = `<strong>${n}</strong> selected${n < filtered.length ? ` · <button type="button" class="link-btn" id="pw-sel-all">Select all ${filtered.length} matching</button>` : ''}`;
+    const all = document.getElementById('pw-sel-all');
+    if (all) all.onclick = () => { filtered.forEach((r) => ui.sel.add(r.id)); renderList(); };
+    document.querySelector('#pw-dl-all span').textContent = `Download ${filtered.length}`;
+  };
+  function renderList() {
+    const filtered = matches();
+    const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
+    ui.page = Math.min(Math.max(1, ui.page), pages);
+    const slice = filtered.slice((ui.page - 1) * PAGE, ui.page * PAGE);
+    const allOn = slice.length && slice.every((r) => ui.sel.has(r.id));
+    const pageNums = () => {
+      const out = [];
+      for (let i = 1; i <= pages; i++) if (i === 1 || i === pages || Math.abs(i - ui.page) <= 1) out.push(i); else if (out[out.length - 1] !== '…') out.push('…');
+      return out.map((i) => (i === '…' ? '<span class="pg-gap">…</span>' : `<button type="button" class="pg-btn ${i === ui.page ? 'on' : ''}" data-page="${i}">${i}</button>`)).join('');
+    };
+    document.getElementById('pw-list').innerHTML = filtered.length ? `
+      <div class="table-wrap mb-wrap"><table class="mb-table pw-table">
+        <thead><tr><th class="mb-chk"><input type="checkbox" id="pw-all" aria-label="Select this page" ${allOn ? 'checked' : ''}></th><th>Inbox</th><th>Password</th><th>Type</th><th>${ui.tab === 'sold' ? 'Sold to' : 'Stage'}</th><th>Domain expiry</th></tr></thead>
+        <tbody>${slice.map((r) => `<tr data-id="${r.id}">
+          <td class="mb-chk"><input type="checkbox" class="mb-sel" value="${r.id}" ${ui.sel.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.email)}"></td>
+          <td class="mb-main"><div class="mb-email">${mailboxAvatar(r.email, r.inbox_type, r.inbox_label)}<span class="mb-addr" title="${esc(r.email)}"><span class="mb-local">${esc(r.email.split('@')[0])}</span><span class="mb-dom">@${esc(r.domain)}</span></span>
+            <button class="icon-btn icon-btn-sm mb-copy" data-copy-text="${esc(r.email)}" title="Copy email" aria-label="Copy ${esc(r.email)}">${icon('copy')}</button></div></td>
+          <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
+            <button class="pw-btn" data-show-pw="${r.id}" title="Show password">${icon('eye')}</button><button class="pw-btn" data-copy-pw="${r.id}" title="Copy password">${icon('copy')}</button></div></td>
+          <td>${typeChip(r.inbox_type, r.inbox_label)}</td>
+          <td>${stageCell(r)}</td>
+          <td class="nowrap">${expiryCell(r)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="pager"><span class="muted small">Showing ${(ui.page - 1) * PAGE + 1}–${Math.min(ui.page * PAGE, filtered.length)} of ${filtered.length}</span>
+        ${pages > 1 ? `<div class="pg"><button type="button" class="pg-btn" data-page="${ui.page - 1}" ${ui.page === 1 ? 'disabled' : ''} aria-label="Previous page">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(-90deg)"')}</button>${pageNums()}<button type="button" class="pg-btn" data-page="${ui.page + 1}" ${ui.page === pages ? 'disabled' : ''} aria-label="Next page">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(90deg)"')}</button></div>` : ''}</div>`
+      : `<div class="empty">${ui.q || ui.type || ui.exp ? 'No inboxes match these filters.' : ui.tab === 'sold' ? 'Nothing sold yet.' : ui.tab === 'warming' ? 'Nothing warming up. Upload inboxes to start their warm-up.' : ui.tab === 'premium' ? 'No premium warm-up inboxes yet.' : ui.tab === 'all' ? 'No inboxes yet. Upload some to get started.' : 'No inboxes available right now.'}</div>`;
+    wireMailboxTable((id) => `/api/admin/prewarmed/${id}/password`);
+    document.querySelectorAll('#pw-list .mb-sel').forEach((c) => { c.onchange = () => { if (c.checked) ui.sel.add(Number(c.value)); else ui.sel.delete(Number(c.value)); renderList(); }; });
+    const all = document.getElementById('pw-all');
+    if (all) all.onchange = () => { slice.forEach((r) => (all.checked ? ui.sel.add(r.id) : ui.sel.delete(r.id))); renderList(); };
+    document.querySelectorAll('#pw-list [data-page]').forEach((b) => { b.onclick = () => { ui.page = Number(b.dataset.page); renderList(); document.querySelector('.pw-filters').scrollIntoView({ behavior: 'smooth', block: 'start' }); }; });
+    syncBulk(filtered);
+    document.getElementById('pw-dl-all').onclick = () => download(filtered.map((r) => r.id));
+  }
+  renderList();
+
+  const reload = async () => adminPrewarmed(await api('GET', '/api/admin/prewarmed'));
+  const setTab = (k) => { ui.tab = k; ui.page = 1; adminPrewarmed(data); };
+  document.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+  let qt;
+  document.getElementById('pw-q').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { ui.q = e.target.value; ui.page = 1; renderList(); }, 150); };
+  document.getElementById('pw-type').onchange = (e) => { ui.type = e.target.value; ui.page = 1; renderList(); };
+  document.getElementById('pw-expf').onchange = (e) => { ui.exp = e.target.value; ui.page = 1; renderList(); };
+  const soon = document.getElementById('pw-show-soon');
+  if (soon) soon.onclick = () => { ui.tab = 'all'; ui.exp = 'soon'; ui.page = 1; adminPrewarmed(data); };
+  const chosen = () => [...ui.sel];
+  document.getElementById('pw-clear').onclick = () => { ui.sel.clear(); renderList(); };
+  document.getElementById('pw-dl-sel').onclick = () => download(chosen());
+  document.getElementById('pw-sell').onclick = () => {
+    const unsold = chosen().filter((id) => (rows.find((r) => r.id === id) || {}).status !== 'sold');
+    if (!unsold.length) return toast('Those inboxes are already sold');
+    openSellDialog(unsold, async () => { ui.sel.clear(); await reload(); });
+  };
+  const move = document.getElementById('pw-move');
+  move.onchange = async () => {
+    if (!move.value) return;
+    try { const r = await api('POST', '/api/admin/prewarmed/move', { ids: chosen(), status: move.value }); toast(`${r.moved} moved to ${stageName[move.value]}`); ui.sel.clear(); await reload(); } catch (ex) { toast(ex.message); }
+  };
+  document.getElementById('pw-del').onclick = async () => {
+    const list = chosen();
+    if (!confirm(`Delete ${list.length} inbox${list.length === 1 ? '' : 'es'} from the stock? This can't be undone.`)) return;
+    try { await api('POST', '/api/admin/prewarmed/delete', { ids: list }); toast('Deleted'); ui.sel.clear(); await reload(); } catch (ex) { toast(ex.message); }
   };
   document.getElementById('pw-exp').onclick = async () => {
-    try { const r = await api('POST', '/api/admin/prewarmed/check-expiry', {}); toast(`Checking ${r.checking} domain${r.checking === 1 ? '' : 's'}. Refresh in a minute.`); } catch (ex) { toast(ex.message); }
+    try { const r = await api('POST', '/api/admin/prewarmed/check-expiry', {}); toast(`Checking ${r.checking} domain${r.checking === 1 ? '' : 's'}. Refresh in a few minutes.`); } catch (ex) { toast(ex.message); }
   };
   document.getElementById('pw-up').onclick = () => openPrewarmUpload(types, reload);
 }
@@ -3944,7 +4014,7 @@ function openSellDialog(ids, done) {
   onSubmit(dlg.querySelector('form'), async (d) => {
     const r = await api('POST', '/api/admin/prewarmed/sell', { ids, user_id: Number(d.user_id), add_to_mailboxes: d.add === 'on' });
     toast(`${r.sold} sold to ${r.client}`);
-    sessionStorage.setItem('pwTab', 'sold');
+    if (state.pwUi) { state.pwUi.tab = 'sold'; state.pwUi.page = 1; }
     dlg.close();
     await done();
   });

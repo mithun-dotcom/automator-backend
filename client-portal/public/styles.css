@@ -1056,3 +1056,23 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .pw-bulk .btn-ghost:hover { background: rgb(255 255 255 / .08); color: #fff; }
 .pw-move { width: auto; padding: 6px 10px; font-size: 12.5px; border-radius: 8px; }
 @media (max-width: 1100px) { .pw-stages { grid-template-columns: repeat(2, 1fr); } }
+.pw-filters { gap: 10px; }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 11px; width: 100%; }
+.seg-btn { border: 0; background: none; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 6px 12px; border-radius: 8px; cursor: pointer; transition: background .15s, color .15s, box-shadow .2s; white-space: nowrap; }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.on { background: #fff; color: var(--brand-800); box-shadow: 0 1px 3px rgb(16 24 40 / .12); }
+.pw-stage-tag { display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 7px; border-radius: 5px; margin-bottom: 5px; }
+.pw-t-warming { background: #fef3c7; color: #b45309; } .pw-t-available { background: #d1fae5; color: #047857; }
+.pw-t-premium { background: #ede9fe; color: #6d28d9; } .pw-t-sold { background: #dbeafe; color: #1d4ed8; }
+.link-btn { border: 0; background: none; padding: 0; font: inherit; color: #c7d2fe; text-decoration: underline; cursor: pointer; font-weight: 600; }
+.link-btn:hover { color: #fff; }
+.pw-bulk .btn:not(.btn-primary):not(.btn-ghost) { background: rgb(255 255 255 / .1); border-color: rgb(255 255 255 / .2); color: #fff; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 4px 20px 18px; }
+.pg { display: flex; align-items: center; gap: 4px; }
+.pg-btn { min-width: 34px; height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--border); background: #fff; font: inherit; font-size: 13px; font-weight: 600; color: var(--text-2); cursor: pointer; display: grid; place-items: center; transition: background .15s, border-color .15s, transform .18s var(--spring); }
+.pg-btn:hover:not(:disabled) { border-color: var(--brand-200); color: var(--brand-700); }
+.pg-btn:active:not(:disabled) { transform: scale(.94); }
+.pg-btn.on { background: var(--brand-800); border-color: var(--brand-800); color: #fff; }
+.pg-btn:disabled { opacity: .4; cursor: default; }
+.pg-btn .ico { width: 15px; height: 15px; }
+.pg-gap { padding: 0 4px; color: var(--faint); }
