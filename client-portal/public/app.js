@@ -3830,7 +3830,7 @@ function adminActiveDomains(data) {
 
   shell(ADMIN_TABS, '#/admin/active-domains', `
     <div class="page-head"><div><h1>Active domains</h1><p class="muted">${owner ? 'Your sending domains, with their creation date and users. Team members you give access (Team page) see only the domains they add.' : 'The domains you\'ve added, with their creation date and users.'} Cancelling a domain emails ${owner ? 'you' : 'the owner'} the list to cancel.</p></div>
-      <div class="row"><a class="btn" href="/api/active-domains-template.csv">${icon('download')}Sample CSV</a><button class="btn btn-primary" id="ad-add">${icon('order')}Add domains</button></div></div>
+      <div class="row"><a class="btn" href="/api/active-domains-template.csv">${icon('download')}Sample CSV</a><button class="btn btn-primary" id="dmn-add">${icon('order')}Add domains</button></div></div>
     <div class="stack">
       <div class="inv-kpis">
         ${card('green', 'shield', 'Active domains', distinctActive, `${active.length} purchase${active.length === 1 ? '' : 's'} · ${addedMonth} this month`)}
@@ -3840,17 +3840,17 @@ function adminActiveDomains(data) {
       </div>
       <div class="card">
         <div class="filter-bar pw-filters">
-          <div class="seg">${[['active', `Active · ${active.length}`], ['cancelled', `Cancelled · ${cancelled.length}`]].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-adtab="${k}">${l}</button>`).join('')}</div>
-          <input type="search" class="fb-q" id="ad-q" placeholder="Search domain, provider, notes…" value="${esc(ui.q)}">
-          ${owner && team.length > 1 ? `<select id="ad-by"><option value="">Sold by: anyone</option><option value="none" ${ui.by === 'none' ? 'selected' : ''}>Not assigned</option>${team.map((t) => `<option value="${t.id}" ${String(ui.by) === String(t.id) ? 'selected' : ''}>${esc(t.name || t.email)}</option>`).join('')}</select>` : ''}
-          <button type="button" class="btn btn-sm" id="ad-dl">${icon('download')}<span>Download</span></button>
+          <div class="seg">${[['active', `Active · ${active.length}`], ['cancelled', `Cancelled · ${cancelled.length}`]].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-dmntab="${k}">${l}</button>`).join('')}</div>
+          <input type="search" class="fb-q" id="dmn-q" placeholder="Search domain, provider, notes…" value="${esc(ui.q)}">
+          ${owner && team.length > 1 ? `<select id="dmn-by"><option value="">Sold by: anyone</option><option value="none" ${ui.by === 'none' ? 'selected' : ''}>Not assigned</option>${team.map((t) => `<option value="${t.id}" ${String(ui.by) === String(t.id) ? 'selected' : ''}>${esc(t.name || t.email)}</option>`).join('')}</select>` : ''}
+          <button type="button" class="btn btn-sm" id="dmn-dl">${icon('download')}<span>Download</span></button>
         </div>
-        <div class="pw-bulk" id="ad-bulk" hidden><span id="ad-count"></span>
-          ${ui.tab === 'active' ? `<button class="btn btn-sm btn-danger-solid" id="ad-cancel">${icon('close')}Cancel domains</button>` : `<button class="btn btn-sm" id="ad-restore">${icon('refresh')}Restore</button>`}
-          ${owner ? `<button class="btn btn-sm" id="ad-push">${icon('send')}Push to team member</button>` : ''}
-          <button class="btn btn-sm btn-ghost menu-danger" id="ad-del">Delete</button>
-          <button class="btn btn-sm btn-ghost" id="ad-clear">Clear</button></div>
-        <div id="ad-list"></div>
+        <div class="pw-bulk" id="dmn-bulk" hidden><span id="dmn-count"></span>
+          ${ui.tab === 'active' ? `<button class="btn btn-sm btn-danger-solid" id="dmn-cancel">${icon('close')}Cancel domains</button>` : `<button class="btn btn-sm" id="dmn-restore">${icon('refresh')}Restore</button>`}
+          ${owner ? `<button class="btn btn-sm" id="dmn-push">${icon('send')}Push to team member</button>` : ''}
+          <button class="btn btn-sm btn-ghost menu-danger" id="dmn-del">Delete</button>
+          <button class="btn btn-sm btn-ghost" id="dmn-clear">Clear</button></div>
+        <div id="dmn-list"></div>
       </div>
     </div>`);
 
@@ -3873,7 +3873,7 @@ function adminActiveDomains(data) {
   function renderList() {
     try { drawList(); } catch (err) {
       console.error(err);
-      document.getElementById('ad-list').innerHTML = `<div class="empty">Couldn't show the list: ${esc(err.message)}. Please send this message to support.</div>`;
+      document.getElementById('dmn-list').innerHTML = `<div class="empty">Couldn't show the list: ${esc(err.message)}. Please send this message to support.</div>`;
     }
   }
   function drawList() {
@@ -3887,64 +3887,64 @@ function adminActiveDomains(data) {
       for (let i = 1; i <= pages; i++) if (i === 1 || i === pages || Math.abs(i - ui.page) <= 1) out.push(i); else if (out[out.length - 1] !== '…') out.push('…');
       return out.map((i) => (i === '…' ? '<span class="pg-gap">…</span>' : `<button type="button" class="pg-btn ${i === ui.page ? 'on' : ''}" data-page="${i}">${i}</button>`)).join('');
     };
-    document.getElementById('ad-list').innerHTML = filtered.length ? `
-      <div class="table-wrap mb-wrap"><table class="mb-table ad-table">
-        <thead><tr><th class="mb-chk"><input type="checkbox" id="ad-all" aria-label="Select this page" ${allOn ? 'checked' : ''}></th><th>Domain</th><th>Created</th><th class="num">Users</th><th>Sold by</th><th>${ui.tab === 'cancelled' ? 'Cancelled' : 'Status'}</th><th></th></tr></thead>
+    document.getElementById('dmn-list').innerHTML = filtered.length ? `
+      <div class="table-wrap mb-wrap"><table class="mb-table dmn-table">
+        <thead><tr><th class="mb-chk"><input type="checkbox" id="dmn-all" aria-label="Select this page" ${allOn ? 'checked' : ''}></th><th>Domain</th><th>Created</th><th class="num">Users</th><th>Sold by</th><th>${ui.tab === 'cancelled' ? 'Cancelled' : 'Status'}</th><th></th></tr></thead>
         <tbody>${slice.map((r) => {
           const a = age(r.created_on);
           return `<tr data-id="${r.id}">
-          <td class="mb-chk"><input type="checkbox" class="ad-sel" value="${r.id}" ${ui.sel.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.domain)}"></td>
-          <td><div class="ad-dom"><span class="ad-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="ad-name">${esc(r.domain)}</strong>${(buys.get(`${r.status}|${r.domain.toLowerCase()}`) || 0) > 1 ? `<button type="button" class="ad-multi" data-ad-domain="${esc(r.domain)}" title="Show all purchases of this domain">×${buys.get(`${r.status}|${r.domain.toLowerCase()}`)} purchases</button>` : ''}${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}</div>
+          <td class="mb-chk"><input type="checkbox" class="dmn-sel" value="${r.id}" ${ui.sel.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.domain)}"></td>
+          <td><div class="dmn-dom"><span class="dmn-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="dmn-name">${esc(r.domain)}</strong>${(buys.get(`${r.status}|${r.domain.toLowerCase()}`) || 0) > 1 ? `<button type="button" class="dmn-multi" data-dmn-domain="${esc(r.domain)}" title="Show all purchases of this domain">×${buys.get(`${r.status}|${r.domain.toLowerCase()}`)} purchases</button>` : ''}${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}</div>
             <button class="icon-btn icon-btn-sm mb-copy" data-copy-ns="${esc(r.domain)}" data-copy-what="Domain" title="Copy domain">${icon('copy')}</button></div></td>
-          <td class="nowrap">${r.created_on ? `<strong class="ad-date">${fmtDate(String(r.created_on).slice(0, 10))}</strong><div class="pw-sub">${a === 0 ? 'today' : a > 0 ? `${a} day${a === 1 ? '' : 's'} ago` : 'in the future'}</div>` : '<span class="muted">—</span>'}</td>
-          <td class="num"><span class="ad-users">${icon('team')}${r.users_count}</span></td>
+          <td class="nowrap">${r.created_on ? `<strong class="dmn-date">${fmtDate(String(r.created_on).slice(0, 10))}</strong><div class="pw-sub">${a === 0 ? 'today' : a > 0 ? `${a} day${a === 1 ? '' : 's'} ago` : 'in the future'}</div>` : '<span class="muted">—</span>'}</td>
+          <td class="num"><span class="dmn-users">${icon('team')}${r.users_count}</span></td>
           <td>${seller(r) ? `<div class="pw-sold">${personAvatar(seller(r), r.sold_email || '', 'av-sm')}<div><span class="small"><strong>${esc(seller(r))}</strong></span>${r.added_by !== r.sold_by ? `<div class="pw-sub">added by ${esc(who(r))}</div>` : ''}</div></div>` : `<span class="muted small">Not assigned</span>${owner ? `<div class="pw-sub">added by ${esc(who(r))}</div>` : ''}`}</td>
           <td>${r.status === 'active' ? '<span class="badge b-active">Active</span>' : `<span class="badge b-cancelled">Cancelled</span><div class="pw-sub">${r.cancelled_at ? fmtDate(String(r.cancelled_at).slice(0, 10)) : ''}${r.cancelled_name || r.cancelled_email ? ` · by ${esc(r.cancelled_name || r.cancelled_email)}` : ''}</div>`}</td>
           <td><div class="row inv-actions">
-            ${r.status === 'active' ? `<button class="btn btn-sm btn-danger" data-ad-cancel="${r.id}">${icon('close')}Cancel</button>` : `<button class="btn btn-sm" data-ad-restore="${r.id}">${icon('refresh')}Restore</button>`}
-            ${moreMenu(`<button type="button" class="menu-item" data-ad-edit="${r.id}">${icon('settings')}Edit</button>${owner ? `<button type="button" class="menu-item" data-ad-push="${r.id}">${icon('send')}Push to team member</button>` : ''}<div class="menu-sep"></div><button type="button" class="menu-item menu-danger" data-ad-del="${r.id}">${icon('close')}Delete</button>`)}
+            ${r.status === 'active' ? `<button class="btn btn-sm btn-danger" data-dmn-cancel="${r.id}">${icon('close')}Cancel</button>` : `<button class="btn btn-sm" data-dmn-restore="${r.id}">${icon('refresh')}Restore</button>`}
+            ${moreMenu(`<button type="button" class="menu-item" data-dmn-edit="${r.id}">${icon('settings')}Edit</button>${owner ? `<button type="button" class="menu-item" data-dmn-push="${r.id}">${icon('send')}Push to team member</button>` : ''}<div class="menu-sep"></div><button type="button" class="menu-item menu-danger" data-dmn-del="${r.id}">${icon('close')}Delete</button>`)}
           </div></td></tr>`;
         }).join('')}</tbody></table></div>
       <div class="pager"><span class="muted small">Showing ${(ui.page - 1) * PAGE + 1}–${Math.min(ui.page * PAGE, filtered.length)} of ${filtered.length}</span>
         ${pages > 1 ? `<div class="pg"><button type="button" class="pg-btn" data-page="${ui.page - 1}" ${ui.page === 1 ? 'disabled' : ''} aria-label="Previous page">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(-90deg)"')}</button>${pageNums()}<button type="button" class="pg-btn" data-page="${ui.page + 1}" ${ui.page === pages ? 'disabled' : ''} aria-label="Next page">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(90deg)"')}</button></div>` : ''}</div>`
       : `<div class="empty">${ui.q || ui.by ? 'No domains match.' : ui.tab === 'cancelled' ? 'No cancelled domains.' : 'No active domains yet. Click Add domains.'}</div>`;
-    document.querySelectorAll('.ad-sel').forEach((c) => { c.onchange = () => { if (c.checked) ui.sel.add(Number(c.value)); else ui.sel.delete(Number(c.value)); renderList(); }; });
-    const all = document.getElementById('ad-all');
+    document.querySelectorAll('.dmn-sel').forEach((c) => { c.onchange = () => { if (c.checked) ui.sel.add(Number(c.value)); else ui.sel.delete(Number(c.value)); renderList(); }; });
+    const all = document.getElementById('dmn-all');
     if (all) all.onchange = () => { slice.forEach((r) => (all.checked ? ui.sel.add(r.id) : ui.sel.delete(r.id))); renderList(); };
-    document.querySelectorAll('#ad-list [data-page]').forEach((b) => { b.onclick = () => { ui.page = Number(b.dataset.page); renderList(); }; });
-    document.querySelectorAll('[data-ad-cancel]').forEach((b) => { b.onclick = () => openDomainCancel([Number(b.dataset.adCancel)], rows, reload); });
-    document.querySelectorAll('[data-ad-restore]').forEach((b) => { b.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [Number(b.dataset.adRestore)] }); toast('Restored to active'); await reload(); } catch (ex) { toast(ex.message); } }; });
-    document.querySelectorAll('[data-ad-del]').forEach((b) => { b.onclick = () => del([Number(b.dataset.adDel)]); });
-    document.querySelectorAll('[data-ad-domain]').forEach((b) => { b.onclick = () => { ui.q = b.dataset.adDomain; ui.page = 1; document.getElementById('ad-q').value = ui.q; renderList(); }; });
-    document.querySelectorAll('[data-ad-push]').forEach((b) => { b.onclick = () => openDomainPush([Number(b.dataset.adPush)], team, reload); });
-    document.querySelectorAll('[data-ad-edit]').forEach((b) => { b.onclick = () => openDomainEdit(rows.find((r) => r.id === Number(b.dataset.adEdit)), reload); });
+    document.querySelectorAll('#dmn-list [data-page]').forEach((b) => { b.onclick = () => { ui.page = Number(b.dataset.page); renderList(); }; });
+    document.querySelectorAll('[data-dmn-cancel]').forEach((b) => { b.onclick = () => openDomainCancel([Number(b.dataset.dmnCancel)], rows, reload); });
+    document.querySelectorAll('[data-dmn-restore]').forEach((b) => { b.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [Number(b.dataset.dmnRestore)] }); toast('Restored to active'); await reload(); } catch (ex) { toast(ex.message); } }; });
+    document.querySelectorAll('[data-dmn-del]').forEach((b) => { b.onclick = () => del([Number(b.dataset.dmnDel)]); });
+    document.querySelectorAll('[data-dmn-domain]').forEach((b) => { b.onclick = () => { ui.q = b.dataset.dmnDomain; ui.page = 1; document.getElementById('dmn-q').value = ui.q; renderList(); }; });
+    document.querySelectorAll('[data-dmn-push]').forEach((b) => { b.onclick = () => openDomainPush([Number(b.dataset.dmnPush)], team, reload); });
+    document.querySelectorAll('[data-dmn-edit]').forEach((b) => { b.onclick = () => openDomainEdit(rows.find((r) => r.id === Number(b.dataset.dmnEdit)), reload); });
     const n = ui.sel.size;
-    document.getElementById('ad-bulk').hidden = !n;
-    document.getElementById('ad-count').innerHTML = `<strong>${n}</strong> selected${n < filtered.length ? ` · <button type="button" class="link-btn" id="ad-sel-all">Select all ${filtered.length}</button>` : ''}`;
-    const sa = document.getElementById('ad-sel-all');
+    document.getElementById('dmn-bulk').hidden = !n;
+    document.getElementById('dmn-count').innerHTML = `<strong>${n}</strong> selected${n < filtered.length ? ` · <button type="button" class="link-btn" id="dmn-sel-all">Select all ${filtered.length}</button>` : ''}`;
+    const sa = document.getElementById('dmn-sel-all');
     if (sa) sa.onclick = () => { filtered.forEach((r) => ui.sel.add(r.id)); renderList(); };
-    document.querySelector('#ad-dl span').textContent = `Download ${filtered.length}`;
-    document.getElementById('ad-dl').onclick = () => download(ui.sel.size ? rows.filter((r) => ui.sel.has(r.id)) : filtered);
+    document.querySelector('#dmn-dl span').textContent = `Download ${filtered.length}`;
+    document.getElementById('dmn-dl').onclick = () => download(ui.sel.size ? rows.filter((r) => ui.sel.has(r.id)) : filtered);
   }
   const del = async (list) => {
     if (!confirm(`Delete ${list.length} domain${list.length === 1 ? '' : 's'} from this list? No email is sent. To have ${list.length === 1 ? 'it' : 'them'} cancelled, use Cancel instead.`)) return;
     try { const r = await api('POST', '/api/admin/active-domains/delete', { ids: list }); toast(`${r.deleted} deleted`); ui.sel.clear(); await reload(); } catch (ex) { toast(ex.message); }
   };
   renderList();
-  document.querySelectorAll('[data-adtab]').forEach((b) => { b.onclick = () => { ui.tab = b.dataset.adtab; ui.page = 1; ui.sel.clear(); adminActiveDomains(data); }; });
+  document.querySelectorAll('[data-dmntab]').forEach((b) => { b.onclick = () => { ui.tab = b.dataset.dmntab; ui.page = 1; ui.sel.clear(); adminActiveDomains(data); }; });
   let qt;
-  document.getElementById('ad-q').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { ui.q = e.target.value; ui.page = 1; renderList(); }, 150); };
-  const by = document.getElementById('ad-by');
+  document.getElementById('dmn-q').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { ui.q = e.target.value; ui.page = 1; renderList(); }, 150); };
+  const by = document.getElementById('dmn-by');
   if (by) by.onchange = () => { ui.by = by.value; ui.page = 1; renderList(); };
-  document.getElementById('ad-clear').onclick = () => { ui.sel.clear(); renderList(); };
-  const bc = document.getElementById('ad-cancel');
+  document.getElementById('dmn-clear').onclick = () => { ui.sel.clear(); renderList(); };
+  const bc = document.getElementById('dmn-cancel');
   if (bc) bc.onclick = () => openDomainCancel([...ui.sel], rows, async () => { ui.sel.clear(); await reload(); });
-  const br = document.getElementById('ad-restore');
+  const br = document.getElementById('dmn-restore');
   if (br) br.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [...ui.sel] }); toast('Restored to active'); ui.sel.clear(); await reload(); } catch (ex) { toast(ex.message); } };
-  document.getElementById('ad-del').onclick = () => del([...ui.sel]);
-  const bp = document.getElementById('ad-push');
+  document.getElementById('dmn-del').onclick = () => del([...ui.sel]);
+  const bp = document.getElementById('dmn-push');
   if (bp) bp.onclick = () => openDomainPush([...ui.sel], team, async () => { ui.sel.clear(); await reload(); });
-  document.getElementById('ad-add').onclick = () => openDomainAdd(reload, owner ? team : null);
+  document.getElementById('dmn-add').onclick = () => openDomainAdd(reload, owner ? team : null);
 }
 
 function modalShell(title, body) {
@@ -3964,7 +3964,7 @@ function openDomainCancel(ids, rows, done) {
   const users = list.reduce((n, r) => n + (r.users_count || 0), 0);
   const dlg = modalShell(`Cancel ${list.length} domain${list.length === 1 ? '' : 's'}`, `
     <div class="note" style="margin-bottom:14px"><span class="note-icon">${icon('mail')}</span><div>${isOwner() ? 'You\'ll' : 'The owner will'} get an email listing ${list.length === 1 ? 'this domain' : 'these domains'} with the creation date and users, to cancel ${list.length === 1 ? 'it' : 'them'}.</div></div>
-    <div class="ad-cancel-list">${list.slice(0, 50).map((r) => `<div><strong>${esc(r.domain)}</strong><span class="muted small">${r.created_on ? `created ${fmtDate(String(r.created_on).slice(0, 10))}` : 'no creation date'} · ${r.users_count} user${r.users_count === 1 ? '' : 's'}</span></div>`).join('')}${list.length > 50 ? `<div class="muted small">+${list.length - 50} more</div>` : ''}</div>
+    <div class="dmn-cancel-list">${list.slice(0, 50).map((r) => `<div><strong>${esc(r.domain)}</strong><span class="muted small">${r.created_on ? `created ${fmtDate(String(r.created_on).slice(0, 10))}` : 'no creation date'} · ${r.users_count} user${r.users_count === 1 ? '' : 's'}</span></div>`).join('')}${list.length > 50 ? `<div class="muted small">+${list.length - 50} more</div>` : ''}</div>
     <p class="muted small" style="margin:8px 0 12px">${list.length} domain${list.length === 1 ? '' : 's'} · ${users} user${users === 1 ? '' : 's'} in total</p>
     <div class="field"><label>Note <span class="muted small">(optional, added to the email)</span></label><textarea name="note" style="min-height:64px" placeholder="e.g. Client churned; cancel before the next renewal"></textarea></div>
     <div class="row"><button class="btn btn-danger-solid" type="submit">${icon('close')}Mark cancelled &amp; email</button><button class="btn" type="button" data-close2>Keep them</button></div>`);

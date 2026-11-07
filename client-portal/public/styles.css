@@ -1078,14 +1078,14 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .pg-gap { padding: 0 4px; color: var(--faint); }
 
 /* ---- active domains */
-.ad-dom { display: flex; align-items: center; gap: 12px; }
-.ad-ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: #fff; border: 1px solid var(--border); flex-shrink: 0; }
-.ad-ico .brand-logo { font-size: 17px; }
-.ad-name { font-size: 14px; color: var(--text); }
-.ad-date { font-weight: 600; font-size: 13px; }
-.ad-users { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 14px; padding: 3px 10px; border-radius: 999px; background: var(--brand-50); color: var(--brand-700); }
-.ad-users .ico { width: 14px; height: 14px; }
-.ad-cancel-list { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
-.ad-cancel-list > div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border-radius: 8px; }
-.ad-cancel-list > div:nth-child(odd) { background: var(--surface-2); }
-.ad-multi { margin-left: 8px; font: inherit; font-size: 10.5px; font-weight: 700; color: var(--brand-600); background: var(--brand-50); border: 1px solid var(--brand-100); border-radius: 999px; padding: 1px 8px; cursor: pointer; vertical-align: 1px; } .ad-multi:hover { background: var(--brand-100); }
+.dmn-dom { display: flex; align-items: center; gap: 12px; }
+.dmn-ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: #fff; border: 1px solid var(--border); flex-shrink: 0; }
+.dmn-ico .brand-logo { font-size: 17px; }
+.dmn-name { font-size: 14px; color: var(--text); }
+.dmn-date { font-weight: 600; font-size: 13px; }
+.dmn-users { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 14px; padding: 3px 10px; border-radius: 999px; background: var(--brand-50); color: var(--brand-700); }
+.dmn-users .ico { width: 14px; height: 14px; }
+.dmn-cancel-list { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
+.dmn-cancel-list > div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border-radius: 8px; }
+.dmn-cancel-list > div:nth-child(odd) { background: var(--surface-2); }
+.dmn-multi { margin-left: 8px; font: inherit; font-size: 10.5px; font-weight: 700; color: var(--brand-600); background: var(--brand-50); border: 1px solid var(--brand-100); border-radius: 999px; padding: 1px 8px; cursor: pointer; vertical-align: 1px; } .dmn-multi:hover { background: var(--brand-100); }
