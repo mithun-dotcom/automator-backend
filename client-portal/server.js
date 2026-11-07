@@ -1195,6 +1195,7 @@ shared.post('/clients/:id/mailboxes', asyncRoute(async (req, res) => {
   });
   const { rows: [{ total }] } = await query('SELECT count(*)::int AS total FROM mailboxes WHERE user_id = $1', [client.id]);
   const domainSync = await domainsFromMailboxes(client.id, list, orderId);
+  await prewarmed.syncSold().catch((err) => console.warn('[prewarmed] sold sync:', err.message));
   const admins = list.filter((m) => m.is_admin).length;
   await audit.record(req.user, 'added', `${list.length} mailbox login${list.length === 1 ? '' : 's'} for ${client.company || client.name || client.email} <${client.email}>`,
     [{ field: 'Uploaded', from: '', to: `${result.added} new, ${result.updated} updated${result.removed ? `, ${result.removed} removed` : ''}${admins ? `, ${admins} admin` : ''}` }],

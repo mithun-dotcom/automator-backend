@@ -7,8 +7,20 @@ const { query } = require('./db');
 const WARMUP_DAYS = 14;
 const PREMIUM_AFTER_DAYS = 30;
 
+// Inboxes that are already in a client's Mailboxes are that client's: tag
+// them sold to the client who got them first.
+async function syncSold() {
+  const r = await query(`UPDATE prewarmed p SET status = 'sold', sold_from = p.status, status_since = m.created_at,
+      sold_to = m.user_id, sold_at = m.created_at
+    FROM (SELECT DISTINCT ON (lower(email)) lower(email) AS e, user_id, created_at FROM mailboxes ORDER BY lower(email), created_at) m
+    WHERE p.status <> 'sold' AND lower(p.email) = m.e`);
+  if (r.rowCount) console.log(`[prewarmed] tagged ${r.rowCount} inbox(es) sold: already in a client's Mailboxes`);
+  return r.rowCount;
+}
+
 // Moves every inbox whose time is up; returns how many moved.
 async function advance() {
+  await syncSold();
   let moved = 0;
   // A loop, so one that's overdue by more than a stage moves through both.
   for (let i = 0; i < 3; i++) {
@@ -23,14 +35,47 @@ async function advance() {
   return moved;
 }
 
-const RDAP = (process.env.RDAP_URL || 'https://rdap.org/domain/').replace(/\/?$/, '/');
-async function lookup(domain) {
-  const res = await fetch(`${RDAP}${encodeURIComponent(domain)}`, {
-    headers: { Accept: 'application/rdap+json, application/json' }, redirect: 'follow', signal: AbortSignal.timeout(15000),
+// RDAP: each TLD's registry runs its own server, listed by IANA (the
+// "bootstrap" file). We ask the registry directly, falling back to rdap.org.
+const UA = 'MithmillPortal/1.0 (+https://client.mithmill.com)';
+const FALLBACK = (process.env.RDAP_URL || 'https://rdap.org/domain/').replace(/\/?$/, '/');
+let bootstrap = null;
+let bootstrapAt = 0;
+async function registryFor(tld) {
+  if (process.env.RDAP_URL) return null;
+  if (!bootstrap || Date.now() - bootstrapAt > 7 * 86400000) {
+    try {
+      const res = await fetch('https://data.iana.org/rdap/dns.json', { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+      if (res.ok) {
+        const data = await res.json();
+        bootstrap = new Map();
+        for (const [tlds, urls] of data.services || []) {
+          const url = (urls || []).find((u) => u.startsWith('https://')) || (urls || [])[0];
+          for (const t of tlds) bootstrap.set(t.toLowerCase(), url.replace(/\/?$/, '/'));
+        }
+        bootstrapAt = Date.now();
+      }
+    } catch (err) { console.warn('[prewarmed] RDAP bootstrap failed:', err.message); }
+  }
+  return bootstrap ? bootstrap.get(tld) || null : null;
+}
+async function rdap(url) {
+  const res = await fetch(url, {
+    headers: { Accept: 'application/rdap+json, application/json', 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(15000),
   });
-  if (res.status === 404) throw new Error('Not found in the registry');
+  if (res.status === 404) { const e = new Error('Not found in the registry'); e.final = true; throw e; }
   if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
-  const data = await res.json();
+  return res.json();
+}
+async function lookup(domain) {
+  const tld = domain.split('.').pop().toLowerCase();
+  const base = await registryFor(tld);
+  let data;
+  let firstErr = null;
+  for (const url of [base && `${base}domain/${encodeURIComponent(domain)}`, `${FALLBACK}${encodeURIComponent(domain)}`].filter(Boolean)) {
+    try { data = await rdap(url); break; } catch (err) { firstErr = firstErr || err; if (err.final) throw err; }
+  }
+  if (!data) throw firstErr || new Error('Lookup failed');
   const ev = (data.events || []).find((e) => /expir/i.test(e.eventAction || ''));
   const reg = (data.entities || []).find((e) => (e.roles || []).includes('registrar'));
   const name = reg && reg.vcardArray && (reg.vcardArray[1] || []).find((v) => v[0] === 'fn');
@@ -46,6 +91,7 @@ async function checkExpiry({ force = [] } = {}) {
     : await query(`SELECT DISTINCT p.domain FROM prewarmed p LEFT JOIN domain_expiry x ON x.domain = p.domain
         WHERE x.domain IS NULL OR x.checked_at IS NULL
            OR x.checked_at < now() - interval '7 days'
+           OR (x.expires_on IS NULL AND x.checked_at < now() - interval '6 hours')
            OR (x.expires_on IS NOT NULL AND x.expires_on < current_date + 45 AND x.checked_at < now() - interval '1 day')
         LIMIT 200`);
   let ok = 0;
@@ -66,4 +112,4 @@ async function checkExpiry({ force = [] } = {}) {
   return { checked: rows.length, ok };
 }
 
-module.exports = { advance, checkExpiry, WARMUP_DAYS, PREMIUM_AFTER_DAYS };
+module.exports = { advance, syncSold, checkExpiry, WARMUP_DAYS, PREMIUM_AFTER_DAYS };

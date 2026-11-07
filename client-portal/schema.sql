@@ -489,3 +489,5 @@ CREATE TABLE IF NOT EXISTS domain_expiry (
   checked_at TIMESTAMPTZ,
   error      TEXT NOT NULL DEFAULT ''
 );
+-- Lookups that rdap.org refused (403, before lookups went to the registries directly) are retried.
+UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LIKE 'Lookup failed (403)%';
