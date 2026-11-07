@@ -495,3 +495,22 @@ UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LI
 UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LIKE 'Lookup failed (429)%';
 -- .co lookups answered 'not found' by RDAP are retried with the WHOIS fallback.
 UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error = 'Not found in the registry' AND domain LIKE '%.co';
+
+-- Active domains: Mithmill's own sending domains (not clients'). The owner
+-- sees all; team members the owner gives access (users.domains_access) see
+-- only the ones they added. Cancelling one emails the alert addresses.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS domains_access BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS active_domains (
+  id           SERIAL PRIMARY KEY,
+  domain       TEXT NOT NULL,
+  users_count  INT NOT NULL DEFAULT 0,
+  created_on   DATE,
+  provider     TEXT NOT NULL DEFAULT '',
+  notes        TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
+  added_by     INT REFERENCES users(id) ON DELETE SET NULL,
+  cancelled_at TIMESTAMPTZ,
+  cancelled_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS active_domains_domain ON active_domains (lower(domain));

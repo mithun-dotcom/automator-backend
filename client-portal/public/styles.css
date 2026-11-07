@@ -1076,3 +1076,15 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .pg-btn:disabled { opacity: .4; cursor: default; }
 .pg-btn .ico { width: 15px; height: 15px; }
 .pg-gap { padding: 0 4px; color: var(--faint); }
+
+/* ---- active domains */
+.ad-dom { display: flex; align-items: center; gap: 12px; }
+.ad-ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: #fff; border: 1px solid var(--border); flex-shrink: 0; }
+.ad-ico .brand-logo { font-size: 17px; }
+.ad-name { font-size: 14px; color: var(--text); }
+.ad-date { font-weight: 600; font-size: 13px; }
+.ad-users { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 14px; padding: 3px 10px; border-radius: 999px; background: var(--brand-50); color: var(--brand-700); }
+.ad-users .ico { width: 14px; height: 14px; }
+.ad-cancel-list { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
+.ad-cancel-list > div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border-radius: 8px; }
+.ad-cancel-list > div:nth-child(odd) { background: var(--surface-2); }

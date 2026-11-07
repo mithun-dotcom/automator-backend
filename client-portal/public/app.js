@@ -329,7 +329,7 @@ function mailboxAvatar(email, type, label) {
   return `<span class="mb-avatar" style="--av-bg:${bg};--av-fg:${fg}">${esc(ini)}${type || label ? `<span class="mb-avatar-badge">${brandLogo(type, label)}</span>` : ''}</span>`;
 }
 const NAV_ICONS = {
-  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/admin/prewarmed': 'flame', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
+  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/admin/prewarmed': 'flame', '#/admin/active-domains': 'shield', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
   '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
 };
 
@@ -1103,7 +1103,7 @@ function setAdminTabs() {
     ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
     return;
   }
-  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/prewarmed', 'Pre-warmed'], ['#/admin/invoices', 'Invoices']);
+  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/prewarmed', 'Pre-warmed'], ...(canActiveDomains() ? [['#/admin/active-domains', 'Active domains']] : []), ['#/admin/invoices', 'Invoices']);
   if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
   if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/locations', 'Locations'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
@@ -1123,6 +1123,7 @@ async function renderAdmin(page, arg, sub) {
   if ((page === 'domains' || page === 'mailboxes') && !state.samples) state.samples = await api('GET', '/api/upload-samples');
   if (page === 'domains') return arg ? adminDomainClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/domains`)) : adminDomains();
   if (page === 'mailboxes') return arg ? adminMailboxClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/mailboxes`)) : adminMailboxes();
+  if (page === 'active-domains') return canActiveDomains() ? adminActiveDomains(await api('GET', '/api/admin/active-domains')) : go('#/admin/orders');
   if (page === 'prewarmed') return isReseller() ? go('#/admin/orders') : adminPrewarmed(await api('GET', '/api/admin/prewarmed'));
   if (page === 'locations') return isOwner() ? renderLocations(await api('GET', '/api/admin/locations')) : go('#/admin/orders');
   if (page === 'resellers') {
@@ -2262,16 +2263,17 @@ function renderTeam(team) {
       <div class="card">
         <div class="card-head"><h2>Members</h2></div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th title="Separated members only see the clients they added">Separated</th><th>Account</th><th>Added</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th title="Separated members only see the clients they added">Separated</th><th title="Can use Active domains (they only see the domains they add)">Active domains</th><th>Account</th><th>Added</th><th></th></tr></thead>
           <tbody>${members.map((m) => `<tr>
             <td>${esc(m.name || '—')}</td><td>${esc(m.email)}</td>
             <td>${m.role === 'admin' ? '<span class="badge b-in_progress">Owner</span>' : 'Team member'}</td>
             <td>${m.role === 'staff' ? `<label class="switch" title="Only sees the clients they added"><input type="checkbox" data-separate="${m.id}" aria-label="Separated: ${esc(m.email)}" ${m.separated ? 'checked' : ''}><span></span></label>` : '<span class="muted small">Sees all</span>'}</td>
+            <td>${m.role === 'staff' ? `<label class="switch" title="Can use Active domains (only the domains they add)"><input type="checkbox" data-domains-access="${m.id}" aria-label="Active domains: ${esc(m.email)}" ${m.domains_access ? 'checked' : ''}><span></span></label>` : '<span class="muted small">All</span>'}</td>
             <td>${m.password_set ? '<span class="badge b-active">Joined</span>' : '<span class="badge b-pending">Not joined</span>'}</td>
             <td>${fmtDate(m.created_at)}</td>
             <td>${m.role === 'staff' ? `<div class="row" style="flex-wrap:nowrap;gap:6px">${watchBtn(m.id)}<button class="btn btn-sm btn-danger" data-remove-member="${m.id}" data-email="${esc(m.email)}">Remove</button></div>` : ''}</td>
           </tr>`).join('')}
-          ${invites.map((i) => `<tr><td>${esc(i.name || '—')}</td><td>${esc(i.email)}</td><td>Team member</td><td>${i.separated ? '<span class="badge b-pending">Separated</span>' : '<span class="muted small">No</span>'}</td><td><span class="badge b-in_progress">Invited</span></td><td>${fmtDate(i.created_at)}</td>
+          ${invites.map((i) => `<tr><td>${esc(i.name || '—')}</td><td>${esc(i.email)}</td><td>Team member</td><td>${i.separated ? '<span class="badge b-pending">Separated</span>' : '<span class="muted small">No</span>'}</td><td><span class="muted small">After joining</span></td><td><span class="badge b-in_progress">Invited</span></td><td>${fmtDate(i.created_at)}</td>
             <td><button class="btn btn-sm btn-ghost" data-revoke-team="${i.id}">Revoke invite</button></td></tr>`).join('')}</tbody>
         </table></div>
       </div>
@@ -2294,6 +2296,14 @@ function renderTeam(team) {
     document.getElementById('team-link').innerHTML = `<div class="note" style="margin-top:12px"><span class="note-icon">${icon('link')}</span><div style="flex:1;min-width:0">
       <strong>Team invite for ${esc(d.email)}</strong> ${r.emailed ? '(also emailed)' : '(not emailed — share it yourself)'}
       <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input readonly value="${esc(r.link)}"></div></div></div>`;
+  });
+  document.querySelectorAll('[data-domains-access]').forEach((c) => {
+    c.onchange = async () => {
+      try {
+        await api('PATCH', `${API()}/team/${c.dataset.domainsAccess}`, { domains_access: c.checked });
+        toast(c.checked ? 'They can now use Active domains (only the domains they add)' : 'Active domains access removed');
+      } catch (ex) { c.checked = !c.checked; toast(ex.message); }
+    };
   });
   document.querySelectorAll('[data-separate]').forEach((c) => {
     c.onchange = async () => {
@@ -3792,6 +3802,204 @@ function renderMyDomains(rows, hostsData = {}) {
 }
 
 // Admin: clients and their domains.
+// ------------------------------------------------------------------ active domains
+// Mithmill's own sending domains. The owner sees all; team members the owner
+// gives access see only the ones they add. Cancel emails the owner a list to
+// cancel (with each domain's creation date and users).
+function canActiveDomains() { return isOwner() || Boolean(state.me && state.me.role === 'staff' && state.me.domains_access); }
+function adminActiveDomains(data) {
+  const { rows, team, today } = data;
+  const ui = state.adUi || (state.adUi = { tab: 'active', q: '', by: '', page: 1, sel: new Set() });
+  const PAGE = 50;
+  const ids = new Set(rows.map((r) => r.id));
+  [...ui.sel].forEach((id) => { if (!ids.has(id)) ui.sel.delete(id); });
+  const age = (d) => (d ? Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${String(d).slice(0, 10)}T00:00:00Z`)) / 86400000) : null);
+  const active = rows.filter((r) => r.status === 'active');
+  const cancelled = rows.filter((r) => r.status === 'cancelled');
+  const users = active.reduce((n, r) => n + (r.users_count || 0), 0);
+  const month = today.slice(0, 7);
+  const addedMonth = active.filter((r) => String(r.created_on || '').slice(0, 7) === month).length;
+  const who = (r) => r.added_name || r.added_email || '—';
+  const owner = isOwner();
+  const card = (tone, ico, label, value, sub) => `<div class="inv-kpi kpi-${tone}" style="cursor:default"><span class="inv-kpi-ico">${icon(ico)}</span><span class="inv-kpi-body"><span class="inv-kpi-label">${label}</span><span class="inv-kpi-value">${value}</span><span class="inv-kpi-sub">${sub}</span></span></div>`;
+
+  shell(ADMIN_TABS, '#/admin/active-domains', `
+    <div class="page-head"><div><h1>Active domains</h1><p class="muted">${owner ? 'Your sending domains, with their creation date and users. Team members you give access (Team page) see only the domains they add.' : 'The domains you\'ve added, with their creation date and users.'} Cancelling a domain emails ${owner ? 'you' : 'the owner'} the list to cancel.</p></div>
+      <div class="row"><a class="btn" href="/api/active-domains-template.csv">${icon('download')}Sample CSV</a><button class="btn btn-primary" id="ad-add">${icon('order')}Add domains</button></div></div>
+    <div class="stack">
+      <div class="inv-kpis">
+        ${card('green', 'shield', 'Active domains', active.length, `${addedMonth} created this month`)}
+        ${card('blue', 'team', 'Users', users, `across ${active.length} domain${active.length === 1 ? '' : 's'}`)}
+        ${card('amber', 'calendar', 'Average age', active.length ? `${Math.round(active.reduce((n, r) => n + (age(r.created_on) || 0), 0) / active.length)} days` : '—', 'since creation')}
+        ${card('red', 'close', 'Cancelled', cancelled.length, 'marked for cancellation')}
+      </div>
+      <div class="card">
+        <div class="filter-bar pw-filters">
+          <div class="seg">${[['active', `Active · ${active.length}`], ['cancelled', `Cancelled · ${cancelled.length}`]].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-adtab="${k}">${l}</button>`).join('')}</div>
+          <input type="search" class="fb-q" id="ad-q" placeholder="Search domain, provider, notes…" value="${esc(ui.q)}">
+          ${owner && team.length > 1 ? `<select id="ad-by"><option value="">Added by: anyone</option>${team.map((t) => `<option value="${t.id}" ${String(ui.by) === String(t.id) ? 'selected' : ''}>${esc(t.name || t.email)}</option>`).join('')}</select>` : ''}
+          <button type="button" class="btn btn-sm" id="ad-dl">${icon('download')}<span>Download</span></button>
+        </div>
+        <div class="pw-bulk" id="ad-bulk" hidden><span id="ad-count"></span>
+          ${ui.tab === 'active' ? `<button class="btn btn-sm btn-danger-solid" id="ad-cancel">${icon('close')}Cancel domains</button>` : `<button class="btn btn-sm" id="ad-restore">${icon('refresh')}Restore</button>`}
+          <button class="btn btn-sm btn-ghost menu-danger" id="ad-del">Delete</button>
+          <button class="btn btn-sm btn-ghost" id="ad-clear">Clear</button></div>
+        <div id="ad-list"></div>
+      </div>
+    </div>`);
+
+  const matches = () => {
+    const words = ui.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return rows.filter((r) => r.status === ui.tab && (!ui.by || String(r.added_by) === String(ui.by))
+      && words.every((w) => `${r.domain} ${r.provider} ${r.notes} ${who(r)}`.toLowerCase().includes(w)));
+  };
+  const toCsv = (list) => [['domain', 'users', 'created', 'provider', 'notes', 'status', 'added by', 'cancelled on'],
+    ...list.map((r) => [r.domain, r.users_count, String(r.created_on || '').slice(0, 10), r.provider, r.notes, r.status, who(r), r.cancelled_at ? String(r.cancelled_at).slice(0, 10) : ''])]
+    .map((row) => row.map((v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }).join(',')).join('\n');
+  const download = (list) => {
+    if (!list.length) return toast('Nothing to download');
+    const url = URL.createObjectURL(new Blob([toCsv(list)], { type: 'text/csv' }));
+    const a = Object.assign(document.createElement('a'), { href: url, download: `active-domains-${today}.csv` });
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+  };
+  const reload = async () => adminActiveDomains(await api('GET', '/api/admin/active-domains'));
+
+  function renderList() {
+    const filtered = matches();
+    const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
+    ui.page = Math.min(Math.max(1, ui.page), pages);
+    const slice = filtered.slice((ui.page - 1) * PAGE, ui.page * PAGE);
+    const allOn = slice.length && slice.every((r) => ui.sel.has(r.id));
+    const pageNums = () => {
+      const out = [];
+      for (let i = 1; i <= pages; i++) if (i === 1 || i === pages || Math.abs(i - ui.page) <= 1) out.push(i); else if (out[out.length - 1] !== '…') out.push('…');
+      return out.map((i) => (i === '…' ? '<span class="pg-gap">…</span>' : `<button type="button" class="pg-btn ${i === ui.page ? 'on' : ''}" data-page="${i}">${i}</button>`)).join('');
+    };
+    document.getElementById('ad-list').innerHTML = filtered.length ? `
+      <div class="table-wrap mb-wrap"><table class="mb-table ad-table">
+        <thead><tr><th class="mb-chk"><input type="checkbox" id="ad-all" aria-label="Select this page" ${allOn ? 'checked' : ''}></th><th>Domain</th><th>Created</th><th class="num">Users</th>${owner ? '<th>Added by</th>' : ''}<th>${ui.tab === 'cancelled' ? 'Cancelled' : 'Status'}</th><th></th></tr></thead>
+        <tbody>${slice.map((r) => {
+          const a = age(r.created_on);
+          return `<tr data-id="${r.id}">
+          <td class="mb-chk"><input type="checkbox" class="ad-sel" value="${r.id}" ${ui.sel.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.domain)}"></td>
+          <td><div class="ad-dom"><span class="ad-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="ad-name">${esc(r.domain)}</strong>${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}</div>
+            <button class="icon-btn icon-btn-sm mb-copy" data-copy-ns="${esc(r.domain)}" data-copy-what="Domain" title="Copy domain">${icon('copy')}</button></div></td>
+          <td class="nowrap">${r.created_on ? `<strong class="ad-date">${fmtDate(String(r.created_on).slice(0, 10))}</strong><div class="pw-sub">${a === 0 ? 'today' : a > 0 ? `${a} day${a === 1 ? '' : 's'} ago` : 'in the future'}</div>` : '<span class="muted">—</span>'}</td>
+          <td class="num"><span class="ad-users">${icon('team')}${r.users_count}</span></td>
+          ${owner ? `<td><div class="pw-sold">${personAvatar(who(r), r.added_email || '', 'av-sm')}<span class="small">${esc(who(r))}</span></div></td>` : ''}
+          <td>${r.status === 'active' ? '<span class="badge b-active">Active</span>' : `<span class="badge b-cancelled">Cancelled</span><div class="pw-sub">${r.cancelled_at ? fmtDate(String(r.cancelled_at).slice(0, 10)) : ''}${r.cancelled_name || r.cancelled_email ? ` · by ${esc(r.cancelled_name || r.cancelled_email)}` : ''}</div>`}</td>
+          <td><div class="row inv-actions">
+            ${r.status === 'active' ? `<button class="btn btn-sm btn-danger" data-ad-cancel="${r.id}">${icon('close')}Cancel</button>` : `<button class="btn btn-sm" data-ad-restore="${r.id}">${icon('refresh')}Restore</button>`}
+            ${moreMenu(`<button type="button" class="menu-item" data-ad-edit="${r.id}">${icon('settings')}Edit</button><div class="menu-sep"></div><button type="button" class="menu-item menu-danger" data-ad-del="${r.id}">${icon('close')}Delete</button>`)}
+          </div></td></tr>`;
+        }).join('')}</tbody></table></div>
+      <div class="pager"><span class="muted small">Showing ${(ui.page - 1) * PAGE + 1}–${Math.min(ui.page * PAGE, filtered.length)} of ${filtered.length}</span>
+        ${pages > 1 ? `<div class="pg"><button type="button" class="pg-btn" data-page="${ui.page - 1}" ${ui.page === 1 ? 'disabled' : ''} aria-label="Previous page">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(-90deg)"')}</button>${pageNums()}<button type="button" class="pg-btn" data-page="${ui.page + 1}" ${ui.page === pages ? 'disabled' : ''} aria-label="Next page">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(90deg)"')}</button></div>` : ''}</div>`
+      : `<div class="empty">${ui.q || ui.by ? 'No domains match.' : ui.tab === 'cancelled' ? 'No cancelled domains.' : 'No active domains yet. Click Add domains.'}</div>`;
+    document.querySelectorAll('.ad-sel').forEach((c) => { c.onchange = () => { if (c.checked) ui.sel.add(Number(c.value)); else ui.sel.delete(Number(c.value)); renderList(); }; });
+    const all = document.getElementById('ad-all');
+    if (all) all.onchange = () => { slice.forEach((r) => (all.checked ? ui.sel.add(r.id) : ui.sel.delete(r.id))); renderList(); };
+    document.querySelectorAll('#ad-list [data-page]').forEach((b) => { b.onclick = () => { ui.page = Number(b.dataset.page); renderList(); }; });
+    document.querySelectorAll('[data-ad-cancel]').forEach((b) => { b.onclick = () => openDomainCancel([Number(b.dataset.adCancel)], rows, reload); });
+    document.querySelectorAll('[data-ad-restore]').forEach((b) => { b.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [Number(b.dataset.adRestore)] }); toast('Restored to active'); await reload(); } catch (ex) { toast(ex.message); } }; });
+    document.querySelectorAll('[data-ad-del]').forEach((b) => { b.onclick = () => del([Number(b.dataset.adDel)]); });
+    document.querySelectorAll('[data-ad-edit]').forEach((b) => { b.onclick = () => openDomainEdit(rows.find((r) => r.id === Number(b.dataset.adEdit)), reload); });
+    const n = ui.sel.size;
+    document.getElementById('ad-bulk').hidden = !n;
+    document.getElementById('ad-count').innerHTML = `<strong>${n}</strong> selected${n < filtered.length ? ` · <button type="button" class="link-btn" id="ad-sel-all">Select all ${filtered.length}</button>` : ''}`;
+    const sa = document.getElementById('ad-sel-all');
+    if (sa) sa.onclick = () => { filtered.forEach((r) => ui.sel.add(r.id)); renderList(); };
+    document.querySelector('#ad-dl span').textContent = `Download ${filtered.length}`;
+    document.getElementById('ad-dl').onclick = () => download(ui.sel.size ? rows.filter((r) => ui.sel.has(r.id)) : filtered);
+  }
+  const del = async (list) => {
+    if (!confirm(`Delete ${list.length} domain${list.length === 1 ? '' : 's'} from this list? No email is sent. To have ${list.length === 1 ? 'it' : 'them'} cancelled, use Cancel instead.`)) return;
+    try { const r = await api('POST', '/api/admin/active-domains/delete', { ids: list }); toast(`${r.deleted} deleted`); ui.sel.clear(); await reload(); } catch (ex) { toast(ex.message); }
+  };
+  renderList();
+  document.querySelectorAll('[data-adtab]').forEach((b) => { b.onclick = () => { ui.tab = b.dataset.adtab; ui.page = 1; ui.sel.clear(); adminActiveDomains(data); }; });
+  let qt;
+  document.getElementById('ad-q').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { ui.q = e.target.value; ui.page = 1; renderList(); }, 150); };
+  const by = document.getElementById('ad-by');
+  if (by) by.onchange = () => { ui.by = by.value; ui.page = 1; renderList(); };
+  document.getElementById('ad-clear').onclick = () => { ui.sel.clear(); renderList(); };
+  const bc = document.getElementById('ad-cancel');
+  if (bc) bc.onclick = () => openDomainCancel([...ui.sel], rows, async () => { ui.sel.clear(); await reload(); });
+  const br = document.getElementById('ad-restore');
+  if (br) br.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [...ui.sel] }); toast('Restored to active'); ui.sel.clear(); await reload(); } catch (ex) { toast(ex.message); } };
+  document.getElementById('ad-del').onclick = () => del([...ui.sel]);
+  document.getElementById('ad-add').onclick = () => openDomainAdd(reload);
+}
+
+function modalShell(title, body) {
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal';
+  dlg.innerHTML = `<form><div class="modal-head"><h2>${title}</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">${icon('close')}</button></div>${body}<div class="error"></div></form>`;
+  document.body.appendChild(dlg);
+  dlg.querySelector('[data-close]').onclick = () => dlg.close();
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.showModal();
+  return dlg;
+}
+
+function openDomainCancel(ids, rows, done) {
+  const list = rows.filter((r) => ids.includes(r.id) && r.status === 'active');
+  if (!list.length) return toast('Those domains are already cancelled');
+  const users = list.reduce((n, r) => n + (r.users_count || 0), 0);
+  const dlg = modalShell(`Cancel ${list.length} domain${list.length === 1 ? '' : 's'}`, `
+    <div class="note" style="margin-bottom:14px"><span class="note-icon">${icon('mail')}</span><div>${isOwner() ? 'You\'ll' : 'The owner will'} get an email listing ${list.length === 1 ? 'this domain' : 'these domains'} with the creation date and users, to cancel ${list.length === 1 ? 'it' : 'them'}.</div></div>
+    <div class="ad-cancel-list">${list.slice(0, 50).map((r) => `<div><strong>${esc(r.domain)}</strong><span class="muted small">${r.created_on ? `created ${fmtDate(String(r.created_on).slice(0, 10))}` : 'no creation date'} · ${r.users_count} user${r.users_count === 1 ? '' : 's'}</span></div>`).join('')}${list.length > 50 ? `<div class="muted small">+${list.length - 50} more</div>` : ''}</div>
+    <p class="muted small" style="margin:8px 0 12px">${list.length} domain${list.length === 1 ? '' : 's'} · ${users} user${users === 1 ? '' : 's'} in total</p>
+    <div class="field"><label>Note <span class="muted small">(optional, added to the email)</span></label><textarea name="note" style="min-height:64px" placeholder="e.g. Client churned; cancel before the next renewal"></textarea></div>
+    <div class="row"><button class="btn btn-danger-solid" type="submit">${icon('close')}Mark cancelled &amp; email</button><button class="btn" type="button" data-close2>Keep them</button></div>`);
+  dlg.querySelector('[data-close2]').onclick = () => dlg.close();
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    const r = await api('POST', '/api/admin/active-domains/cancel', { ids: list.map((x) => x.id), note: d.note });
+    toast(`${r.cancelled} marked cancelled${r.emailed ? ` · email sent to ${r.to.join(', ')}` : ' · email not sent (check mail settings)'}`);
+    dlg.close();
+    await done();
+  });
+}
+
+function openDomainAdd(done) {
+  const dlg = modalShell('Add domains', `
+    <p class="muted small" style="margin:-6px 0 12px">One domain per line. Optionally add the users and creation date after a comma: <span class="mono">acme.com, 3, 2026-10-01</span>. Or upload a CSV with columns <span class="mono">domain, users, created, provider, notes</span>.</p>
+    <div class="field"><label>Domains</label><textarea name="text" style="min-height:140px" placeholder="acmeoutreach.com, 3, 2026-10-01&#10;tryacmeoutreach.com, 5"></textarea></div>
+    <div class="field"><label>Or upload a CSV</label><input type="file" name="file" accept=".csv,text/csv"></div>
+    <div class="grid-2">
+      <div class="field"><label>Users <span class="muted small">(lines without one)</span></label><input type="number" name="users" min="0" value="0"></div>
+      <div class="field"><label>Created <span class="muted small">(lines without a date)</span></label><input type="date" name="created" value="${new Date().toISOString().slice(0, 10)}"></div>
+    </div>
+    <div class="field"><label>Provider <span class="muted small">(optional)</span></label><select name="provider"><option value="">—</option><option>Google Workspace</option><option>Microsoft 365</option><option>Azure</option><option>Other</option></select></div>
+    <div class="row"><button class="btn btn-primary" type="submit">${icon('check')}Add domains</button></div>`);
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    const file = dlg.querySelector('[name=file]').files[0];
+    const text = file ? await file.text() : d.text;
+    const r = await api('POST', '/api/admin/active-domains', { text, users: d.users, created: d.created, provider: d.provider });
+    toast(`${r.added} added${r.updated ? `, ${r.updated} updated` : ''}${r.taken.length ? ` · ${r.taken.length} already added by someone else` : ''}`);
+    dlg.close();
+    await done();
+  });
+}
+
+function openDomainEdit(r, done) {
+  if (!r) return;
+  const dlg = modalShell(esc(r.domain), `
+    <div class="grid-2">
+      <div class="field"><label>Users</label><input type="number" name="users_count" min="0" value="${r.users_count}"></div>
+      <div class="field"><label>Created</label><input type="date" name="created_on" value="${String(r.created_on || '').slice(0, 10)}"></div>
+    </div>
+    <div class="field"><label>Provider</label><input name="provider" value="${esc(r.provider)}" placeholder="e.g. Google Workspace"></div>
+    <div class="field"><label>Notes</label><input name="notes" value="${esc(r.notes)}"></div>
+    <div class="row"><button class="btn btn-primary" type="submit">Save</button></div>`);
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    await api('PATCH', `/api/admin/active-domains/${r.id}`, { users_count: d.users_count, created_on: d.created_on || undefined, provider: d.provider, notes: d.notes });
+    toast('Saved');
+    dlg.close();
+    await done();
+  });
+}
+
 // ------------------------------------------------------------------ pre-warmed stock
 // Mithmill's own warmed inboxes: Warming up (14 days) -> Available -> Premium
 // warm-up (after 30 days unsold), and Sold (tagged to a client). Moves happen

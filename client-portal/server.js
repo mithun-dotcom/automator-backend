@@ -84,7 +84,7 @@ const auth = asyncRoute(async (req, res, next) => {
   const token = sessionToken(req);
   if (!token) throw new HttpError(401, 'Please log in');
   const { rows: [user] } = await query(
-    'SELECT id, email, name, company, role, separated, block_vpn, access_blocked FROM users WHERE id = $1', [token.uid],
+    'SELECT id, email, name, company, role, separated, block_vpn, access_blocked, domains_access FROM users WHERE id = $1', [token.uid],
   );
   if (!user) throw new HttpError(401, 'Please log in');
   if (token.imp) {
@@ -2679,7 +2679,7 @@ admin.get('/locations/:id', ownerOnly, asyncRoute(async (req, res) => {
 
 admin.get('/team', ownerOnly, asyncRoute(async (req, res) => {
   const [members, invites, log] = await Promise.all([
-    query("SELECT id, email, name, role, password_set, separated, created_at FROM users WHERE role IN ('admin', 'staff') ORDER BY role, created_at"),
+    query("SELECT id, email, name, role, password_set, separated, domains_access, created_at FROM users WHERE role IN ('admin', 'staff') ORDER BY role, created_at"),
     query(`SELECT id, email, name, separated, expires_at, created_at FROM invites
            WHERE role = 'staff' AND accepted_at IS NULL AND expires_at > now() ORDER BY created_at DESC`),
     query('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 300'),
@@ -2715,6 +2715,12 @@ admin.post('/team', ownerOnly, audited('invited', 'invite', (req, body) => (body
 
 // Separated: the team member only sees the clients they added themselves.
 admin.patch('/team/:id', ownerOnly, audited('edited', 'user', byParam, async (req, res) => {
+  if (req.body.domains_access !== undefined) {
+    const { rows: [d] } = await query("UPDATE users SET domains_access = $2 WHERE id = $1 AND role = 'staff' RETURNING id",
+      [Number(req.params.id), req.body.domains_access === true]);
+    if (!d) throw new HttpError(400, 'Only team members can be given access');
+    return res.json({ ok: true });
+  }
   const { rows: [u] } = await query("UPDATE users SET separated = $2 WHERE id = $1 AND role = 'staff' RETURNING id",
     [Number(req.params.id), req.body.separated === true]);
   if (!u) throw new HttpError(400, 'Only team members can be separated');
@@ -3214,6 +3220,143 @@ app.get('/brand/:id/logo', asyncRoute(async (req, res) => {
   res.set('Cache-Control', 'public, max-age=86400').type(r.logo_type).send(r.logo);
 }));
 
+
+
+// ---------------------------------------------------------------- active domains
+// Mithmill's own domains. Owner: all of them. Team members with access: the
+// ones they added. Cancel marks them cancelled and emails the alert addresses.
+
+const domainsAllowed = (req, res, next) => (req.user.role === 'admin' || (req.user.role === 'staff' && req.user.domains_access)
+  ? next() : next(new HttpError(403, 'Not allowed')));
+const domScope = (req, alias = 'd') => (req.user.role === 'admin' ? 'true' : `${alias}.added_by = ${Number(req.user.id)}`);
+
+admin.get('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
+  const { rows } = await query(`SELECT d.*, a.name AS added_name, a.email AS added_email, c.name AS cancelled_name, c.email AS cancelled_email
+    FROM active_domains d LEFT JOIN users a ON a.id = d.added_by LEFT JOIN users c ON c.id = d.cancelled_by
+    WHERE ${domScope(req)} ORDER BY d.status, d.created_on DESC NULLS LAST, d.domain`);
+  const team = req.user.role === 'admin'
+    ? (await query("SELECT id, name, email FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows : [];
+  res.json({ rows, team, today: billing.today() });
+}));
+
+app.get('/api/active-domains-template.csv', (req, res) => {
+  res.type('text/csv').attachment('active-domains-sample.csv')
+    .send('domain,users,created,provider,notes\nacmeoutreach.com,3,2026-10-01,Google Workspace,\ntryacmeoutreach.com,5,2026-10-12,Microsoft 365,Client X campaign\n');
+});
+
+// Add domains: CSV text (domain, users, created, provider, notes) or one per line.
+admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
+  const text = String(req.body.text || '').replace(/^﻿/, '');
+  if (!text.trim()) throw new HttpError(400, 'Add at least one domain');
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const split = (l) => onboarding.parseCsv(l)[0] || [];
+  const first = split(lines[0]).map((h) => String(h).toLowerCase().trim());
+  const hasHeader = first.includes('domain');
+  const col = (name, alts) => { const i = first.findIndex((h) => [name, ...alts].includes(h.replace(/[^a-z]/g, ''))); return i; };
+  const idx = hasHeader
+    ? { domain: col('domain', ['domains']), users: col('users', ['user', 'usercount', 'mailboxes', 'inboxes', 'numberofusers']), created: col('created', ['createdon', 'creationdate', 'date', 'createdat']), provider: col('provider', ['type']), notes: col('notes', ['note']) }
+    : { domain: 0, users: 1, created: 2, provider: 3, notes: 4 };
+  const formDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.created || '')) ? req.body.created : null;
+  const formUsers = Number.parseInt(req.body.users, 10);
+  const items = [];
+  const bad = [];
+  for (const l of hasHeader ? lines.slice(1) : lines) {
+    const c = split(l);
+    const domain = dnscheck.clean(c[idx.domain]);
+    if (!domain) { if (c[idx.domain]) bad.push(c[idx.domain]); continue; }
+    const users = Number.parseInt(idx.users >= 0 ? c[idx.users] : '', 10);
+    const created = idx.created >= 0 && c[idx.created] ? mailboxes.parseDate(c[idx.created]) : null;
+    if (created === undefined) throw new HttpError(400, `Couldn't read the date "${c[idx.created]}" for ${domain}. Use YYYY-MM-DD.`);
+    items.push({ domain, users: Number.isFinite(users) ? Math.max(0, users) : (Number.isFinite(formUsers) ? formUsers : 0),
+      created: created || formDate || billing.today(), provider: (idx.provider >= 0 && String(c[idx.provider] || '').trim()) ? str(c[idx.provider], 80) : str(req.body.provider, 80), notes: idx.notes >= 0 ? str(c[idx.notes] || '', 300) : '' });
+  }
+  if (!items.length) throw new HttpError(400, bad.length ? `These aren't domains: ${bad.slice(0, 3).join(', ')}` : 'Add at least one domain');
+  let added = 0;
+  let updated = 0;
+  const taken = [];
+  for (const it of items) {
+    const { rows: [ex] } = await query('SELECT id, added_by, status FROM active_domains WHERE lower(domain) = $1', [it.domain]);
+    if (ex) {
+      if (req.user.role !== 'admin' && ex.added_by !== req.user.id) { taken.push(it.domain); it.skip = true; continue; }
+      await query(`UPDATE active_domains SET users_count = $2, created_on = $3, provider = COALESCE(NULLIF($4, ''), provider), notes = COALESCE(NULLIF($5, ''), notes),
+          status = 'active', cancelled_at = NULL, cancelled_by = NULL WHERE id = $1`, [ex.id, it.users, it.created, it.provider, it.notes]);
+      updated += 1;
+    } else {
+      await query('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by) VALUES ($1, $2, $3, $4, $5, $6)',
+        [it.domain, it.users, it.created, it.provider, it.notes, req.user.id]);
+      added += 1;
+    }
+  }
+  if (added + updated) await audit.record(req.user, 'added', `${added + updated} active domain${added + updated === 1 ? '' : 's'}`,
+    [{ field: 'Domains', from: '', to: items.filter((i) => !i.skip).slice(0, 10).map((i) => i.domain).join(', ') + (added + updated > 10 ? ` +${added + updated - 10} more` : '') }],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ added, updated, taken });
+}));
+
+admin.patch('/active-domains/:id', domainsAllowed, asyncRoute(async (req, res) => {
+  const b = req.body;
+  const users = Number.parseInt(b.users_count, 10);
+  const created = b.created_on === undefined ? undefined : mailboxes.parseDate(b.created_on);
+  if (created === undefined && b.created_on !== undefined) throw new HttpError(400, 'Use a date like 2026-11-01');
+  const { rows: [d] } = await query(`UPDATE active_domains d SET users_count = COALESCE($2, users_count), created_on = COALESCE($3, created_on),
+      provider = COALESCE($4, provider), notes = COALESCE($5, notes) WHERE id = $1 AND ${domScope(req)} RETURNING id`,
+  [Number(req.params.id), Number.isFinite(users) ? Math.max(0, users) : null, created || null,
+    b.provider === undefined ? null : str(b.provider, 80), b.notes === undefined ? null : str(b.notes, 300)]);
+  if (!d) throw new HttpError(404, 'Domain not found');
+  res.json({ ok: true });
+}));
+
+const domIds = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);
+
+// Cancel: marks them cancelled and emails the alert addresses (Settings) the
+// list with each domain's creation date and users, to cancel them.
+admin.post('/active-domains/cancel', domainsAllowed, asyncRoute(async (req, res) => {
+  const ids = domIds(req.body.ids);
+  if (!ids.length) throw new HttpError(400, 'Select the domains to cancel');
+  const note = str(req.body.note, 1000);
+  const { rows } = await query(`UPDATE active_domains d SET status = 'cancelled', cancelled_at = now(), cancelled_by = $2
+    WHERE id = ANY($1) AND status = 'active' AND ${domScope(req)} RETURNING domain, users_count, created_on, provider, notes`, [ids, req.user.id]);
+  if (!rows.length) throw new HttpError(400, 'Those domains are already cancelled');
+  rows.sort((a, b) => String(a.created_on).localeCompare(String(b.created_on)) || a.domain.localeCompare(b.domain));
+  const { rows: [setting] } = await query("SELECT value FROM settings WHERE key = 'overdue_alert_emails'");
+  const to = String(setting ? setting.value : (process.env.OVERDUE_ALERT_EMAILS || 'mithun@mithmill.com'))
+    .split(/[\s,;]+/).filter((e) => isEmail(e));
+  const who = req.user.watchedBy ? `${req.user.watchedBy.name || 'Owner'} (as ${req.user.name || req.user.email})` : (req.user.name || req.user.email);
+  const totalUsers = rows.reduce((n, r) => n + (r.users_count || 0), 0);
+  const fmt = (d) => (d ? billing.prettyDate(String(d).slice(0, 10)) : 'unknown');
+  const list = rows.map((r) => `- ${r.domain}: created ${fmt(r.created_on)}, ${r.users_count} user${r.users_count === 1 ? '' : 's'}${r.provider ? `, ${r.provider}` : ''}${r.notes ? ` (${r.notes})` : ''}`).join('\n');
+  let emailed = false;
+  if (to.length) {
+    emailed = await sendMail({
+      to: to.join(', '),
+      subject: `Cancel ${rows.length} domain${rows.length === 1 ? '' : 's'}: marked cancelled by ${who}`,
+      text: `${who} marked ${rows.length} domain${rows.length === 1 ? '' : 's'} (${totalUsers} user${totalUsers === 1 ? '' : 's'}) as cancelled in the client portal. Please cancel ${rows.length === 1 ? 'it' : 'them'}.\n\n${list}${note ? `\n\nNote: ${note}` : ''}\n\nActive domains: ${baseUrl(req)}/#/admin/active-domains`,
+      heading: `Please cancel ${rows.length} domain${rows.length === 1 ? '' : 's'}`,
+      cta: { label: 'Open Active domains', url: `${baseUrl(req)}/#/admin/active-domains` },
+      reason: 'You receive this because your email is set for alerts in the client portal settings.',
+    }).catch((err) => { console.warn('[active-domains] email failed:', err.message); return false; });
+  }
+  await audit.record(req.user, 'edited', `${rows.length} active domain${rows.length === 1 ? '' : 's'} marked cancelled`,
+    [{ field: 'Domains', from: '', to: rows.slice(0, 10).map((r) => r.domain).join(', ') + (rows.length > 10 ? ` +${rows.length - 10} more` : '') }],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ cancelled: rows.length, emailed: Boolean(emailed), to });
+}));
+
+admin.post('/active-domains/restore', domainsAllowed, asyncRoute(async (req, res) => {
+  const ids = domIds(req.body.ids);
+  const r = await query(`UPDATE active_domains d SET status = 'active', cancelled_at = NULL, cancelled_by = NULL WHERE id = ANY($1) AND ${domScope(req)}`, [ids]);
+  res.json({ restored: r.rowCount });
+}));
+
+admin.post('/active-domains/delete', domainsAllowed, asyncRoute(async (req, res) => {
+  const ids = domIds(req.body.ids);
+  const r = await query(`DELETE FROM active_domains d WHERE id = ANY($1) AND ${domScope(req)} RETURNING domain`, [ids]);
+  if (r.rowCount) {
+    await audit.record(req.user, 'deleted', `${r.rowCount} active domain${r.rowCount === 1 ? '' : 's'}`,
+      [{ field: 'Domains', from: r.rows.slice(0, 10).map((x) => x.domain).join(', '), to: '' }], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  }
+  res.json({ deleted: r.rowCount });
+}));
 
 // ---------------------------------------------------------------- pre-warmed inboxes
 // Mithmill's own stock of warmed inboxes (admin panel: Pre-warmed). Owner and
