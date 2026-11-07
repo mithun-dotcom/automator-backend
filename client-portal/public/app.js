@@ -282,6 +282,13 @@ function brandLogo(type, label, cls = '') {
   return `<span class="brand-logo brand-${brand} ${cls}" title="${esc(label || '')}">${BRAND_SVG[brand]}${warm ? `<span class="brand-warm">${FLAME_SVG}</span>` : ''}</span>`;
 }
 // Mark + name, for tables and lists.
+// Types sold per domain (pricing.per_domain = inboxes per domain, e.g. Azure:
+// one price per domain of up to 99 inboxes) versus per mailbox.
+const allPricing = () => (state.dash && state.dash.pricing) || (state.admin && state.admin.pricing) || [];
+const perDomain = (type, o) => Number((o && o.per_domain) || (allPricing().find((x) => x.inbox_type === type) || {}).per_domain) || 0;
+const unitPrice = (type) => (perDomain(type) ? `per domain (up to ${perDomain(type)} inboxes)` : 'per mailbox');
+const qtyText = (type, n, o) => (perDomain(type, o) ? `${n} domain${Number(n) === 1 ? '' : 's'}` : `${n} mailbox${Number(n) === 1 ? '' : 'es'}`);
+const qtyCell = (o) => (perDomain(o.inbox_type, o) ? `${o.quantity}<div class="muted small">domain${o.quantity === 1 ? '' : 's'} · up to ${o.quantity * perDomain(o.inbox_type, o)} inboxes</div>` : String(o.quantity));
 const typeChip = (type, label) => (label ? `<span class="type-chip">${brandLogo(type, label)}<span>${esc(label)}</span></span>` : '<span class="muted">—</span>');
 // A mailbox's avatar: initials on a colour picked from the address, with the
 // provider's mark as a badge.
@@ -634,7 +641,7 @@ function batchesTable(orders) {
       <td>${o.batch_name ? `<strong>${esc(o.batch_name)}</strong><div class="muted small">#${o.id}</div>` : `#${o.id}`}</td>
       <td>${multi ? all.map((p) => `<div class="batch-part"><strong>${p.inbox_type === 'other' ? `${brandLogo('other', '')} ${esc(p.batch_name || 'Other service')}` : typeChip(p.inbox_type, p.inbox_label)}</strong> <span class="muted small">× ${p.quantity}${p.status === 'cancelled' ? ' · cancelled' : ''} · ${money(cycleAmount(p))}</span></div>`).join('')
         : typeChip(o.inbox_type, o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
-      <td class="num">${multi ? mailboxes : o.quantity}</td>
+      <td class="num">${multi ? mailboxes : qtyCell(o)}</td>
       <td>${badge(o.status)}</td>
       <td class="num">${o.status === 'cancelled' ? '<span class="muted">—</span>' : money(live.reduce((t, p) => t + cycleAmount(p), 0))}</td>
       <td>${o.status === 'active' ? fmtDate(o.next_billing_date) : '—'}</td>
@@ -804,7 +811,7 @@ function renderBilling() {
         <div class="card-head"><h2>Upcoming renewals</h2><span class="muted small">Reminders are sent 7, 3 and 1 day before each renewal.</span></div>
         ${active.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Renews on</th><th class="num">Amount</th></tr></thead>
-          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${typeChip(o.inbox_type, o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
+          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${typeChip(o.inbox_type, o.inbox_label)}</td><td class="num">${qtyCell(o)}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
         </table></div>` : '<div class="empty">No active batches yet.</div>'}
       </div>
       <div class="card">
@@ -855,7 +862,7 @@ function renderOrder() {
           <button type="button" class="type ${data.inbox_type === p.inbox_type ? 'sel' : ''}" data-type="${esc(p.inbox_type)}">
             <div class="t-logo">${brandLogo(p.inbox_type, p.label)}</div>
             <div class="t-name">${esc(p.label)}</div>
-            <div class="t-price">${money(p.price_per_mailbox)} per mailbox / month</div>
+            <div class="t-price">${money(p.price_per_mailbox)} ${unitPrice(p.inbox_type)} / month</div>
             <div class="t-desc">${esc(p.description || TYPE_INFO[p.inbox_type] || '')}</div>
           </button>`).join('')}</div>
         <div class="row" style="justify-content:flex-end;margin-top:20px"><button class="btn btn-primary" id="next1" ${data.inbox_type ? '' : 'disabled'}>Continue</button></div>
@@ -869,7 +876,7 @@ function renderOrder() {
     body = `
       <form class="card card-pad" id="f2">
         <h2>${esc(price.label)} details</h2>
-        <p class="muted small" style="margin:4px 0 16px">${money(price.price_per_mailbox)} per mailbox / month</p>
+        <p class="muted small" style="margin:4px 0 16px">${money(price.price_per_mailbox)} ${unitPrice(price.inbox_type)} / month</p>
 
         ${own ? '' : `<div class="note note-info" style="margin-bottom:16px"><span class="note-icon">${icon('flame')}</span><div><strong>${esc(price.label)} come ready on our own warmed-up domains.</strong> You don't need to give us any domains or DNS access. Just tell us how many mailboxes you need and invite us to your sequencer below.</div></div>`}
         <div class="csv-box" ${own ? '' : 'hidden'}>
@@ -887,7 +894,7 @@ function renderOrder() {
         </div>
 
         <div class="grid-2">
-          <div class="field"><label for="quantity">Number of mailboxes</label><input id="quantity" name="quantity" type="number" min="1" max="10000" required value="${v('quantity')}"></div>
+          <div class="field"><label for="quantity">${perDomain(price.inbox_type) ? `Number of domains <span class="muted small">(up to ${perDomain(price.inbox_type)} inboxes each)</span>` : 'Number of mailboxes'}</label><input id="quantity" name="quantity" type="number" min="1" max="10000" required value="${v('quantity')}"></div>
           <div class="field"><label>Estimated monthly cost</label><input id="est" disabled value="${money((Number(data.quantity) || 0) * price.price_per_mailbox)}"></div>
         </div>
 
@@ -950,7 +957,7 @@ function renderOrder() {
           <div class="card-head"><h2>Review your order</h2><button class="btn btn-sm" id="edit3">Edit</button></div>
           <div class="card-pad"><dl>
             ${row('Inbox type', price.label)}
-            ${row('Mailboxes', String(data.quantity))}
+            ${perDomain(price.inbox_type) ? row('Domains', `${data.quantity} (up to ${data.quantity * perDomain(price.inbox_type)} inboxes)`) : row('Mailboxes', String(data.quantity))}
             ${row('Onboarding CSV', data.onboarding_filename ? `${data.onboarding_filename} (${data.csv_users} users)` : '')}
             ${row('Domains', lines(data.domains).join('\n'))}
             ${row('Usernames', lines(data.usernames).join('\n'))}
@@ -1055,8 +1062,12 @@ function renderOrder() {
       if (min > 0 && Number(d.quantity) >= min && !data.onboarding_csv) {
         throw new Error(`Orders of ${min} or more mailboxes need the onboarding CSV. Download the sample, fill it in and upload it above.`);
       }
-      if (data.onboarding_csv && Number(d.quantity) !== data.csv_users) {
+      const cap = perDomain(price.inbox_type);
+      if (data.onboarding_csv && !cap && Number(d.quantity) !== data.csv_users) {
         throw new Error(`Your CSV has ${data.csv_users} users but the order is for ${d.quantity} mailboxes. Make them match (one CSV row per mailbox).`);
+      }
+      if (data.onboarding_csv && cap && data.csv_users > Number(d.quantity) * cap) {
+        throw new Error(`Your CSV has ${data.csv_users} users, but ${d.quantity} domain(s) include up to ${Number(d.quantity) * cap} inboxes (${cap} per domain). Order more domains or remove rows.`);
       }
       if (!data.onboarding_csv && !lines(d.domains).length) throw new Error('Add at least one domain');
       if (!data.onboarding_csv && !lines(d.usernames).length) throw new Error('Add at least one username');
@@ -1202,7 +1213,7 @@ function adminOrders(focusId) {
           <strong>#${o.id}</strong>
           <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.parent_order_id ? `<strong>Part of batch #${o.parent_order_id}</strong> (same invoice) · ` : ''}${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}${o.seller ? ` · Sold by ${esc(o.seller)}` : ''}</div></span>
           <span class="hide-sm">${typeChip(o.inbox_type, o.inbox_label)}</span>
-          <span class="hide-sm num">${o.quantity} boxes</span>
+          <span class="hide-sm num">${perDomain(o.inbox_type, o) ? qtyText(o.inbox_type, o.quantity, o) : `${o.quantity} boxes`}</span>
           <span class="hide-sm">${o.status === 'active' && o.next_billing_date ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : `<span class="muted small">Ordered</span> ${fmtDate(o.created_at)}`}</span>
           <span>${badge(o.status)}</span>
         </summary>
@@ -1214,8 +1225,8 @@ function adminOrders(focusId) {
             <dl class="kv">
               ${kv('Type', o.inbox_label)}
               ${o.seller ? kv('Sold by', `${o.seller} (set on the client)`) : ''}
-              ${kv('Mailboxes', String(o.quantity))}
-              ${kv('Price', `${money(o.price_per_mailbox)} / mailbox / month → ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`)}
+              ${perDomain(o.inbox_type, o) ? kv('Domains', `${o.quantity} (up to ${o.quantity * perDomain(o.inbox_type, o)} inboxes)`) : kv('Mailboxes', String(o.quantity))}
+              ${kv('Price', `${money(o.price_per_mailbox)} ${unitPrice(o.inbox_type)} / month → ${money(cycleAmount(o))} per ${perCycle(cycleOf(o))}`)}
               ${kv('Billing', `${cycleName(cycleOf(o))}${o.status === 'active' && o.next_billing_date ? `, next renewal ${fmtDate(o.next_billing_date)}` : ''}`)}
               ${o.domain_invited ? kv('DNS invitation', 'Client says they invited our support email') : ''}
               ${o.sequencer_invited ? kv('Sequencer invitation', 'Client says they invited our support email') : ''}
@@ -1241,8 +1252,8 @@ function adminOrders(focusId) {
               ${o.activated_at ? '' : '<div class="hint">Activating creates the first month\'s invoice and sets the renewal date one month from today.</div>'}
             </div>
             <div class="grid-2">
-              <div class="field"><label>Mailboxes</label><input type="number" name="quantity" min="1" max="10000" required value="${o.quantity}"></div>
-              <div class="field"><label>Price per mailbox ($)</label><input type="number" name="price_per_mailbox" step="0.01" min="0" required value="${o.price_per_mailbox}"></div>
+              <div class="field"><label>${perDomain(o.inbox_type, o) ? 'Domains' : 'Mailboxes'}</label><input type="number" name="quantity" min="1" max="10000" required value="${o.quantity}"></div>
+              <div class="field"><label>Price ${perDomain(o.inbox_type, o) ? 'per domain' : 'per mailbox'} ($)</label><input type="number" name="price_per_mailbox" step="0.01" min="0" required value="${o.price_per_mailbox}"></div>
             </div>
             ${o.status !== 'cancelled' ? cycleFields(cycleOf(o)) : ''}
             <div class="grid-2">
@@ -1434,8 +1445,8 @@ function openBatchDialog(userId) {
           <option value="pending">Pending</option><option value="cancelled">Cancelled (history only)</option></select></div>
       </div>
       <div class="grid-2">
-        <div class="field"><label>Mailboxes</label><input name="quantity" type="number" min="1" max="10000" required></div>
-        <div class="field"><label>Price per mailbox / month ($)</label><input name="price_per_mailbox" type="number" step="0.01" min="0" required></div>
+        <div class="field"><label id="ab-qty-label">Mailboxes</label><input name="quantity" type="number" min="1" max="10000" required></div>
+        <div class="field"><label id="ab-price-label">Price per mailbox / month ($)</label><input name="price_per_mailbox" type="number" step="0.01" min="0" required></div>
       </div>
       <div class="grid-2">
         <div class="field"><label>Start date</label><input name="start_date" type="date" value="${esc(today)}"><div class="hint">When the mailboxes went live / were purchased.</div></div>
@@ -1463,7 +1474,12 @@ function openBatchDialog(userId) {
   const f = dlg.querySelector('form');
   const fillPrice = () => { if (f.user_id.value && f.inbox_type.value) f.price_per_mailbox.value = priceFor(f.user_id.value, f.inbox_type.value); };
   f.user_id.onchange = fillPrice;
-  f.inbox_type.onchange = fillPrice;
+  f.inbox_type.onchange = () => {
+    fillPrice();
+    const cap = perDomain(f.inbox_type.value);
+    dlg.querySelector('#ab-qty-label').innerHTML = cap ? `Domains <span class="muted small">(up to ${cap} inboxes each)</span>` : 'Mailboxes';
+    dlg.querySelector('#ab-price-label').textContent = `Price per ${cap ? 'domain' : 'mailbox'} / month ($)`;
+  };
   f.status.onchange = () => dlg.querySelectorAll('.billing-only').forEach((el) => { el.hidden = f.status.value !== 'active'; });
   wireCycleFields(dlg);
   const preview = () => {
@@ -1650,7 +1666,7 @@ function adminClients() {
           </tr>
           <tr class="price-row" id="prices-${c.id}" data-for="${c.id}" hidden><td colspan="6">
             <form class="client-prices" data-id="${c.id}">
-              <p class="muted small" style="margin:0 0 12px">Price per mailbox / month for ${esc(c.company || c.name || c.email)}. Leave a field blank to use the standard price. New orders from this client use these prices.</p>
+              <p class="muted small" style="margin:0 0 12px">Price per mailbox (per domain for types sold per domain) / month for ${esc(c.company || c.name || c.email)}. Leave a field blank to use the standard price. New orders from this client use these prices.</p>
               <div class="grid-4">${pricing.map((p) => {
                 const own = custom.find((cp) => cp.inbox_type === p.inbox_type);
                 return `<div class="field"><label>${esc(p.label)}</label><input type="number" step="0.01" min="0" name="${esc(p.inbox_type)}" placeholder="Standard: ${money(p.price_per_mailbox)}" value="${own ? own.price_per_mailbox : ''}"></div>`;
@@ -2285,13 +2301,14 @@ function adminSettings() {
       </form>
       <form class="card" id="prices">
         <div class="card-head"><div><h2>Mailbox types &amp; standard prices</h2>
-          <div class="muted small">Price per mailbox per month (USD), used for every client without custom pricing (Clients &amp; invites → Edit pricing). Existing batches keep the price they were ordered at.</div></div></div>
+          <div class="muted small">Price per mailbox (or per domain, for types sold per domain) per month (USD), used for every client without custom pricing (Clients &amp; invites → Edit pricing). Existing batches keep the price they were ordered at.</div></div></div>
         <div class="table-wrap"><table class="types-table">
-          <thead><tr><th style="min-width:200px">Name</th><th style="min-width:260px">Description (shown to clients when ordering)</th><th class="num" style="width:130px">Price ($)</th><th style="width:130px">Offer to clients</th><th style="width:150px">Client gives domains</th><th style="width:70px"></th></tr></thead>
+          <thead><tr><th style="min-width:200px">Name</th><th style="min-width:260px">Description (shown to clients when ordering)</th><th class="num" style="width:130px">Price ($)</th><th style="width:190px">Sold per</th><th style="width:130px">Offer to clients</th><th style="width:150px">Client gives domains</th><th style="width:70px"></th></tr></thead>
           <tbody>${pricing.map((p) => `<tr data-type="${esc(p.inbox_type)}">
             <td><input data-f="label" value="${esc(p.label)}" required></td>
             <td><input data-f="description" value="${esc(p.description || '')}" placeholder="Optional"></td>
             <td><input data-f="price_per_mailbox" type="number" step="0.01" min="0" required value="${p.price_per_mailbox}" class="num"></td>
+            <td><div class="unit-pick"><select data-f="unit"><option value="mailbox" ${Number(p.per_domain) ? '' : 'selected'}>Mailbox</option><option value="domain" ${Number(p.per_domain) ? 'selected' : ''}>Domain, up to</option></select><input data-f="per_domain" type="number" min="1" max="10000" value="${Number(p.per_domain) || 99}" ${Number(p.per_domain) ? '' : 'hidden'} aria-label="Inboxes per domain"><span class="muted small" ${Number(p.per_domain) ? '' : 'hidden'}>inboxes</span></div></td>
             <td><label class="check"><input type="checkbox" data-f="active" ${p.active !== false ? 'checked' : ''}> ${p.active !== false ? 'Yes' : 'Hidden'}</label></td>
             <td><label class="check" title="Untick for pre-warmed mailboxes on your own domains: clients then aren't asked for domains, usernames, domain access or the CSV"><input type="checkbox" data-f="needs_domains" ${p.needs_domains !== false ? 'checked' : ''}> ${p.needs_domains !== false ? 'Yes' : 'No (pre-warmed)'}</label></td>
             <td><button type="button" class="btn btn-sm btn-ghost" data-del-type="${esc(p.inbox_type)}" title="Delete (only if never used)" aria-label="Delete">${icon('close')}</button></td>
@@ -2300,7 +2317,7 @@ function adminSettings() {
             <td><input id="nt-label" placeholder="New type, e.g. Zoho Mail"></td>
             <td><input id="nt-desc" placeholder="Optional description"></td>
             <td><input id="nt-price" type="number" step="0.01" min="0" placeholder="0.00" class="num"></td>
-            <td colspan="3"><button type="button" class="btn btn-sm" id="add-type">+ Add mailbox type</button></td>
+            <td colspan="4"><button type="button" class="btn btn-sm" id="add-type">+ Add mailbox type</button></td>
           </tr></tbody>
         </table></div>
         <div class="card-pad" style="padding-top:12px"><button class="btn btn-primary" type="submit">Save changes</button> <span class="muted small">Hidden types disappear from the client's New order page but existing batches keep working.</span>
@@ -2332,6 +2349,7 @@ function adminSettings() {
       price_per_mailbox: tr.querySelector('[data-f=price_per_mailbox]').value,
       active: tr.querySelector('[data-f=active]').checked,
       needs_domains: tr.querySelector('[data-f=needs_domains]').checked,
+      per_domain: tr.querySelector('[data-f=unit]').value === 'domain' ? Number(tr.querySelector('[data-f=per_domain]').value) || 99 : 0,
     }));
     await api('PUT', `${API()}/pricing`, { prices });
     toast('Mailbox types saved');
@@ -4011,3 +4029,10 @@ document.addEventListener('toggle', (e) => {
   if (r.bottom + 6 + ph > window.innerHeight - 8) pop.style.top = `${Math.max(8, r.top - ph - 6)}px`;
 }, true);
 window.addEventListener('scroll', () => document.querySelectorAll('details.menu[open]').forEach((x) => { x.open = false; }), { passive: true });
+
+document.addEventListener('change', (e) => {
+  const sel = e.target.closest('.unit-pick select[data-f=unit]');
+  if (!sel) return;
+  const on = sel.value === 'domain';
+  sel.parentElement.querySelectorAll('input, span').forEach((x) => { x.hidden = !on; });
+});

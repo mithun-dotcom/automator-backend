@@ -1,4 +1,5 @@
 const { query } = require('./db');
+const units = require('./units');
 const { sendMail } = require('./mailer');
 const { findPayLinks } = require('./payLinks');
 const brands = require('./brands');
@@ -173,7 +174,7 @@ async function resellerCost(invoiceId) {
 // "3 × Google Workspace mailboxes", or the service's name for an "Other" batch.
 const whatLabel = (order) => (order.inbox_type === 'other'
   ? `${order.quantity > 1 ? `${order.quantity} × ` : ''}${order.batch_name || 'Other service'}`
-  : `${order.quantity} × ${order.label} mailboxes`);
+  : units.times(order.inbox_type, order.quantity, order.label));
 
 // A part added to a batch whose next renewal invoice already exists (unpaid):
 // add the part's line to it, unless it has one of that type and size already.
@@ -264,7 +265,7 @@ async function runBilling() {
     );
     const dayWord = daysLeft === 1 ? '1 day' : `${daysLeft} days`;
     let body =
-      `Your batch #${order.id} (${(await batchParts(order.id)).length ? await batchLabel(order) : order.inbox_type === 'other' ? whatLabel(order) : `${order.label}, ${order.quantity} mailboxes`}) will renew in ${dayWord}, ` +
+      `Your batch #${order.id} (${(await batchParts(order.id)).length ? await batchLabel(order) : order.inbox_type === 'other' ? whatLabel(order) : units.count(order.inbox_type, order.quantity, order.label)}) will renew in ${dayWord}, ` +
       `on ${prettyDate(billingDate)}. Amount: ${money(invoice ? invoice.amount : cycleAmount(order))}.`;
     const domainNote = domainsLine(await subscriptionDomains(order.user_id, [order.id, ...(await batchParts(order.id)).map((p) => p.id)]), 'Domains on this batch');
     const paid = invoice && invoice.status === 'paid';
@@ -342,7 +343,7 @@ async function alertUnpaidRenewals(now) {
     const claim = await query('UPDATE invoices SET overdue_alert_at = now() WHERE id = $1 AND overdue_alert_at IS NULL RETURNING 1', [r.invoice_id]);
     if (!claim.rows.length) continue;
     const who = r.company || r.name || r.email;
-    const what = !r.order_id ? 'invoice' : r.inbox_type === 'other' ? (r.batch_name || 'Other service') : `${r.quantity} × ${r.label} mailboxes`;
+    const what = !r.order_id ? 'invoice' : r.inbox_type === 'other' ? (r.batch_name || 'Other service') : units.times(r.inbox_type, r.quantity, r.label);
     const batch = !r.order_id ? `Invoice #${r.invoice_id}` : r.batch_name ? `${r.batch_name} (batch #${r.order_id})` : `Batch #${r.order_id}`;
     const late = daysBetween(r.since, now);
     const domainNote = domainsLine(await subscriptionDomains(r.user_id, [r.order_id]));

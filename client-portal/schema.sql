@@ -452,3 +452,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS resellers_custom_domain ON resellers (lower(cu
 -- reminders; its invoice has a line per part.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_order_id INT REFERENCES orders(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS orders_parent ON orders (parent_order_id) WHERE parent_order_id IS NOT NULL;
+
+-- Some types are sold per domain, not per mailbox: per_domain is how many
+-- inboxes one domain includes (0 = priced per mailbox). Azure: $X per domain
+-- of up to 99 inboxes. Set once; the owner can change it under Settings.
+ALTER TABLE pricing ADD COLUMN IF NOT EXISTS per_domain INT NOT NULL DEFAULT 0;
+UPDATE pricing SET per_domain = 99 WHERE inbox_type = 'azure' AND per_domain = 0
+  AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'azure_per_domain_v1');
+INSERT INTO settings (key, value) VALUES ('azure_per_domain_v1', 'done') ON CONFLICT (key) DO NOTHING;

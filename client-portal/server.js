@@ -22,6 +22,7 @@ const policy = require('./reseller-policy');
 const agreementPdf = require('./agreementPdf');
 const geo = require('./geo');
 const brandlogos = require('./brandlogos');
+const units = require('./units');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -362,11 +363,11 @@ app.post('/api/invites/:token/accept', asyncRoute(async (req, res) => {
 
 // Standard prices with this client's overrides applied.
 const CLIENT_PRICING_SQL = `
-  SELECT p.inbox_type, p.label, p.description, p.active, p.needs_domains, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
+  SELECT p.inbox_type, p.label, p.description, p.active, p.needs_domains, p.per_domain, COALESCE(cp.price_per_mailbox, p.price_per_mailbox) AS price_per_mailbox
     FROM pricing p
     LEFT JOIN client_pricing cp ON cp.inbox_type = p.inbox_type AND cp.user_id = $1`;
 
-const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, o.quantity, o.price_per_mailbox,
+const ORDER_COLUMNS = `o.id, o.inbox_type, p.label AS inbox_label, p.per_domain, o.quantity, o.price_per_mailbox,
   o.domains, o.usernames, o.domain_access_method, o.registrar, o.registrar_email, o.domain_access_notes,
   o.sequencer, o.sequencer_workspace, o.sequencer_email, o.sequencer_notes, o.notes, o.status,
   o.activated_at, o.next_billing_date, o.created_at, o.batch_name, o.billing_months, o.domain_invited, o.sequencer_invited, o.parent_order_id`;
@@ -479,8 +480,12 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 10000) {
     throw new HttpError(400, 'Number of mailboxes must be between 1 and 10000');
   }
-  if (sheet && quantity !== sheet.users) {
+  const perDomain = units.cap(price.inbox_type);
+  if (sheet && !perDomain && quantity !== sheet.users) {
     throw new HttpError(400, `Your CSV has ${sheet.users} users but the order is for ${quantity} mailboxes. Make them match (one CSV row per mailbox).`);
+  }
+  if (sheet && perDomain && sheet.users > quantity * perDomain) {
+    throw new HttpError(400, `Your CSV has ${sheet.users} users, but ${quantity} domain${quantity === 1 ? '' : 's'} include up to ${quantity * perDomain} inboxes (${perDomain} per domain). Order more domains or remove rows.`);
   }
   const csvMin = Number(settings.csv_required_min);
   if (ownDomains && csvMin > 0 && quantity >= csvMin && !sheet) {
@@ -526,7 +531,7 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
 
   const total = billing.money(quantity * price.price_per_mailbox);
   await billing.notify(req.user, `Order #${order.id} received`,
-    `We received your order for ${quantity} ${price.label} mailboxes (${total}/month). We'll let you know as soon as they're active.`);
+    `We received your order for ${units.count(price.inbox_type, quantity, price.label)} (${total}/month). We'll let you know as soon as they're active.`);
 
   const notifyTo = emailList(settings.order_notify_emails);
   if (notifyTo.length) {
@@ -788,17 +793,17 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
       );
       if (req.body.create_invoice !== false && !order.activated_at) {
         const inv = await billing.createOrderInvoice(order, start,
-          `Batch #${id}: ${order.quantity} × ${order.label} mailboxes, first ${billing.cycleMonths(order) === 1 ? 'month' : 'period'}`, 'First period');
+          `Batch #${id}: ${units.times(order.inbox_type, order.quantity, order.label)}, first ${billing.cycleMonths(order) === 1 ? 'month' : 'period'}`, 'First period');
         if (inv) invoiceId = inv.id;
       }
-      await billing.notify(client, `Your ${order.quantity} ${order.label} mailboxes are active`,
+      await billing.notify(client, `Your ${units.count(order.inbox_type, order.quantity, order.label)} are active`,
         `Batch #${id} is now active. Your next renewal is on ${billing.prettyDate(next)} ` +
         `(${billing.money(billing.cycleAmount(order))}).`);
     } else {
       await query('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
       if (status === 'in_progress') {
         await billing.notify(client, `Order #${id} is being set up`,
-          `We've started setting up your ${order.quantity} ${order.label} mailboxes.`);
+          `We've started setting up your ${units.count(order.inbox_type, order.quantity, order.label)}.`);
       } else if (status === 'cancelled') {
         // Stop renewals: no next billing date, and unpaid upcoming invoices void.
         await query('UPDATE orders SET next_billing_date = NULL, cancelled_at = now() WHERE id = $1', [id]);
@@ -811,7 +816,7 @@ shared.patch('/orders/:id', audited('edited', 'order', byParam, async (req, res)
         );
         const domainNote = billing.domainsLine(await billing.subscriptionDomains(order.user_id, [id]));
         await billing.notify(client, `Batch #${id} cancelled`,
-          `Your ${order.quantity} ${order.label} mailboxes (batch #${id}) have been cancelled and will not renew.${domainNote ? `\n\n${domainNote}` : ''}`);
+          `Your ${units.count(order.inbox_type, order.quantity, order.label)} (batch #${id}) have been cancelled and will not renew.${domainNote ? `\n\n${domainNote}` : ''}`);
       }
     }
   }
@@ -1837,7 +1842,7 @@ shared.post('/orders', audited('added', 'order', (req, body) => (body ? body.id 
     invoiceId = created.length ? created[created.length - 1] : null;
   }
   if (b.notify === true && client.password_set) {
-    await billing.notify(client, `New batch added: ${quantity} ${type.label} mailboxes`,
+    await billing.notify(client, `New batch added: ${units.count(type.inbox_type, quantity, type.label)}`,
       `Batch #${order.id} has been added to your account.`);
   }
   syncBatchDomains(order.id);
@@ -1851,7 +1856,7 @@ async function recordPeriods(order, periods, latestPaid) {
   const ids = [];
   for (const [i, start] of periods.entries()) {
     const inv = await billing.createOrderInvoice(order, start,
-      `Batch #${order.id}: ${order.quantity} × ${order.label} mailboxes (from ${billing.prettyDate(start)})`,
+      `Batch #${order.id}: ${units.times(order.inbox_type, order.quantity, order.label)} (from ${billing.prettyDate(start)})`,
       `Mailboxes from ${billing.prettyDate(start)}`);
     if (!inv) continue;
     ids.push(inv.id);
@@ -2396,11 +2401,13 @@ admin.put('/pricing', ownerOnly, audited('edited', 'standardPricing', () => 'all
     await query(
       `UPDATE pricing SET price_per_mailbox = $1, label = COALESCE($2, label),
          description = COALESCE($3, description), active = COALESCE($4, active),
-         needs_domains = COALESCE($6, needs_domains) WHERE inbox_type = $5`,
+         needs_domains = COALESCE($6, needs_domains), per_domain = COALESCE($7, per_domain) WHERE inbox_type = $5`,
       [price, label, p.description === undefined ? null : str(p.description, 300),
-       p.active === undefined ? null : Boolean(p.active), type, p.needs_domains === undefined ? null : Boolean(p.needs_domains)],
+       p.active === undefined ? null : Boolean(p.active), type, p.needs_domains === undefined ? null : Boolean(p.needs_domains),
+       p.per_domain === undefined ? null : Math.max(0, Math.min(10000, Number.parseInt(p.per_domain, 10) || 0))],
     );
   }
+  await units.load();
   res.json({ ok: true });
 }));
 
@@ -3405,6 +3412,7 @@ async function scheduledBilling() {
   await linkStandaloneInvoices();
   await syncExistingOtherLines();
   await linkBatchParts();
+  await units.load();
   await moveSoldByToClients();
   const fixedLocations = await geo.forgetCloudflareLocations();
   if (fixedLocations) console.log(`Cleared ${fixedLocations} location(s) recorded from Cloudflare addresses`);

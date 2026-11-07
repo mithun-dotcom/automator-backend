@@ -928,3 +928,5 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .filter-bar.fb-active select:not([value=""]) { border-color: var(--brand-200); }
 .client-cell { min-width: 200px; }
 .cc-body { min-width: 250px; } .cc-row > span { white-space: nowrap; }
+.unit-pick { display: flex; align-items: center; gap: 6px; } .unit-pick select { width: auto; padding: 7px 8px; } .unit-pick input { width: 70px; padding: 7px 8px; }
+.types-table input.num { min-width: 92px; } .types-table .unit-pick select { min-width: 132px; }
