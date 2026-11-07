@@ -790,7 +790,7 @@ function renderDashboard() {
 }
 
 function paymentNote() {
-  return `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(state.dash.paymentNote)}</div></div>`;
+  return `<div class="note"><span class="note-icon">${icon('info')}</span><div><strong>Payment notice:</strong> ${esc(state.dash.paymentNote)}</div></div>`;
 }
 
 function renderBilling() {
@@ -1798,36 +1798,83 @@ async function setInvoiceStatus(id, status, orderId) {
 function adminInvoices() {
   const { invoices, today } = state.admin;
   const week = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10);
+  const days = (d) => Math.round((Date.parse(`${d}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  const stOf = (i) => (i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status);
+  const sum = (list) => list.reduce((n, i) => n + (Number(i.amount) || 0), 0);
+  const unpaid = invoices.filter((i) => i.status === 'unpaid');
+  const overdue = unpaid.filter((i) => i.due_date < today);
+  const soon = unpaid.filter((i) => i.due_date >= today && i.due_date <= week);
+  const month = today.slice(0, 7);
+  const paidMonth = invoices.filter((i) => i.status === 'paid' && String(i.paid_at || '').slice(0, 7) === month);
+  const kpi = (filter, tone, ico, label, list, sub) => `<button type="button" class="inv-kpi kpi-${tone}" data-kpi="${filter}">
+      <span class="inv-kpi-ico">${icon(ico)}</span>
+      <span class="inv-kpi-body"><span class="inv-kpi-label">${label}</span><span class="inv-kpi-value">${money(sum(list))}</span>
+      <span class="inv-kpi-sub">${list.length} invoice${list.length === 1 ? '' : 's'}${sub ? ` · ${sub}` : ''}</span></span></button>`;
+  const dueText = (i) => {
+    if (i.status !== 'unpaid') return '';
+    const n = days(i.due_date);
+    if (n < 0) return `<div class="due-rel due-late">${-n} day${n === -1 ? '' : 's'} overdue</div>`;
+    if (n === 0) return '<div class="due-rel due-soon">Due today</div>';
+    return `<div class="due-rel ${n <= 7 ? 'due-soon' : ''}">in ${n} day${n === 1 ? '' : 's'}</div>`;
+  };
   shell(ADMIN_TABS, '#/admin/invoices', `
     <div class="page-head">
       <div><h1>Invoices</h1><p class="muted">Renewal invoices are created automatically 7 days before each renewal. Create and edit any invoice here.</p></div>
       <a class="btn btn-primary" href="#/admin/invoice/new">+ New invoice</a>
     </div>
+    <div class="stack">
+    ${invoices.length ? `<div class="inv-kpis">
+      ${kpi('unpaid', 'amber', 'receipt', 'Outstanding', unpaid)}
+      ${kpi('overdue', 'red', 'alert', 'Overdue', overdue)}
+      ${kpi('due7', 'blue', 'calendar', 'Due in 7 days', soon)}
+      ${kpi('paid', 'green', 'check', 'Paid this month', paidMonth)}
+    </div>` : ''}
     <div class="card">
       ${invoices.length ? filterBar('invoices', [
         { name: 'status', label: 'Status: any', options: [['unpaid', 'Unpaid (incl. overdue)'], ['overdue', 'Overdue'], ['due7', 'Due in the next 7 days'], ['paid', 'Paid'], ['void', 'Void']] },
         ...(isReseller() ? [] : [{ name: 'seller', label: 'Sold by: anyone', options: sellerOptions(invoices) }]),
         ...(isOwner() && invoices.some((i) => i.reseller_id) ? [{ name: 'source', label: 'Clients: all', options: [['direct', 'Our clients'], ['reseller', 'Resellers\' clients'],
-          ...[...new Set(invoices.filter((i) => i.reseller_id).map((i) => String(i.reseller_name || '')))].map((n) => [`r:${n.replace(/ /g, '\u00a0')}`, `Reseller: ${n}`])] }] : []),
+          ...[...new Set(invoices.filter((i) => i.reseller_id).map((i) => String(i.reseller_name || '')))].map((n) => [`r:${n.replace(/ /g, ' ')}`, `Reseller: ${n}`])] }] : []),
         { name: 'month', label: 'Issued: any month', options: [...new Set(invoices.map((i) => String(i.issue_date || i.created_at).slice(0, 7)))].sort().reverse().map((m) => [m, monthName(m)]) },
       ]) : ''}
-      ${invoices.length ? `<div class="table-wrap"><table>
-        <thead><tr><th>#</th><th>Client</th><th>Description</th><th>Issued</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
+      ${invoices.length ? `<div class="table-wrap"><table class="inv-table">
+        <thead><tr><th>Invoice</th><th>Client</th><th>For</th><th>Due</th><th>Status</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>${invoices.map((i) => {
-          const s = i.status === 'unpaid' && i.due_date < today ? 'overdue' : i.status;
+          const s = stOf(i);
           const in7 = i.status === 'unpaid' && i.due_date >= today && i.due_date <= week;
-          return `<tr data-id="${i.id}" data-search="${searchText(`#${i.id}`, i.id, i.company, i.name, i.email, i.description, i.seller)}"
-            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-source="${i.reseller_id ? `reseller r:${esc(String(i.reseller_name || '').replace(/ /g, '\u00a0'))}` : 'direct'}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}"><td><a href="#/admin/invoice/${i.id}">${i.id}</a></td><td>${esc(i.company || i.name || i.email)}${(i.company || i.name) ? `<div class="muted small">${esc(i.email)}</div>` : ''}${i.reseller_id && isOwner() ? `<div><span class="badge b-in_progress">Reseller: ${esc(i.reseller_name || '')}</span></div>` : ''}${i.seller ? `<div class="muted small">Sold by ${esc(i.seller)}</div>` : ''}</td><td>${esc(i.description)}</td><td>${fmtDate(i.issue_date || i.created_at)}</td><td>${fmtDate(i.due_date)}</td><td>${badge(s)}</td><td class="num">${money(i.amount)}</td>
-          <td><div class="row" style="flex-wrap:nowrap">
-            <a class="btn btn-sm" href="#/admin/invoice/${i.id}">View</a>
-            <a class="btn btn-sm" href="#/admin/invoice/${i.id}/edit">Edit</a>
-            ${i.status !== 'paid' ? `<button class="btn btn-sm" data-inv="${i.id}" data-status="paid">Mark paid</button>` : `<button class="btn btn-sm" data-inv="${i.id}" data-status="unpaid">Mark unpaid</button>`}
-            ${i.status !== 'void' ? `<button class="btn btn-sm btn-ghost" data-inv="${i.id}" data-status="void" data-order="${i.order_id || ''}">Void</button>` : ''}
-            ${subOrders(i).length ? `<button class="btn btn-sm btn-danger" data-cancel-inv="${i.id}">Cancel sub</button>` : ''}
-          </div></td></tr>`;
+          const subs = subOrders(i);
+          return `<tr class="inv-row inv-${s}" data-id="${i.id}" data-search="${searchText(`#${i.id}`, i.id, i.company, i.name, i.email, i.description, i.seller)}"
+            data-status="${s === 'overdue' ? 'unpaid overdue' : s}${in7 ? ' due7' : ''}" data-seller="${esc(i.seller || '__none')}" data-source="${i.reseller_id ? `reseller r:${esc(String(i.reseller_name || '').replace(/ /g, ' '))}` : 'direct'}" data-amount="${Number(i.amount) || 0}" data-month="${String(i.issue_date || i.created_at).slice(0, 7)}">
+            <td><a class="inv-no" href="#/admin/invoice/${i.id}">#${i.id}</a><div class="muted small nowrap">${fmtDate(i.issue_date || i.created_at)}</div></td>
+            <td>${clientCell({ company: i.company, name: i.name, email: i.email, seller: i.seller }, i.reseller_id && isOwner() ? `<div class="cc-row">${icon('reseller')}<span>Reseller: <strong>${esc(i.reseller_name || '')}</strong></span></div>` : '')}${i.reseller_id && isOwner() ? `<span class="inv-tag">${esc(i.reseller_name || 'Reseller')}</span>` : ''}</td>
+            <td><div class="inv-desc" title="${esc(i.description)}">${esc(i.description)}</div></td>
+            <td class="nowrap">${fmtDate(i.due_date)}${dueText(i)}</td>
+            <td>${badge(s)}</td>
+            <td class="num"><span class="inv-amt">${money(i.amount)}</span></td>
+            <td><div class="row inv-actions">
+              ${i.status === 'unpaid' ? `<button class="btn btn-sm btn-pay-quick" data-inv="${i.id}" data-status="paid">${icon('check')}Mark paid</button>` : ''}
+              <a class="btn btn-sm" href="#/admin/invoice/${i.id}">${icon('eye')}View</a>
+              ${moreMenu(`
+                <a class="menu-item" href="#/admin/invoice/${i.id}/edit">${icon('settings')}Edit invoice</a>
+                ${i.status === 'paid' ? `<button type="button" class="menu-item" data-inv="${i.id}" data-status="unpaid">${icon('refresh')}Mark unpaid</button>` : ''}
+                ${i.status === 'void' ? `<button type="button" class="menu-item" data-inv="${i.id}" data-status="unpaid">${icon('refresh')}Restore as unpaid</button>` : ''}
+                ${i.status !== 'void' ? `<div class="menu-sep"></div><button type="button" class="menu-item menu-danger" data-inv="${i.id}" data-status="void" data-order="${i.order_id || ''}">${icon('close')}Void invoice</button>` : ''}
+                ${subs.length ? `<button type="button" class="menu-item menu-danger" data-cancel-inv="${i.id}">${icon('pause')}Cancel subscription</button>` : ''}`)}
+            </div></td></tr>`;
         }).join('')}</tbody></table></div>` : '<div class="empty">No invoices yet. <a href="#/admin/invoice/new">Create one</a>.</div>'}
+    </div>
     </div>`);
 
+  document.querySelectorAll('[data-kpi]').forEach((b) => {
+    b.onclick = () => {
+      const sel = document.querySelector('[data-fb="invoices"] select[data-f="status"]');
+      if (!sel) return;
+      const on = sel.value === b.dataset.kpi;
+      sel.value = on ? '' : b.dataset.kpi;
+      document.querySelectorAll('[data-kpi]').forEach((x) => x.classList.toggle('on', !on && x === b));
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+  });
   wireFilterBar('invoices');
   document.querySelectorAll('[data-cancel-inv]').forEach((b) => {
     b.onclick = () => {
@@ -2073,15 +2120,19 @@ function renderInvoiceView(inv, isAdmin) {
 
   shell(isAdmin ? ADMIN_TABS : CLIENT_TABS, isAdmin ? '#/admin/invoices' : '#/billing', `
     <div class="page-head no-print">
-      <a class="btn" href="${back}">← Back</a>
-      <div class="row">
-        ${isAdmin ? `${inv.order_id && !(isOwner() && inv.resellerName) ? `<a class="btn" href="#/admin/orders/${inv.order_id}">Batch #${inv.order_id}: domains &amp; details</a>` : ''}<a class="btn" href="#/admin/invoice/${inv.id}/edit">Edit</a>
-          ${inv.status !== 'paid' ? '<button class="btn" data-set="paid">Mark paid</button>' : '<button class="btn" data-set="unpaid">Mark unpaid</button>'}
-          ${inv.status !== 'void' ? '<button class="btn btn-ghost" data-set="void">Void</button>' : ''}` : ''}
-        ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-danger" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">${icon('alert')} Urgent reminder</button>` : ''}
-        ${isAdmin && inv.status !== 'void' ? `<button class="btn" id="send-inv" title="${inv.sent_at ? `Last sent ${esc(fmtDate(inv.sent_at))}` : 'Not sent yet'}">${inv.sent_at ? 'Send again' : 'Send invoice'}</button>` : ''}
-        ${isAdmin && subOrders(inv).length ? '<button class="btn btn-danger" id="cancel-sub">Cancel subscription</button>' : ''}
-        <button class="btn btn-primary" id="print">Print / Save PDF</button>
+      <a class="btn" href="${back}">${icon('up').replace('class="ico"', 'class="ico" style="transform:rotate(-90deg)"')}Back</a>
+      <div class="row inv-toolbar">
+        ${isAdmin && inv.status === 'unpaid' ? `<button class="btn btn-pay-quick" data-set="paid">${icon('check')}Mark paid</button>` : ''}
+        ${isAdmin && inv.status !== 'void' ? `<button class="btn" id="send-inv" title="${inv.sent_at ? `Last sent ${esc(fmtDate(inv.sent_at))}` : 'Not sent yet'}">${icon('send')}${inv.sent_at ? 'Send again' : 'Send invoice'}</button>` : ''}
+        <button class="btn btn-primary" id="print">${icon('download')}Print / Save PDF</button>
+        ${isAdmin ? moreMenu(`
+          <a class="menu-item" href="#/admin/invoice/${inv.id}/edit">${icon('settings')}Edit invoice</a>
+          ${inv.order_id && !(isOwner() && inv.resellerName) ? `<a class="menu-item" href="#/admin/orders/${inv.order_id}">${icon('orders')}Batch #${inv.order_id}: domains &amp; details</a>` : ''}
+          ${inv.status === 'unpaid' ? `<button type="button" class="menu-item" id="send-urgent" title="${inv.urgent_sent_at ? `Last sent ${esc(fmtDate(inv.urgent_sent_at))}` : 'Critical alert: mailboxes expire in a few hours'}">${icon('alert')}Urgent reminder</button>` : ''}
+          ${inv.status !== 'unpaid' ? `<button type="button" class="menu-item" data-set="unpaid">${icon('refresh')}Mark unpaid</button>` : ''}
+          ${inv.status !== 'void' || subOrders(inv).length ? '<div class="menu-sep"></div>' : ''}
+          ${inv.status !== 'void' ? `<button type="button" class="menu-item menu-danger" data-set="void">${icon('close')}Void invoice</button>` : ''}
+          ${subOrders(inv).length ? `<button type="button" class="menu-item menu-danger" id="cancel-sub">${icon('pause')}Cancel subscription</button>` : ''}`) : ''}
       </div>
     </div>
     ${isAdmin && (inv.sent_at || inv.seller || inv.urgent_sent_at || (isOwner() && inv.resellerName)) ? `<p class="muted small no-print" style="margin:0 0 12px">${[isOwner() && inv.resellerName ? `Reseller client of <strong>${esc(inv.resellerName)}</strong>` : '', inv.seller ? `Sold by <strong>${esc(inv.seller)}</strong> (the client's; only admins see this)` : '', inv.sent_at ? `Emailed to ${esc(inv.email)} on ${fmtDate(inv.sent_at)}` : '', inv.urgent_sent_at ? `Urgent reminder sent ${fmtDate(inv.urgent_sent_at)}` : ''].filter(Boolean).join(' · ')}.</p>` : ''}
@@ -2121,8 +2172,8 @@ function renderInvoiceView(inv, isAdmin) {
       ${inv.payLinks && inv.payLinks.length ? `<section class="inv-pay no-print">${inv.payLinks.map((l) => `${l.hint ? `<div class="pay-hint">${esc(l.hint)}</div>` : ''}<a class="btn btn-primary btn-pay" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}
         <div class="muted small">After paying, send us the payment screenshot by replying to the invoice email or in your WhatsApp or Slack group with us.</div></section>` : ''}
       ${inv.notes ? `<section class="inv-notes"><div class="inv-label">Notes</div><div>${linkify(esc(inv.notes))}</div></section>` : ''}
-      ${inv.brand && !inv.brand.mixxbee ? (inv.paymentNote ? `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment details:</strong><div>${linkify(esc(inv.paymentNote)).replace(/\n/g, '<br>')}</div></div></div>` : '')
-        : `<div class="note"><span class="note-icon">ℹ️</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>`}
+      ${inv.brand && !inv.brand.mixxbee ? (inv.paymentNote ? `<div class="note"><span class="note-icon">${icon('info')}</span><div><strong>Payment details:</strong><div>${linkify(esc(inv.paymentNote)).replace(/\n/g, '<br>')}</div></div></div>` : '')
+        : `<div class="note"><span class="note-icon">${icon('info')}</span><div><strong>Payment notice:</strong> ${esc(inv.paymentNote)}</div></div>`}
       ${inv.brand && !inv.brand.mixxbee ? '' : `<div class="inv-powered"><span>Payments powered by</span><img src="mixxbee-logo.png" alt="Mixxbee"></div>`}
     </article>`);
 
