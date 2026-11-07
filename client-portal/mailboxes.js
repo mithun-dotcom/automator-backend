@@ -26,7 +26,7 @@ const EMAIL_COLS = ['email', 'emailaddress', 'mailbox', 'username', 'user', 'log
 const PASS_COLS = ['password', 'pass', 'pwd', 'passwd'];
 const ADMIN_COLS = ['admin', 'isadmin', 'role', 'adminemail'];
 const TYPE_COLS = ['type', 'mailboxtype', 'inboxtype', 'product', 'plan', 'service', 'accounttype'];
-const DATE_COLS = ['created', 'createdat', 'createdon', 'creationdate', 'datecreated', 'created_date', 'date'];
+const DATE_COLS = ['created', 'createdat', 'createdon', 'creationdate', 'datecreated', 'created_date', 'date', 'warmupstarted', 'warmupstart', 'warmupdate', 'started', 'startdate'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
 // "2026-11-01", "01/11/2026" (day first unless that can't be), "1 Nov 2026",

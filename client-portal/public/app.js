@@ -329,7 +329,7 @@ function mailboxAvatar(email, type, label) {
   return `<span class="mb-avatar" style="--av-bg:${bg};--av-fg:${fg}">${esc(ini)}${type || label ? `<span class="mb-avatar-badge">${brandLogo(type, label)}</span>` : ''}</span>`;
 }
 const NAV_ICONS = {
-  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
+  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/admin/prewarmed': 'flame', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
   '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
 };
 
@@ -1103,7 +1103,7 @@ function setAdminTabs() {
     ADMIN_TABS.push(['#/admin/orders', 'Batches'], ['#/admin/clients', 'Clients'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/invoices', 'Invoices'], ['#/admin/payouts', 'Payouts'], ['#/admin/settings', 'Settings']);
     return;
   }
-  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/invoices', 'Invoices']);
+  ADMIN_TABS.push(['#/admin/orders', 'Orders'], ['#/admin/clients', 'Clients & invites'], ['#/admin/mailboxes', 'Mailboxes'], ['#/admin/domains', 'Domains'], ['#/admin/prewarmed', 'Pre-warmed'], ['#/admin/invoices', 'Invoices']);
   if (isOwner()) ADMIN_TABS.unshift(['#/admin/analytics', 'Analytics']);
   if (isOwner()) ADMIN_TABS.push(['#/admin/resellers', 'Resellers'], ['#/admin/locations', 'Locations'], ['#/admin/team', 'Team'], ['#/admin/settings', 'Settings']);
 }
@@ -1123,6 +1123,7 @@ async function renderAdmin(page, arg, sub) {
   if ((page === 'domains' || page === 'mailboxes') && !state.samples) state.samples = await api('GET', '/api/upload-samples');
   if (page === 'domains') return arg ? adminDomainClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/domains`)) : adminDomains();
   if (page === 'mailboxes') return arg ? adminMailboxClient(await api('GET', `${API()}/clients/${encodeURIComponent(arg)}/mailboxes`)) : adminMailboxes();
+  if (page === 'prewarmed') return isReseller() ? go('#/admin/orders') : adminPrewarmed(await api('GET', '/api/admin/prewarmed'));
   if (page === 'locations') return isOwner() ? renderLocations(await api('GET', '/api/admin/locations')) : go('#/admin/orders');
   if (page === 'resellers') {
     if (!isOwner()) return go('#/admin/orders');
@@ -3791,6 +3792,165 @@ function renderMyDomains(rows, hostsData = {}) {
 }
 
 // Admin: clients and their domains.
+// ------------------------------------------------------------------ pre-warmed stock
+// Mithmill's own warmed inboxes: Warming up (14 days) -> Available -> Premium
+// warm-up (after 30 days unsold), and Sold (tagged to a client). Moves happen
+// on the server; domain expiry dates come from the registries.
+const PW_STAGES = [
+  ['warming', 'Warming up', 'flame', 'pw-amber'],
+  ['available', 'Available', 'check', 'pw-green'],
+  ['premium', 'Premium warm-up', 'sparkle', 'pw-violet'],
+  ['sold', 'Sold', 'team', 'pw-blue'],
+];
+function adminPrewarmed(data) {
+  const { rows, types, warmupDays, premiumAfterDays, today } = data;
+  let tab = sessionStorage.getItem('pwTab') || 'available';
+  if (!PW_STAGES.some(([k]) => k === tab)) tab = 'available';
+  const DAY = 86400000;
+  const now = Date.now();
+  const daysIn = (r) => Math.max(0, Math.floor((now - Date.parse(r.status_since)) / DAY));
+  const addDays = (iso, n) => new Date(Date.parse(iso) + n * DAY).toISOString().slice(0, 10);
+  const expDays = (r) => (r.expires_on ? Math.round((Date.parse(`${r.expires_on}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY) : null);
+  const counts = Object.fromEntries(PW_STAGES.map(([k]) => [k, rows.filter((r) => r.status === k).length]));
+  const expiringSoon = [...new Set(rows.filter((r) => r.status !== 'sold' && expDays(r) !== null && expDays(r) <= 30).map((r) => r.domain))];
+  const hint = { warming: `Move to Available after ${warmupDays} days`, available: `Ready to sell · premium after ${premiumAfterDays} days`, premium: `Unsold for ${premiumAfterDays}+ days`, sold: 'Tagged to clients' };
+
+  const stageCell = (r) => {
+    const d = daysIn(r);
+    if (r.status === 'warming') {
+      const pct = Math.min(100, Math.round((d / warmupDays) * 100));
+      return `<div class="pw-prog"><div class="pw-prog-top"><strong>Day ${Math.min(d + 1, warmupDays)}</strong><span>of ${warmupDays}</span></div><div class="pw-bar pw-amber"><span style="width:${pct}%"></span></div><div class="pw-sub">Available ${fmtDate(addDays(r.status_since, warmupDays))}</div></div>`;
+    }
+    if (r.status === 'available') {
+      const left = Math.max(0, premiumAfterDays - d);
+      const pct = Math.min(100, Math.round((d / premiumAfterDays) * 100));
+      return `<div class="pw-prog"><div class="pw-prog-top"><strong>${d} day${d === 1 ? '' : 's'}</strong><span>available</span></div><div class="pw-bar pw-green"><span style="width:${pct}%"></span></div><div class="pw-sub">${left ? `Premium in ${left} day${left === 1 ? '' : 's'}` : 'Moving to premium'}</div></div>`;
+    }
+    if (r.status === 'premium') return `<div class="pw-prog"><div class="pw-prog-top"><strong>Premium</strong><span>${d} day${d === 1 ? '' : 's'}</span></div><div class="pw-sub">Since ${fmtDate(String(r.status_since).slice(0, 10))}</div></div>`;
+    return `<div class="pw-sold">${personAvatar(r.sold_company || r.sold_name || r.sold_email || '?', r.sold_email || '', 'av-sm')}<div><strong>${esc(r.sold_company || r.sold_name || r.sold_email || 'Deleted client')}</strong><div class="pw-sub">${r.sold_at ? fmtDate(String(r.sold_at).slice(0, 10)) : ''}${r.sold_from ? ` · from ${r.sold_from === 'premium' ? 'premium' : r.sold_from}` : ''}</div></div></div>`;
+  };
+  const expiryCell = (r) => {
+    const n = expDays(r);
+    if (n === null) return r.expiry_error ? `<span class="exp exp-na" title="${esc(r.expiry_error)}">${icon('info')}Couldn't check</span>` : `<span class="exp exp-na"><span class="spin"></span>Checking…</span>`;
+    const cls = n < 0 ? 'exp-bad' : n <= 30 ? 'exp-bad' : n <= 60 ? 'exp-warn' : 'exp-ok';
+    return `<span class="exp ${cls}" title="${esc(r.registrar ? `Registrar: ${r.registrar}` : '')}">${icon(n <= 60 ? 'alert' : 'calendar')}${fmtDate(r.expires_on)}</span><div class="pw-sub">${n < 0 ? `Expired ${-n} day${n === -1 ? '' : 's'} ago` : n === 0 ? 'Expires today' : `in ${n} day${n === 1 ? '' : 's'}`}</div>`;
+  };
+  const list = rows.filter((r) => r.status === tab);
+
+  shell(ADMIN_TABS, '#/admin/prewarmed', `
+    <div class="page-head"><div><h1>Pre-warmed inboxes</h1><p class="muted">Your warmed inbox stock. Inboxes move from Warming up to Available after ${warmupDays} days, and to Premium warm-up if unsold for ${premiumAfterDays} days. Domain expiry is checked automatically.</p></div>
+      <div class="row"><button class="btn" id="pw-exp">${icon('refresh')}Check expiry</button><a class="btn" href="/api/prewarmed-template.csv">${icon('download')}Sample CSV</a><button class="btn btn-primary" id="pw-up">${icon('upload')}Upload inboxes</button></div></div>
+    <div class="stack">
+      <div class="pw-stages">${PW_STAGES.map(([k, label, ico, tone]) => `<button type="button" class="pw-stage ${tone} ${k === tab ? 'on' : ''}" data-tab="${k}">
+        <span class="pw-stage-ico">${icon(ico)}</span><span class="pw-stage-body"><span class="pw-stage-label">${label}</span><span class="pw-stage-n">${counts[k]}</span><span class="pw-stage-hint">${hint[k]}</span></span></button>`).join('')}</div>
+      ${expiringSoon.length ? `<div class="note"><span class="note-icon">${icon('alert')}</span><div><strong>${expiringSoon.length} domain${expiringSoon.length === 1 ? '' : 's'} expire${expiringSoon.length === 1 ? 's' : ''} within 30 days:</strong> ${expiringSoon.slice(0, 8).map(esc).join(', ')}${expiringSoon.length > 8 ? '…' : ''}. Renew ${expiringSoon.length === 1 ? 'it' : 'them'} at the registrar.</div></div>` : ''}
+      <div class="card">
+        ${list.length ? `${filterBar('pw', [
+          { name: 'type', label: 'Type: any', options: types.filter((t) => list.some((r) => r.inbox_type === t.inbox_type)).map((t) => [t.inbox_type, t.label]) },
+          { name: 'exp', label: 'Domain expiry: any', options: [['soon', 'Within 30 days'], ['60', 'Within 60 days'], ['unknown', 'Not known']] },
+        ])}
+        <div class="pw-bulk" id="pw-bulk" hidden><span id="pw-count">0 selected</span>
+          ${tab !== 'sold' ? `<button class="btn btn-sm btn-primary" id="pw-sell">${icon('team')}Sell to client</button>` : ''}
+          <select id="pw-move" class="pw-move"><option value="">Move to…</option>${PW_STAGES.filter(([k]) => k !== 'sold' && k !== tab).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+          <button class="btn btn-sm btn-ghost menu-danger" id="pw-del">${icon('close')}Delete</button></div>
+        <div class="table-wrap mb-wrap"><table class="mb-table pw-table">
+          <thead><tr><th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th><th>Inbox</th><th>Password</th><th>Type</th><th>${tab === 'sold' ? 'Sold to' : 'Stage'}</th><th>Domain expiry</th></tr></thead>
+          <tbody>${list.map((r) => {
+            const n = expDays(r);
+            return `<tr data-mb="${r.id}" data-id="${r.id}" data-search="${searchText(r.email, r.domain, r.sold_company, r.sold_email)}" data-type="${esc(r.inbox_type || '')}" data-exp="${n === null ? 'unknown' : `${n <= 30 ? 'soon ' : ''}${n <= 60 ? '60' : ''}`}">
+            <td class="mb-chk"><input type="checkbox" class="mb-sel" value="${r.id}" aria-label="Select ${esc(r.email)}"></td>
+            <td class="mb-main"><div class="mb-email">${mailboxAvatar(r.email, r.inbox_type, r.inbox_label)}<span class="mb-addr" title="${esc(r.email)}"><span class="mb-local">${esc(r.email.split('@')[0])}</span><span class="mb-dom">@${esc(r.domain)}</span></span>
+              <button class="icon-btn icon-btn-sm mb-copy" data-copy-text="${esc(r.email)}" title="Copy email" aria-label="Copy ${esc(r.email)}">${icon('copy')}</button></div></td>
+            <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
+              <button class="pw-btn" data-show-pw="${r.id}" title="Show password">${icon('eye')}</button><button class="pw-btn" data-copy-pw="${r.id}" title="Copy password">${icon('copy')}</button></div></td>
+            <td>${typeChip(r.inbox_type, r.inbox_label)}</td>
+            <td>${stageCell(r)}</td>
+            <td class="nowrap">${expiryCell(r)}</td></tr>`;
+          }).join('')}</tbody></table></div>`
+          : `<div class="empty">${tab === 'sold' ? 'Nothing sold yet.' : tab === 'warming' ? 'Nothing warming up. Upload inboxes to start their warm-up.' : tab === 'premium' ? 'No premium warm-up inboxes yet.' : 'No inboxes available right now.'}</div>`}
+      </div>
+    </div>`);
+
+  wireFilterBar('pw');
+  wireMailboxTable((id) => `/api/admin/prewarmed/${id}/password`);
+  document.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { sessionStorage.setItem('pwTab', b.dataset.tab); adminPrewarmed(data); }; });
+  const selected = () => [...document.querySelectorAll('.mb-sel:checked')].filter((c) => !c.closest('tr').hidden).map((c) => Number(c.value));
+  const bulk = document.getElementById('pw-bulk');
+  const sync = () => { if (!bulk) return; const n = selected().length; bulk.hidden = !n; document.getElementById('pw-count').textContent = `${n} selected`; };
+  const all = document.getElementById('mb-all');
+  if (all) all.onchange = () => { document.querySelectorAll('.mb-sel').forEach((c) => { if (!c.closest('tr').hidden) c.checked = all.checked; }); sync(); };
+  document.querySelectorAll('.mb-sel').forEach((c) => { c.onchange = sync; });
+  const reload = async () => adminPrewarmed(await api('GET', '/api/admin/prewarmed'));
+  const sellBtn = document.getElementById('pw-sell');
+  if (sellBtn) sellBtn.onclick = () => openSellDialog(selected(), reload);
+  const move = document.getElementById('pw-move');
+  if (move) move.onchange = async () => {
+    if (!move.value) return;
+    try { const r = await api('POST', '/api/admin/prewarmed/move', { ids: selected(), status: move.value }); toast(`${r.moved} moved`); await reload(); } catch (ex) { toast(ex.message); }
+  };
+  const del = document.getElementById('pw-del');
+  if (del) del.onclick = async () => {
+    const ids = selected();
+    if (!confirm(`Delete ${ids.length} inbox${ids.length === 1 ? '' : 'es'} from the stock? This can't be undone.`)) return;
+    try { await api('POST', '/api/admin/prewarmed/delete', { ids }); toast('Deleted'); await reload(); } catch (ex) { toast(ex.message); }
+  };
+  document.getElementById('pw-exp').onclick = async () => {
+    try { const r = await api('POST', '/api/admin/prewarmed/check-expiry', {}); toast(`Checking ${r.checking} domain${r.checking === 1 ? '' : 's'}. Refresh in a minute.`); } catch (ex) { toast(ex.message); }
+  };
+  document.getElementById('pw-up').onclick = () => openPrewarmUpload(types, reload);
+}
+
+function openPrewarmUpload(types, done) {
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal';
+  dlg.innerHTML = `<form id="pwu">
+    <div class="modal-head"><h2>Upload pre-warmed inboxes</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">${icon('close')}</button></div>
+    <p class="muted small" style="margin:-6px 0 14px">CSV columns: <span class="mono">email</span>, <span class="mono">password</span>, and optionally <span class="mono">type</span> and <span class="mono">warmup started</span> (date). Existing inboxes get their password updated.</p>
+    <div class="field"><label>CSV file</label><input type="file" name="file" accept=".csv,text/csv" required></div>
+    <div class="grid-2">
+      <div class="field"><label>Type (rows without one)</label><select name="inbox_type"><option value="">From the CSV</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${/pre.?warm/i.test(t.label) && /google/i.test(t.label) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
+      <div class="field"><label>Start in</label><select name="status"><option value="warming">Warming up</option><option value="available">Available (already warmed)</option></select></div>
+    </div>
+    <div class="field"><label>Warm-up started <span class="muted small">(rows without a date)</span></label><input type="date" name="started" value="${new Date().toISOString().slice(0, 10)}"></div>
+    <div class="row"><button class="btn btn-primary" type="submit">${icon('upload')}Upload</button><span class="muted small">Inboxes whose ${'14'} days are already up move to Available straight away.</span></div>
+    <div class="error"></div></form>`;
+  document.body.appendChild(dlg);
+  dlg.querySelector('[data-close]').onclick = () => dlg.close();
+  dlg.addEventListener('close', () => dlg.remove());
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    const file = dlg.querySelector('[name=file]').files[0];
+    if (!file) throw new Error('Choose the CSV file');
+    const r = await api('POST', '/api/admin/prewarmed', { csv: await file.text(), inbox_type: d.inbox_type, status: d.status, started: d.started });
+    toast(`${r.added} added${r.updated ? `, ${r.updated} updated` : ''}${r.moved ? `, ${r.moved} moved ahead` : ''}`);
+    dlg.close();
+    await done();
+  });
+  dlg.showModal();
+}
+
+function openSellDialog(ids, done) {
+  const clients = (state.admin.clients || []).slice().sort((a, b) => String(a.company || a.name || a.email).localeCompare(String(b.company || b.name || b.email)));
+  const dlg = document.createElement('dialog');
+  dlg.className = 'modal';
+  dlg.innerHTML = `<form>
+    <div class="modal-head"><h2>Sell ${ids.length} inbox${ids.length === 1 ? '' : 'es'}</h2><button type="button" class="btn btn-sm btn-ghost" data-close aria-label="Close">${icon('close')}</button></div>
+    <div class="field"><label>Client</label><select name="user_id" required><option value="">Choose a client…</option>${clients.map((c) => `<option value="${c.id}">${esc(c.company || c.name || c.email)}${c.company || c.name ? ` · ${esc(c.email)}` : ''}</option>`).join('')}</select></div>
+    <label class="check" style="margin-bottom:14px"><input type="checkbox" name="add" checked> Also add them to the client's Mailboxes (with passwords) and their domains to the client's Domains</label>
+    <div class="row"><button class="btn btn-primary" type="submit">${icon('check')}Mark as sold</button></div>
+    <div class="error"></div></form>`;
+  document.body.appendChild(dlg);
+  dlg.querySelector('[data-close]').onclick = () => dlg.close();
+  dlg.addEventListener('close', () => dlg.remove());
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    const r = await api('POST', '/api/admin/prewarmed/sell', { ids, user_id: Number(d.user_id), add_to_mailboxes: d.add === 'on' });
+    toast(`${r.sold} sold to ${r.client}`);
+    sessionStorage.setItem('pwTab', 'sold');
+    dlg.close();
+    await done();
+  });
+  dlg.showModal();
+}
+
 function adminDomains() {
   const clients = state.admin.clients;
   shell(ADMIN_TABS, '#/admin/domains', `

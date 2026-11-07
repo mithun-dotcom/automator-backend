@@ -261,3 +261,16 @@ The database tables are created automatically on startup (`schema.sql`).
 ## Stack
 
 Node + Express, Postgres (`pg`), and a vanilla JS single-page front end in `public/`, with no build step.
+
+## Pre-warmed inboxes (admin → Pre-warmed)
+
+Mithmill's own stock of warmed inboxes. Upload a CSV (`email, password, type, warmup started`);
+inboxes move automatically (hourly check):
+
+- **Warming up** → **Available** after 14 days of warm-up
+- **Available** → **Premium warm-up** after 30 days unsold
+- **Sold**: select inboxes → *Sell to client*; by default they're also added to the client's
+  Mailboxes (with passwords) and their domains to the client's Domains.
+
+Each domain's registration expiry comes from RDAP (rdap.org), checked when uploaded, weekly, and
+daily once it's within 45 days; domains expiring within 30 days are flagged at the top.

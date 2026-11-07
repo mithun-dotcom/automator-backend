@@ -460,3 +460,32 @@ ALTER TABLE pricing ADD COLUMN IF NOT EXISTS per_domain INT NOT NULL DEFAULT 0;
 UPDATE pricing SET per_domain = 99 WHERE inbox_type = 'azure' AND per_domain = 0
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'azure_per_domain_v1');
 INSERT INTO settings (key, value) VALUES ('azure_per_domain_v1', 'done') ON CONFLICT (key) DO NOTHING;
+
+-- Pre-warmed inboxes: Mithmill's own stock of warmed mailboxes, sold to
+-- clients. Stages: warming (14 days) -> available -> premium (after 30 days
+-- unsold); sold when tagged to a client. status_since is when the current
+-- stage began (moved forward by exactly 14 / 30 days on each automatic step).
+CREATE TABLE IF NOT EXISTS prewarmed (
+  id             SERIAL PRIMARY KEY,
+  email          TEXT NOT NULL UNIQUE,
+  password       BYTEA NOT NULL,
+  domain         TEXT NOT NULL,
+  inbox_type     TEXT,
+  status         TEXT NOT NULL DEFAULT 'warming' CHECK (status IN ('warming', 'available', 'premium', 'sold')),
+  status_since   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  warmup_started DATE,
+  sold_to        INT REFERENCES users(id) ON DELETE SET NULL,
+  sold_at        TIMESTAMPTZ,
+  sold_from      TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS prewarmed_status ON prewarmed (status);
+CREATE INDEX IF NOT EXISTS prewarmed_domain ON prewarmed (domain);
+-- When each domain's registration expires (from RDAP), checked regularly.
+CREATE TABLE IF NOT EXISTS domain_expiry (
+  domain     TEXT PRIMARY KEY,
+  expires_on DATE,
+  registrar  TEXT NOT NULL DEFAULT '',
+  checked_at TIMESTAMPTZ,
+  error      TEXT NOT NULL DEFAULT ''
+);

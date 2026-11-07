@@ -23,6 +23,7 @@ const agreementPdf = require('./agreementPdf');
 const geo = require('./geo');
 const brandlogos = require('./brandlogos');
 const units = require('./units');
+const prewarmed = require('./prewarmed');
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -3212,6 +3213,118 @@ app.get('/brand/:id/logo', asyncRoute(async (req, res) => {
   res.set('Cache-Control', 'public, max-age=86400').type(r.logo_type).send(r.logo);
 }));
 
+
+// ---------------------------------------------------------------- pre-warmed inboxes
+// Mithmill's own stock of warmed inboxes (admin panel: Pre-warmed). Owner and
+// team; selling one to a client checks the team member may see that client.
+
+const PW_STATUSES = ['warming', 'available', 'premium', 'sold'];
+const pwIds = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);
+
+admin.get('/prewarmed', asyncRoute(async (req, res) => {
+  await prewarmed.advance();
+  const { rows } = await query(`SELECT p.id, p.email, p.domain, p.inbox_type, pr.label AS inbox_label, p.status, p.status_since, p.warmup_started,
+      p.sold_to, p.sold_at, p.sold_from, p.created_at, u.email AS sold_email, u.name AS sold_name, u.company AS sold_company,
+      x.expires_on, x.registrar, x.checked_at AS expiry_checked_at, x.error AS expiry_error
+    FROM prewarmed p LEFT JOIN pricing pr ON pr.inbox_type = p.inbox_type LEFT JOIN users u ON u.id = p.sold_to
+    LEFT JOIN domain_expiry x ON x.domain = p.domain
+    ORDER BY p.status_since DESC, p.email`);
+  const { rows: types } = await query("SELECT inbox_type, label FROM pricing WHERE inbox_type <> 'other' ORDER BY sort_order");
+  res.json({ rows, types, warmupDays: prewarmed.WARMUP_DAYS, premiumAfterDays: prewarmed.PREMIUM_AFTER_DAYS, today: billing.today() });
+}));
+
+app.get('/api/prewarmed-template.csv', (req, res) => {
+  res.type('text/csv').attachment('prewarmed-inboxes-sample.csv')
+    .send('email,password,type,warmup started\nanna@getacmeflow.com,Aw#7kQ2m!vX,Google Pre Warmed,2026-11-01\nben@getacmeflow.com,Bn$4pL9w@zR,Google Pre Warmed,2026-11-01\nchris@tryacmeflow.com,Cr!8tN3q#bK,Microsoft Pre Warmed,2026-10-20\n');
+});
+
+admin.post('/prewarmed', asyncRoute(async (req, res) => {
+  let list;
+  try { list = mailboxes.parse(req.body.csv); } catch (err) { throw new HttpError(400, err.message); }
+  const types = await domainTypes();
+  const formType = req.body.inbox_type ? matchType(req.body.inbox_type, types) : null;
+  const unknown = [...new Set(list.filter((m) => m.type && !matchType(m.type, types)).map((m) => m.type))];
+  if (unknown.length) throw new HttpError(400, `Unknown mailbox type: ${unknown.slice(0, 3).map((t) => `"${t}"`).join(', ')}. Use one of: ${types.map((t) => t.label).join(', ')}`);
+  const stage = req.body.status === 'available' ? 'available' : 'warming';
+  const startForm = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.started || '')) ? req.body.started : null;
+  let added = 0;
+  let updated = 0;
+  await inTransaction(async (db) => {
+    for (const m of list) {
+      const start = m.created || startForm || billing.today();
+      const { rows: [row] } = await db.query(
+        `INSERT INTO prewarmed (email, password, domain, inbox_type, status, status_since, warmup_started)
+         VALUES ($1, $2, $3, $4, $5, $6::date, $7::date)
+         ON CONFLICT (email) DO UPDATE SET password = EXCLUDED.password, inbox_type = COALESCE(EXCLUDED.inbox_type, prewarmed.inbox_type)
+         RETURNING (xmax = 0) AS inserted`,
+        [m.email, onboarding.encrypt(m.password), m.email.split('@')[1].toLowerCase(),
+          (m.type && matchType(m.type, types)) || formType || null, stage, start, start]);
+      if (row.inserted) added += 1; else updated += 1;
+    }
+  });
+  const moved = await prewarmed.advance();
+  await audit.record(req.user, 'added', `${list.length} pre-warmed inbox${list.length === 1 ? '' : 'es'}`,
+    [{ field: 'Uploaded', from: '', to: `${added} new, ${updated} updated` }], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  prewarmed.checkExpiry().catch((err) => console.warn('[prewarmed] expiry check failed:', err.message));
+  res.json({ added, updated, moved });
+}));
+
+admin.get('/prewarmed/:id/password', asyncRoute(async (req, res) => {
+  const { rows: [r] } = await query('SELECT password FROM prewarmed WHERE id = $1', [Number(req.params.id) || 0]);
+  if (!r) throw new HttpError(404, 'Inbox not found');
+  res.json({ password: onboarding.decrypt(r.password) });
+}));
+
+// Tag inboxes as sold to a client; by default they're also added to the
+// client's Mailboxes (and their domains to the client's Domains).
+admin.post('/prewarmed/sell', asyncRoute(async (req, res) => {
+  const ids = pwIds(req.body.ids);
+  if (!ids.length) throw new HttpError(400, 'Select the inboxes to sell');
+  const client = await assertClient(req, req.body.user_id);
+  const { rows: list } = await query("SELECT * FROM prewarmed WHERE id = ANY($1) AND status <> 'sold'", [ids]);
+  if (!list.length) throw new HttpError(400, 'Those inboxes are already sold');
+  await inTransaction(async (db) => {
+    for (const p of list) {
+      await db.query("UPDATE prewarmed SET status = 'sold', sold_from = status, status_since = now(), sold_to = $2, sold_at = now() WHERE id = $1", [p.id, client.id]);
+      if (req.body.add_to_mailboxes !== false) {
+        await db.query(
+          `INSERT INTO mailboxes (user_id, email, password, is_admin, inbox_type, created_on) VALUES ($1, $2, $3, false, $4, $5)
+           ON CONFLICT (user_id, email) DO UPDATE SET password = EXCLUDED.password, inbox_type = COALESCE(EXCLUDED.inbox_type, mailboxes.inbox_type), updated_at = now()`,
+          [client.id, p.email, p.password, p.inbox_type, p.warmup_started]);
+      }
+    }
+  });
+  if (req.body.add_to_mailboxes !== false) {
+    await domainsFromMailboxes(client.id, list.map((p) => ({ email: p.email, inbox_type: p.inbox_type })), null).catch((err) => console.warn('[prewarmed] domains:', err.message));
+  }
+  await audit.record(req.user, 'edited', `${list.length} pre-warmed inbox${list.length === 1 ? '' : 'es'} sold to ${client.company || client.name || client.email} <${client.email}>`,
+    [{ field: 'Inboxes', from: '', to: list.slice(0, 10).map((p) => p.email).join(', ') + (list.length > 10 ? ` +${list.length - 10} more` : '') }],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ sold: list.length, client: client.company || client.name || client.email });
+}));
+
+// Move inboxes to a stage by hand (e.g. back to Available after a sale fell through).
+admin.post('/prewarmed/move', asyncRoute(async (req, res) => {
+  const ids = pwIds(req.body.ids);
+  const status = String(req.body.status || '');
+  if (!ids.length || !PW_STATUSES.includes(status) || status === 'sold') throw new HttpError(400, 'Choose inboxes and a stage');
+  const r = await query("UPDATE prewarmed SET status = $2, status_since = now(), sold_to = NULL, sold_at = NULL, sold_from = NULL WHERE id = ANY($1)", [ids, status]);
+  res.json({ moved: r.rowCount });
+}));
+
+admin.post('/prewarmed/delete', asyncRoute(async (req, res) => {
+  const ids = pwIds(req.body.ids);
+  const r = await query('DELETE FROM prewarmed WHERE id = ANY($1)', [ids]);
+  await audit.record(req.user, 'deleted', `${r.rowCount} pre-warmed inbox${r.rowCount === 1 ? '' : 'es'}`, [], { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ deleted: r.rowCount });
+}));
+
+admin.post('/prewarmed/check-expiry', asyncRoute(async (req, res) => {
+  const { rows } = await query('SELECT DISTINCT domain FROM prewarmed');
+  prewarmed.checkExpiry({ force: rows.map((r) => r.domain) }).catch((err) => console.warn('[prewarmed] expiry check failed:', err.message));
+  res.json({ checking: rows.length });
+}));
+
 app.use('/api/admin', shared);
 app.use('/api/admin', admin);
 
@@ -3447,6 +3560,10 @@ async function scheduledBilling() {
     .catch((err) => console.error('Domain recheck failed:', err))
     .then(recheckDomains);
   setInterval(recheckDomains, 60 * 60 * 1000);
+  // Pre-warmed stock: stage moves hourly, domain expiry lookups in the background.
+  const prewarmTick = () => prewarmed.advance().then(() => prewarmed.checkExpiry()).catch((err) => console.warn('[prewarmed]', err.message));
+  prewarmTick();
+  setInterval(prewarmTick, 60 * 60 * 1000);
   connector.start().catch((err) => console.error('[connect] start failed:', err));
 })().catch((err) => {
   console.error(err);
