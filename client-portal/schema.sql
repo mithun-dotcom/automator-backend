@@ -491,3 +491,5 @@ CREATE TABLE IF NOT EXISTS domain_expiry (
 );
 -- Lookups that rdap.org refused (403, before lookups went to the registries directly) are retried.
 UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LIKE 'Lookup failed (403)%';
+-- Domains the .co registry rate-limited (429) are looked up again, now paced.
+UPDATE domain_expiry SET checked_at = NULL WHERE expires_on IS NULL AND error LIKE 'Lookup failed (429)%';

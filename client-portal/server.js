@@ -3582,6 +3582,8 @@ async function scheduledBilling() {
   const prewarmTick = () => prewarmed.advance().then(() => prewarmed.checkExpiry()).catch((err) => console.warn('[prewarmed]', err.message));
   prewarmTick();
   setInterval(prewarmTick, 60 * 60 * 1000);
+  // Expiry lookups also every 15 minutes, so rate-limited registries are retried soon.
+  setInterval(() => prewarmed.checkExpiry().catch((err) => console.warn('[prewarmed]', err.message)), 15 * 60 * 1000);
   connector.start().catch((err) => console.error('[connect] start failed:', err));
 })().catch((err) => {
   console.error(err);
