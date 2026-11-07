@@ -3228,11 +3228,20 @@ app.get('/brand/:id/logo', asyncRoute(async (req, res) => {
 
 const domainsAllowed = (req, res, next) => (req.user.role === 'admin' || (req.user.role === 'staff' && req.user.domains_access)
   ? next() : next(new HttpError(403, 'Not allowed')));
-const domScope = (req, alias = 'd') => (req.user.role === 'admin' ? 'true' : `${alias}.added_by = ${Number(req.user.id)}`);
+const domScope = (req, alias = 'd') => (req.user.role === 'admin' ? 'true' : `(${alias}.added_by = ${Number(req.user.id)} OR ${alias}.sold_by = ${Number(req.user.id)})`);
+// The team member chosen as "sold by" (owner only); null when none / not a team member.
+async function teamMemberId(v) {
+  const id = Number(v) || 0;
+  if (!id) return null;
+  const { rows: [u] } = await query("SELECT id FROM users WHERE id = $1 AND role IN ('admin', 'staff')", [id]);
+  if (!u) throw new HttpError(400, 'Choose a team member');
+  return u.id;
+}
 
 admin.get('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
-  const { rows } = await query(`SELECT d.*, a.name AS added_name, a.email AS added_email, c.name AS cancelled_name, c.email AS cancelled_email
-    FROM active_domains d LEFT JOIN users a ON a.id = d.added_by LEFT JOIN users c ON c.id = d.cancelled_by
+  const { rows } = await query(`SELECT d.*, a.name AS added_name, a.email AS added_email, c.name AS cancelled_name, c.email AS cancelled_email,
+      s.name AS sold_name, s.email AS sold_email
+    FROM active_domains d LEFT JOIN users a ON a.id = d.added_by LEFT JOIN users c ON c.id = d.cancelled_by LEFT JOIN users s ON s.id = d.sold_by
     WHERE ${domScope(req)} ORDER BY d.status, d.created_on DESC NULLS LAST, d.domain`);
   const team = req.user.role === 'admin'
     ? (await query("SELECT id, name, email FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows : [];
@@ -3271,19 +3280,21 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
       created: created || formDate || billing.today(), provider: (idx.provider >= 0 && String(c[idx.provider] || '').trim()) ? str(c[idx.provider], 80) : str(req.body.provider, 80), notes: idx.notes >= 0 ? str(c[idx.notes] || '', 300) : '' });
   }
   if (!items.length) throw new HttpError(400, bad.length ? `These aren't domains: ${bad.slice(0, 3).join(', ')}` : 'Add at least one domain');
+  // Sold by: the owner may pick a team member; a team member's own domains are sold by them.
+  const soldBy = req.user.role === 'admin' ? await teamMemberId(req.body.sold_by) : req.user.id;
   let added = 0;
   let updated = 0;
   const taken = [];
   for (const it of items) {
-    const { rows: [ex] } = await query('SELECT id, added_by, status FROM active_domains WHERE lower(domain) = $1', [it.domain]);
+    const { rows: [ex] } = await query('SELECT id, added_by, sold_by, status FROM active_domains WHERE lower(domain) = $1', [it.domain]);
     if (ex) {
-      if (req.user.role !== 'admin' && ex.added_by !== req.user.id) { taken.push(it.domain); it.skip = true; continue; }
+      if (req.user.role !== 'admin' && ex.added_by !== req.user.id && ex.sold_by !== req.user.id) { taken.push(it.domain); it.skip = true; continue; }
       await query(`UPDATE active_domains SET users_count = $2, created_on = $3, provider = COALESCE(NULLIF($4, ''), provider), notes = COALESCE(NULLIF($5, ''), notes),
-          status = 'active', cancelled_at = NULL, cancelled_by = NULL WHERE id = $1`, [ex.id, it.users, it.created, it.provider, it.notes]);
+          sold_by = COALESCE($6, sold_by), status = 'active', cancelled_at = NULL, cancelled_by = NULL WHERE id = $1`, [ex.id, it.users, it.created, it.provider, it.notes, soldBy]);
       updated += 1;
     } else {
-      await query('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by) VALUES ($1, $2, $3, $4, $5, $6)',
-        [it.domain, it.users, it.created, it.provider, it.notes, req.user.id]);
+      await query('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [it.domain, it.users, it.created, it.provider, it.notes, req.user.id, soldBy]);
       added += 1;
     }
   }
@@ -3315,7 +3326,8 @@ admin.post('/active-domains/cancel', domainsAllowed, asyncRoute(async (req, res)
   if (!ids.length) throw new HttpError(400, 'Select the domains to cancel');
   const note = str(req.body.note, 1000);
   const { rows } = await query(`UPDATE active_domains d SET status = 'cancelled', cancelled_at = now(), cancelled_by = $2
-    WHERE id = ANY($1) AND status = 'active' AND ${domScope(req)} RETURNING domain, users_count, created_on, provider, notes`, [ids, req.user.id]);
+    WHERE id = ANY($1) AND status = 'active' AND ${domScope(req)}
+    RETURNING domain, users_count, created_on, provider, notes, (SELECT COALESCE(NULLIF(name, ''), email) FROM users WHERE id = d.sold_by) AS sold_by_name`, [ids, req.user.id]);
   if (!rows.length) throw new HttpError(400, 'Those domains are already cancelled');
   rows.sort((a, b) => String(a.created_on).localeCompare(String(b.created_on)) || a.domain.localeCompare(b.domain));
   const { rows: [setting] } = await query("SELECT value FROM settings WHERE key = 'overdue_alert_emails'");
@@ -3324,7 +3336,7 @@ admin.post('/active-domains/cancel', domainsAllowed, asyncRoute(async (req, res)
   const who = req.user.watchedBy ? `${req.user.watchedBy.name || 'Owner'} (as ${req.user.name || req.user.email})` : (req.user.name || req.user.email);
   const totalUsers = rows.reduce((n, r) => n + (r.users_count || 0), 0);
   const fmt = (d) => (d ? billing.prettyDate(String(d).slice(0, 10)) : 'unknown');
-  const list = rows.map((r) => `- ${r.domain}: created ${fmt(r.created_on)}, ${r.users_count} user${r.users_count === 1 ? '' : 's'}${r.provider ? `, ${r.provider}` : ''}${r.notes ? ` (${r.notes})` : ''}`).join('\n');
+  const list = rows.map((r) => `- ${r.domain}: created ${fmt(r.created_on)}, ${r.users_count} user${r.users_count === 1 ? '' : 's'}${r.provider ? `, ${r.provider}` : ''}${r.sold_by_name ? `, sold by ${r.sold_by_name}` : ''}${r.notes ? ` (${r.notes})` : ''}`).join('\n');
   let emailed = false;
   if (to.length) {
     emailed = await sendMail({
@@ -3340,6 +3352,19 @@ admin.post('/active-domains/cancel', domainsAllowed, asyncRoute(async (req, res)
     [{ field: 'Domains', from: '', to: rows.slice(0, 10).map((r) => r.domain).join(', ') + (rows.length > 10 ? ` +${rows.length - 10} more` : '') }],
     { recipients: await activityRecipients(), appUrl: baseUrl(req) });
   res.json({ cancelled: rows.length, emailed: Boolean(emailed), to });
+}));
+
+// Push domains to a team member's portal (sold by them), or unassign (owner only).
+admin.post('/active-domains/assign', ownerOnly, asyncRoute(async (req, res) => {
+  const ids = domIds(req.body.ids);
+  if (!ids.length) throw new HttpError(400, 'Select the domains');
+  const to = await teamMemberId(req.body.user_id);
+  const r = await query('UPDATE active_domains SET sold_by = $2 WHERE id = ANY($1) RETURNING domain', [ids, to]);
+  const { rows: [m] } = to ? await query('SELECT name, email FROM users WHERE id = $1', [to]) : { rows: [] };
+  await audit.record(req.user, 'edited', `${r.rowCount} active domain${r.rowCount === 1 ? '' : 's'} ${m ? `pushed to ${m.name || m.email}` : 'unassigned'}`,
+    [{ field: 'Domains', from: '', to: r.rows.slice(0, 10).map((x) => x.domain).join(', ') + (r.rowCount > 10 ? ` +${r.rowCount - 10} more` : '') }],
+    { recipients: await activityRecipients(), appUrl: baseUrl(req) });
+  res.json({ assigned: r.rowCount, to: m ? (m.name || m.email) : null });
 }));
 
 admin.post('/active-domains/restore', domainsAllowed, asyncRoute(async (req, res) => {

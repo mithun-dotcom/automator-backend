@@ -514,3 +514,7 @@ CREATE TABLE IF NOT EXISTS active_domains (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS active_domains_domain ON active_domains (lower(domain));
+-- The team member a domain is sold by / pushed to (shows in their portal).
+ALTER TABLE active_domains ADD COLUMN IF NOT EXISTS sold_by INT REFERENCES users(id) ON DELETE SET NULL;
+UPDATE active_domains d SET sold_by = d.added_by FROM users u
+  WHERE d.sold_by IS NULL AND u.id = d.added_by AND u.role = 'staff';
