@@ -3285,15 +3285,24 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
   let added = 0;
   let updated = 0;
   const taken = [];
+  // A brief database lock (e.g. during a deploy) is retried rather than failing the upload.
+  const q = async (sql, params) => {
+    for (let i = 0; ; i++) {
+      try { return await query(sql, params); } catch (err) {
+        if (!['40P01', '40001', '55P03'].includes(err.code) || i >= 4) throw err;
+        await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+      }
+    }
+  };
   for (const it of items) {
-    const { rows: [ex] } = await query('SELECT id, added_by, sold_by, status FROM active_domains WHERE lower(domain) = $1', [it.domain]);
+    const { rows: [ex] } = await q('SELECT id, added_by, sold_by, status FROM active_domains WHERE lower(domain) = $1', [it.domain]);
     if (ex) {
       if (req.user.role !== 'admin' && ex.added_by !== req.user.id && ex.sold_by !== req.user.id) { taken.push(it.domain); it.skip = true; continue; }
-      await query(`UPDATE active_domains SET users_count = $2, created_on = $3, provider = COALESCE(NULLIF($4, ''), provider), notes = COALESCE(NULLIF($5, ''), notes),
+      await q(`UPDATE active_domains SET users_count = $2, created_on = $3, provider = COALESCE(NULLIF($4, ''), provider), notes = COALESCE(NULLIF($5, ''), notes),
           sold_by = COALESCE($6, sold_by), status = 'active', cancelled_at = NULL, cancelled_by = NULL WHERE id = $1`, [ex.id, it.users, it.created, it.provider, it.notes, soldBy]);
       updated += 1;
     } else {
-      await query('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      await q('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING',
         [it.domain, it.users, it.created, it.provider, it.notes, req.user.id, soldBy]);
       added += 1;
     }
