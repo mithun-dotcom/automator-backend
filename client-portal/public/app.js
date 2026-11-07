@@ -224,6 +224,7 @@ const ICONS = {
   receipt: '<path d="M5 2.5h14v19l-2.3-1.5-2.4 1.5-2.3-1.5-2.3 1.5-2.4-1.5L5 21.5z"/><path d="M9 7.5h6M9 11.5h6M9 15.5h4"/>',
   link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/>',
   x: '<path d="M17 7 7 17M7 7l10 10"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
   minus: '<path d="M6 12h12"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
@@ -285,6 +286,32 @@ const typeChip = (type, label) => (label ? `<span class="type-chip">${brandLogo(
 // A mailbox's avatar: initials on a colour picked from the address, with the
 // provider's mark as a badge.
 const AVATAR_TONES = [['#eef2ff', '#4338ca'], ['#ecfeff', '#0e7490'], ['#fdf2f8', '#be185d'], ['#f0fdf4', '#15803d'], ['#fff7ed', '#c2410c'], ['#f5f3ff', '#6d28d9'], ['#eff6ff', '#1d4ed8'], ['#fefce8', '#a16207']];
+// A person's avatar: initials of their name (or email) on a colour picked
+// from their email, so each client keeps the same colour everywhere.
+function personAvatar(name, email, cls = '') {
+  const words = String(name || '').replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+  const local = String(email || '').split('@')[0].split(/[._-]+/).filter(Boolean);
+  const src = words.length ? words : local;
+  const ini = ((src[0] || '?')[0] + (src[1] ? src[1][0] : (src[0] || '')[1] || '')).toUpperCase();
+  let h = 0; for (const ch of String(email || name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const [bg, fg] = AVATAR_TONES[h % AVATAR_TONES.length];
+  return `<span class="mb-avatar ${cls}" style="--av-bg:${bg};--av-fg:${fg}">${esc(ini)}</span>`;
+}
+// Admin lists: avatar and name; the chevron opens the details (contact, email, sold by).
+function clientCell(c, extra = '') {
+  const title = c.company || c.name || c.email;
+  return `<details class="client-cell">
+    <summary>${personAvatar(title, c.email)}<span class="cc-name">${esc(title)}</span><span class="cc-chev">${icon('chevron')}</span></summary>
+    <div class="cc-body">
+      ${c.company && c.name ? `<div class="cc-row">${icon('team')}<span>${esc(c.name)}</span></div>` : ''}
+      <div class="cc-row">${icon('mail')}<span class="cc-email">${esc(c.email)}</span><button type="button" class="icon-btn icon-btn-sm" data-copy-ns="${esc(c.email)}" data-copy-what="Email" title="Copy email" aria-label="Copy ${esc(c.email)}">${icon('copy')}</button></div>
+      <div class="cc-row">${icon('reseller')}<span>${c.seller ? `Sold by <strong>${esc(c.seller)}</strong>` : '<span class="muted">Sold by: not set</span>'}</span></div>
+      ${extra}
+    </div></details>`;
+}
+// A compact "More" menu for secondary actions.
+const moreMenu = (items) => `<details class="menu"><summary class="btn btn-sm btn-ghost menu-btn" aria-label="More actions"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/></svg></summary><div class="menu-pop">${items}</div></details>`;
+
 function mailboxAvatar(email, type, label) {
   const local = String(email || '').split('@')[0].replace(/[^a-z0-9._-]/gi, '');
   const parts = local.split(/[._-]+/).filter(Boolean);
@@ -1602,20 +1629,26 @@ function adminClients() {
           { name: 'active', label: 'Mailboxes: any', options: [['yes', 'Has active mailboxes'], ['no', 'No active mailboxes']] },
         ]) : ''}
         ${clients.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Client</th><th>Account</th><th>Pricing</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th>Added</th><th></th></tr></thead>
+          <thead><tr><th>Client</th><th>Account</th><th>Pricing</th><th class="num">Active mailboxes</th><th class="num">Monthly</th><th></th></tr></thead>
           <tbody>${clients.map((c) => {
             const custom = clientPricing.filter((cp) => cp.user_id === c.id);
             return `<tr data-id="${c.id}" data-search="${searchText(c.company, c.name, c.email, c.seller)}" data-seller="${esc(c.seller || '__none')}"
               data-account="${c.password_set ? 'joined' : c.invited ? 'invited' : 'not_invited'}" data-active="${c.active_mailboxes > 0 ? 'yes' : 'no'}">
-            <td>${esc(c.company || c.name)}<div class="muted small">${esc(c.name)} · ${esc(c.email)}</div>${c.seller ? `<div class="muted small">Sold by <strong>${esc(c.seller)}</strong></div>` : ''}</td>
+            <td>${clientCell(c, `<div class="cc-row">${icon('calendar')}<span>Added ${fmtDate(c.created_at)}</span></div>`)}</td>
             <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}
               ${isOwner() ? `<label class="access-toggle" title="Turn off to block this client from the portal for now"><span class="switch switch-sm"><input type="checkbox" data-access="${c.id}" aria-label="Portal access for ${esc(c.email)}" ${c.access_blocked ? '' : 'checked'}><span></span></span><span class="small ${c.access_blocked ? 'access-off' : 'muted'}">${c.access_blocked ? 'Access blocked' : 'Portal access'}</span></label>`
                 : c.access_blocked ? '<div class="small access-off">Access blocked</div>' : ''}</td>
             <td>${custom.length ? `<span class="badge b-in_progress">Custom</span><div class="muted small">${custom.map((cp) => `${esc(labelOf(cp.inbox_type))} ${money(cp.price_per_mailbox)}`).join('<br>')}</div>` : '<span class="muted small">Standard</span>'}</td>
-            <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
-            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-prices="${c.id}">Edit pricing</button><button class="btn btn-sm btn-ghost" data-reset="${esc(c.email)}">${c.password_set ? 'Reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button><a class="btn btn-sm" href="#/admin/mailboxes/${c.id}">Mailboxes${c.mailbox_count ? ` (${c.mailbox_count})` : ''}</a>${watchBtn(c.id)}${isOwner() ? `<button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button>` : ''}</div></td>
+            <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td>
+            <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button>${watchBtn(c.id)}${moreMenu(`
+              <button type="button" class="menu-item" data-edit="${c.id}">${icon('settings')}Edit client</button>
+              <button type="button" class="menu-item" data-prices="${c.id}">${icon('billing')}Edit pricing</button>
+              <button type="button" class="menu-item" data-reset="${esc(c.email)}">${icon('send')}${c.password_set ? 'Send reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button>
+              <a class="menu-item" href="#/admin/mailboxes/${c.id}">${icon('mail')}Mailboxes${c.mailbox_count ? ` (${c.mailbox_count})` : ''}</a>
+              <a class="menu-item" href="#/admin/domains/${c.id}">${icon('globe')}Domains${c.domain_count ? ` (${c.domain_count})` : ''}</a>
+              ${isOwner() ? `<div class="menu-sep"></div><button type="button" class="menu-item menu-danger" data-delete-client="${c.id}">${icon('close')}Delete client</button>` : ''}`)}</div></td>
           </tr>
-          <tr class="price-row" id="prices-${c.id}" data-for="${c.id}" hidden><td colspan="7">
+          <tr class="price-row" id="prices-${c.id}" data-for="${c.id}" hidden><td colspan="6">
             <form class="client-prices" data-id="${c.id}">
               <p class="muted small" style="margin:0 0 12px">Price per mailbox / month for ${esc(c.company || c.name || c.email)}. Leave a field blank to use the standard price. New orders from this client use these prices.</p>
               <div class="grid-4">${pricing.map((p) => {
@@ -2649,7 +2682,7 @@ function resellerClients() {
             <td>${esc(c.company || c.name || c.email)}<div class="muted small">${c.name && c.company ? `${esc(c.name)} · ` : ''}${esc(c.email)}</div></td>
             <td>${c.password_set ? '<span class="badge b-active">Joined</span>' : c.invited ? '<span class="badge b-in_progress">Invited</span>' : '<span class="badge b-pending">Not invited</span>'}
               <div><button class="btn btn-sm btn-ghost" data-rc-invite="${c.id}" data-email="${esc(c.email)}">${c.password_set ? 'Send reset link' : c.invited ? 'Resend invite' : 'Send invite'}</button></div></td>
-            <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td><td>${fmtDate(c.created_at)}</td>
+            <td class="num">${c.active_mailboxes}</td><td class="num">${money(c.monthly)}</td>
             <td><div class="row client-actions"><button class="btn btn-sm btn-primary" data-batch="${c.id}">+ Add batch</button><button class="btn btn-sm" data-edit="${c.id}">Edit</button><button class="btn btn-sm btn-danger" data-delete-client="${c.id}">Delete</button></div></td>
           </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet. Add your first one above.</div>'}
       </div>
@@ -3446,18 +3479,21 @@ function adminMailboxes() {
     <div class="stack">
     ${uploadGuide('mailboxes', !clients.some((c) => c.mailbox_count))}
     <div class="card">
-      ${clients.length ? `<div class="filter-bar"><input id="mb-search" class="mb-search" type="search" placeholder="Search name, email, company…"></div>
+      ${clients.length ? `${filterBar('mbclients', [
+          { name: 'seller', label: 'Sold by: anyone', options: sellerOptions(clients) },
+          { name: 'logins', label: 'Logins: any', options: [['missing', 'Missing logins'], ['uploaded', 'Uploaded'], ['none', 'None yet']] },
+        ])}
       <div class="table-wrap"><table>
         <thead><tr><th>Client</th><th class="num">Mailboxes bought</th><th class="num">Logins uploaded</th><th></th></tr></thead>
-        <tbody>${clients.map((c) => `<tr data-mb="${c.id}" data-search="${searchText(c.name, c.company, c.email)}">
-          <td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td>
+        <tbody>${clients.map((c) => `<tr data-id="${c.id}" data-search="${searchText(c.name, c.company, c.email, c.seller)}" data-seller="${esc(c.seller || '__none')}" data-logins="${!c.mailbox_count ? 'none' : c.active_mailboxes && c.mailbox_count < c.active_mailboxes ? 'missing uploaded' : 'uploaded'}">
+          <td>${clientCell(c)}</td>
           <td class="num">${c.active_mailboxes || '<span class="muted">0</span>'}</td>
           <td class="num">${c.mailbox_count ? `<strong>${c.mailbox_count}</strong>` : '<span class="muted">0</span>'}${c.active_mailboxes && c.mailbox_count < c.active_mailboxes ? '<div class="small access-off">Missing logins</div>' : ''}</td>
           <td><a class="btn btn-sm ${c.mailbox_count ? '' : 'btn-primary'}" href="#/admin/mailboxes/${c.id}">${c.mailbox_count ? 'Manage' : 'Upload logins'}</a></td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
     </div>
     </div>`);
-  wireMailboxTable(() => '');
+  wireFilterBar('mbclients');
 }
 
 // Admin: one client's mailbox logins, with the CSV upload.
@@ -3691,18 +3727,21 @@ function adminDomains() {
     <div class="stack">
     ${uploadGuide('domains', false)}
     <div class="card">
-      ${clients.length ? `<div class="filter-bar"><input id="mb-search" class="mb-search" type="search" placeholder="Search name, email, company…"></div>
+      ${clients.length ? `${filterBar('domclients', [
+          { name: 'seller', label: 'Sold by: anyone', options: sellerOptions(clients) },
+          { name: 'dns', label: 'DNS: any', options: [['issues', 'Needs attention'], ['ok', 'All healthy'], ['none', 'No domains']] },
+        ])}
       <div class="table-wrap"><table>
         <thead><tr><th>Client</th><th class="num">Domains</th><th>DNS</th><th></th></tr></thead>
-        <tbody>${clients.map((c) => `<tr data-mb="${c.id}" data-search="${searchText(c.name, c.company, c.email)}">
-          <td><strong>${esc(c.company || c.name || c.email)}</strong><div class="muted small">${esc(c.email)}</div></td>
+        <tbody>${clients.map((c) => `<tr data-id="${c.id}" data-search="${searchText(c.name, c.company, c.email, c.seller)}" data-seller="${esc(c.seller || '__none')}" data-dns="${!c.domain_count ? 'none' : c.domain_issues ? 'issues' : 'ok'}">
+          <td>${clientCell(c)}</td>
           <td class="num">${c.domain_count || '<span class="muted">0</span>'}</td>
-          <td>${!c.domain_count ? '<span class="muted">—</span>' : c.domain_issues ? `<span class="badge dns-st dns-warn">${c.domain_issues} need${c.domain_issues === 1 ? 's' : ''} attention</span>` : '<span class="badge b-active">All OK</span>'}</td>
+          <td>${!c.domain_count ? '<span class="cf-none">No domains yet</span>' : c.domain_issues ? `<span class="dns-health dh-warn"><span class="dh-ring" style="--p:${Math.round(((c.domain_count - c.domain_issues) / c.domain_count) * 100)}"><span>${icon('alert')}</span></span><span class="dh-label">${c.domain_issues} need${c.domain_issues === 1 ? 's' : ''} attention</span></span>` : `<span class="dns-health dh-ok"><span class="dh-ring" style="--p:100"><span>${icon('check')}</span></span><span class="dh-label">All healthy</span></span>`}</td>
           <td><a class="btn btn-sm ${c.domain_count ? '' : 'btn-primary'}" href="#/admin/domains/${c.id}">${c.domain_count ? 'Manage' : 'Add domains'}</a></td>
         </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No clients yet.</div>'}
     </div>
     </div>`);
-  wireMailboxTable(() => '');
+  wireFilterBar('domclients');
 }
 
 // Admin: one client's domains.
@@ -3952,5 +3991,23 @@ pageEnter();
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-copy-ns]');
   if (!b) return;
-  navigator.clipboard.writeText(b.dataset.copyNs).then(() => { toast('Nameserver copied'); b.classList.add('copied'); setTimeout(() => b.classList.remove('copied'), 1200); }).catch(() => toast(b.dataset.copyNs));
+  navigator.clipboard.writeText(b.dataset.copyNs).then(() => { toast(`${b.dataset.copyWhat || 'Nameserver'} copied`); b.classList.add('copied'); setTimeout(() => b.classList.remove('copied'), 1200); }).catch(() => toast(b.dataset.copyNs));
 });
+
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('details.menu[open]').forEach((m) => { if (!m.contains(e.target) || e.target.closest('.menu-item')) m.open = false; });
+});
+// Menus open as a floating panel (fixed, so table scroll areas don't clip them).
+document.addEventListener('toggle', (e) => {
+  const m = e.target;
+  if (!(m instanceof HTMLDetailsElement) || !m.classList.contains('menu') || !m.open) return;
+  document.querySelectorAll('details.menu[open]').forEach((x) => { if (x !== m) x.open = false; });
+  const pop = m.querySelector('.menu-pop');
+  const r = m.querySelector('summary').getBoundingClientRect();
+  pop.style.top = `${r.bottom + 6}px`;
+  pop.style.left = '';
+  pop.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+  const ph = pop.offsetHeight;
+  if (r.bottom + 6 + ph > window.innerHeight - 8) pop.style.top = `${Math.max(8, r.top - ph - 6)}px`;
+}, true);
+window.addEventListener('scroll', () => document.querySelectorAll('details.menu[open]').forEach((x) => { x.open = false; }), { passive: true });
