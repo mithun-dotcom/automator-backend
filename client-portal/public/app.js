@@ -3845,12 +3845,15 @@ function adminActiveDomains(data) {
       <div class="card">
         <div class="filter-bar pw-filters">
           <div class="seg">${[['active', `Active · ${active.length}`], ['cancelled', `Cancelled · ${cancelled.length}`]].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-dmntab="${k}">${l}</button>`).join('')}</div>
-          <input type="search" class="fb-q" id="dmn-q" placeholder="Search, or paste several domains…" value="${esc(ui.q)}">
+          <label class="bulk-toggle" title="Paste a list of domains to find them all at once"><input type="checkbox" id="dmn-bulk-on" ${ui.bulk ? 'checked' : ''}><span>Bulk search</span></label>
+          ${ui.bulk ? `<textarea class="fb-q bulk-q" id="dmn-q" rows="3" placeholder="Paste domains, one per line (or separated by commas or spaces)">${esc(ui.q)}</textarea>`
+            : `<input type="search" class="fb-q" id="dmn-q" placeholder="Search domain, tag, provider…" value="${esc(ui.q)}">`}
           ${owner && team.length > 1 ? `<select id="dmn-by"><option value="">Sold by: anyone</option><option value="none" ${ui.by === 'none' ? 'selected' : ''}>Not assigned</option>${team.map((t) => `<option value="${t.id}" ${String(ui.by) === String(t.id) ? 'selected' : ''}>${esc(t.name || t.email)}</option>`).join('')}</select>` : ''}
           <select id="dmn-tagf"><option value="">Tag: any</option>${tags.map((t) => `<option value="${t.id}" ${String(ui.tag) === String(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}<option value="none" ${ui.tag === 'none' ? 'selected' : ''}>No tag</option></select>
           <button type="button" class="btn btn-sm" id="dmn-tags">${icon('settings')}Tags</button>
           <button type="button" class="btn btn-sm" id="dmn-dl">${icon('download')}<span>Download</span></button>
         </div>
+        <div class="bulk-result" id="dmn-bulkres" hidden></div>
         <div class="pw-bulk" id="dmn-bulk" hidden><span id="dmn-count"></span>
           ${ui.tab === 'active' ? `<button class="btn btn-sm btn-danger-solid" id="dmn-cancel">${icon('close')}Cancel domains</button>` : `<button class="btn btn-sm" id="dmn-restore">${icon('refresh')}Restore</button>`}
           <details class="menu tag-menu"><summary class="btn btn-sm">${icon('link')}Tag</summary><div class="menu-pop">
@@ -3864,11 +3867,14 @@ function adminActiveDomains(data) {
       </div>
     </div>`);
 
+  const bulkList = () => [...new Set(ui.q.toLowerCase().split(/[\s,;]+/)
+    .map((w) => w.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '').replace(/^.*@/, ''))
+    .filter((w) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(w)))];
   const matches = () => {
     const words = ui.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    // Several domains pasted into search: show any of them.
-    const list = ui.q.toLowerCase().split(/[\s,;]+/).filter((w) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(w));
-    if (list.length > 1) {
+    // Bulk search (or several domains pasted into search): show exactly those.
+    const list = bulkList();
+    if (ui.bulk ? list.length : list.length > 1) {
       const set = new Set(list);
       return rows.filter((r) => r.status === ui.tab && set.has(r.domain.toLowerCase()));
     }
@@ -3895,6 +3901,19 @@ function adminActiveDomains(data) {
   }
   function drawList() {
     const filtered = matches();
+    const res = document.getElementById('dmn-bulkres');
+    const list = bulkList();
+    if (ui.bulk && list.length) {
+      const found = new Set(filtered.map((r) => r.domain.toLowerCase()));
+      const missing = list.filter((d) => !found.has(d));
+      const allSel = filtered.length && filtered.every((r) => ui.sel.has(r.id));
+      res.hidden = false;
+      res.innerHTML = `<span class="bulk-stat ok">${icon('check')}<strong>${found.size}</strong> of ${list.length} found${filtered.length !== found.size ? ` · ${filtered.length} purchases` : ''}</span>
+        ${missing.length ? `<span class="bulk-stat bad" title="${esc(missing.join(', '))}">${icon('x')}<strong>${missing.length}</strong> not on this list${ui.tab === 'active' ? ' (or cancelled)' : ''}: ${missing.slice(0, 6).map(esc).join(', ')}${missing.length > 6 ? '…' : ''}</span>` : ''}
+        ${filtered.length ? `<button type="button" class="btn btn-sm ${allSel ? '' : 'btn-primary'}" id="dmn-bulk-sel">${allSel ? 'All selected' : `Select all ${filtered.length}`}</button>` : ''}`;
+      const bs = document.getElementById('dmn-bulk-sel');
+      if (bs) bs.onclick = () => { filtered.forEach((r) => ui.sel.add(r.id)); renderList(); };
+    } else res.hidden = true;
     const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
     ui.page = Math.min(Math.max(1, ui.page), pages);
     const slice = filtered.slice((ui.page - 1) * PAGE, ui.page * PAGE);
@@ -3958,6 +3977,13 @@ function adminActiveDomains(data) {
   document.querySelectorAll('[data-dmntab]').forEach((b) => { b.onclick = () => { ui.tab = b.dataset.dmntab; ui.page = 1; ui.sel.clear(); adminActiveDomains(data); }; });
   let qt;
   document.getElementById('dmn-q').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { ui.q = e.target.value; ui.page = 1; renderList(); }, 150); };
+  document.getElementById('dmn-bulk-on').onchange = (e) => {
+    ui.bulk = e.target.checked;
+    ui.q = ''; ui.page = 1;
+    adminActiveDomains(data);
+    const box = document.getElementById('dmn-q');
+    if (box) box.focus();
+  };
   const by = document.getElementById('dmn-by');
   if (by) by.onchange = () => { ui.by = by.value; ui.page = 1; renderList(); };
   document.getElementById('dmn-clear').onclick = () => { ui.sel.clear(); renderList(); };
