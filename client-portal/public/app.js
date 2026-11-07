@@ -192,7 +192,7 @@ async function route() {
     $app.innerHTML = `<div class="boot">${esc(ex.message)}</div>`;
   }
 }
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => { pageEnter(); route(); });
 
 // Tells the Tawk.to chat (loaded in index.html) who is chatting, so chats show
 // the person's name, email and whether they're a client, reseller or admin.
@@ -236,6 +236,42 @@ const ICONS = {
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+
+// ---- Brand marks for mailbox types (Google, Microsoft, Azure; pre-warmed
+// types get a small flame). The provider is read from the type key or label,
+// so types the owner adds later pick up the right mark too.
+const BRAND_SVG = {
+  google: '<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FBBC05" d="M43.6 20.1H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 8 3l5.7-5.7C34 6.1 29.3 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.6-.4-3.9z"/><path fill="#EA4335" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 8 3l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#34A853" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2A11.9 11.9 0 0 1 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#4285F4" d="M43.6 20.1H42V20H24v8h11.3a12 12 0 0 1-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.9z"/></svg>',
+  microsoft: '<svg viewBox="0 0 23 23" aria-hidden="true"><path fill="#F25022" d="M1 1h10v10H1z"/><path fill="#7FBA00" d="M12 1h10v10H12z"/><path fill="#00A4EF" d="M1 12h10v10H1z"/><path fill="#FFB900" d="M12 12h10v10H12z"/></svg>',
+  azure: '<svg viewBox="0 0 96 96" aria-hidden="true"><defs><linearGradient id="az-a" x1="58.97" y1="9.23" x2="31.04" y2="91.7" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#114a8b"/><stop offset="1" stop-color="#0669bc"/></linearGradient><linearGradient id="az-c" x1="46.2" y1="11.48" x2="76.86" y2="93.18" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3ccbf4"/><stop offset="1" stop-color="#2892df"/></linearGradient></defs><path fill="url(#az-a)" d="M33.34 6.54h26.04l-27.03 80.1a4.15 4.15 0 0 1-3.94 2.81H8.15a4.14 4.14 0 0 1-3.93-5.47L29.4 9.37a4.15 4.15 0 0 1 3.94-2.83z"/><path fill="#0078d4" d="M71.18 60.26H29.89a1.91 1.91 0 0 0-1.31 3.31l26.53 24.76a4.17 4.17 0 0 0 2.85 1.12h23.38z"/><path fill="url(#az-c)" d="M66.6 9.36a4.14 4.14 0 0 0-3.93-2.82H33.65a4.15 4.15 0 0 1 3.93 2.82l25.18 74.62a4.15 4.15 0 0 1-3.93 5.47h29.02a4.15 4.15 0 0 0 3.93-5.47z"/></svg>',
+  other: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#64748b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></svg>',
+};
+const FLAME_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#f97316" d="M12 2s5 4.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 1-3.5S9 11 10.5 11C10.5 7 12 2 12 2z"/><path fill="#fde047" d="M12 13s2 1.6 2 3.4a2 2 0 0 1-4 0c0-1.3 2-3.4 2-3.4z"/></svg>';
+function brandOf(type, label) {
+  const k = `${type || ''} ${label || ''}`.toLowerCase();
+  return {
+    brand: /google|gmail|gsuite|workspace/.test(k) ? 'google' : /azure/.test(k) ? 'azure' : /m365|microsoft|office|outlook|365/.test(k) ? 'microsoft' : 'other',
+    warm: /pre[\s_-]?warm/.test(k),
+  };
+}
+// Just the mark, sized by the caller's font-size.
+function brandLogo(type, label, cls = '') {
+  const { brand, warm } = brandOf(type, label);
+  return `<span class="brand-logo brand-${brand} ${cls}" title="${esc(label || '')}">${BRAND_SVG[brand]}${warm ? `<span class="brand-warm">${FLAME_SVG}</span>` : ''}</span>`;
+}
+// Mark + name, for tables and lists.
+const typeChip = (type, label) => (label ? `<span class="type-chip">${brandLogo(type, label)}<span>${esc(label)}</span></span>` : '<span class="muted">—</span>');
+// A mailbox's avatar: initials on a colour picked from the address, with the
+// provider's mark as a badge.
+const AVATAR_TONES = [['#eef2ff', '#4338ca'], ['#ecfeff', '#0e7490'], ['#fdf2f8', '#be185d'], ['#f0fdf4', '#15803d'], ['#fff7ed', '#c2410c'], ['#f5f3ff', '#6d28d9'], ['#eff6ff', '#1d4ed8'], ['#fefce8', '#a16207']];
+function mailboxAvatar(email, type, label) {
+  const local = String(email || '').split('@')[0].replace(/[^a-z0-9._-]/gi, '');
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  const ini = ((parts[0] || '?')[0] + (parts[1] ? parts[1][0] : (parts[0] || '')[1] || '')).toUpperCase();
+  let h = 0; for (const ch of String(email)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const [bg, fg] = AVATAR_TONES[h % AVATAR_TONES.length];
+  return `<span class="mb-avatar" style="--av-bg:${bg};--av-fg:${fg}">${esc(ini)}${type || label ? `<span class="mb-avatar-badge">${brandLogo(type, label)}</span>` : ''}</span>`;
+}
 const NAV_ICONS = {
   '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
   '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
@@ -548,8 +584,8 @@ function batchesTable(orders) {
       const mailboxes = all.filter((p) => p.inbox_type !== 'other').reduce((n, p) => n + p.quantity, 0);
       return `<tr>
       <td>${o.batch_name ? `<strong>${esc(o.batch_name)}</strong><div class="muted small">#${o.id}</div>` : `#${o.id}`}</td>
-      <td>${multi ? all.map((p) => `<div class="batch-part"><strong>${p.inbox_type === 'other' ? esc(p.batch_name || 'Other service') : esc(p.inbox_label)}</strong> <span class="muted small">× ${p.quantity}${p.status === 'cancelled' ? ' · cancelled' : ''} · ${money(cycleAmount(p))}</span></div>`).join('')
-        : esc(o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
+      <td>${multi ? all.map((p) => `<div class="batch-part"><strong>${p.inbox_type === 'other' ? `${brandLogo('other', '')} ${esc(p.batch_name || 'Other service')}` : typeChip(p.inbox_type, p.inbox_label)}</strong> <span class="muted small">× ${p.quantity}${p.status === 'cancelled' ? ' · cancelled' : ''} · ${money(cycleAmount(p))}</span></div>`).join('')
+        : typeChip(o.inbox_type, o.inbox_label)}<div class="muted small">${esc(lines(o.domains).slice(0, 2).join(', '))}${lines(o.domains).length > 2 ? '…' : ''}</div></td>
       <td class="num">${multi ? mailboxes : o.quantity}</td>
       <td>${badge(o.status)}</td>
       <td class="num">${o.status === 'cancelled' ? '<span class="muted">—</span>' : money(live.reduce((t, p) => t + cycleAmount(p), 0))}</td>
@@ -720,7 +756,7 @@ function renderBilling() {
         <div class="card-head"><h2>Upcoming renewals</h2><span class="muted small">Reminders are sent 7, 3 and 1 day before each renewal.</span></div>
         ${active.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Batch</th><th>Type</th><th class="num">Mailboxes</th><th>Renews on</th><th class="num">Amount</th></tr></thead>
-          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${esc(o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
+          <tbody>${active.map((o) => `<tr><td>${esc(batchTitle(o))}</td><td>${typeChip(o.inbox_type, o.inbox_label)}</td><td class="num">${o.quantity}</td><td>${fmtDate(o.next_billing_date)}</td><td class="num">${money(cycleAmount(o))}</td></tr>`).join('')}</tbody>
         </table></div>` : '<div class="empty">No active batches yet.</div>'}
       </div>
       <div class="card">
@@ -769,6 +805,7 @@ function renderOrder() {
         <h2 style="margin-bottom:14px">Which inbox type do you need?</h2>
         <div class="types">${pricing.map((p) => `
           <button type="button" class="type ${data.inbox_type === p.inbox_type ? 'sel' : ''}" data-type="${esc(p.inbox_type)}">
+            <div class="t-logo">${brandLogo(p.inbox_type, p.label)}</div>
             <div class="t-name">${esc(p.label)}</div>
             <div class="t-price">${money(p.price_per_mailbox)} per mailbox / month</div>
             <div class="t-desc">${esc(p.description || TYPE_INFO[p.inbox_type] || '')}</div>
@@ -1116,7 +1153,7 @@ function adminOrders(focusId) {
         <summary>
           <strong>#${o.id}</strong>
           <span>${esc(o.company || o.name || o.email)}<div class="muted small">${o.parent_order_id ? `<strong>Part of batch #${o.parent_order_id}</strong> (same invoice) · ` : ''}${o.batch_name ? `${esc(o.batch_name)} · ` : ''}${esc(o.email)}${o.seller ? ` · Sold by ${esc(o.seller)}` : ''}</div></span>
-          <span class="hide-sm">${esc(o.inbox_label)}</span>
+          <span class="hide-sm">${typeChip(o.inbox_type, o.inbox_label)}</span>
           <span class="hide-sm num">${o.quantity} boxes</span>
           <span class="hide-sm">${o.status === 'active' && o.next_billing_date ? `${fmtDate(o.next_billing_date)}<div class="muted small">${cycleName(cycleOf(o))}</div>` : `<span class="muted small">Ordered</span> ${fmtDate(o.created_at)}`}</span>
           <span>${badge(o.status)}</span>
@@ -1996,7 +2033,7 @@ function renderInvoiceView(inv, isAdmin) {
       <div class="table-wrap"><table class="inv-items">
         <thead><tr><th>Mailbox type</th><th>Batch</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
         <tbody>${inv.items.map((it) => `<tr>
-          <td>${esc(typeLabel(it.inbox_type, inv.pricing)) || '—'}</td><td>${esc(it.batch_name) || '—'}</td><td>${esc(it.description)}</td>
+          <td>${typeLabel(it.inbox_type, inv.pricing) ? typeChip(it.inbox_type, typeLabel(it.inbox_type, inv.pricing)) : '—'}</td><td>${esc(it.batch_name) || '—'}</td><td>${esc(it.description)}</td>
           <td class="num">${qty(it.quantity)}</td><td class="num">${money(it.unit_price)}</td><td class="num">${money(it.quantity * it.unit_price)}</td></tr>`).join('')}</tbody>
       </table></div>
       <div class="totals inv-totals">
@@ -2482,7 +2519,7 @@ function renderAnalytics(data) {
       <div class="charts">
         <div class="card"><div class="card-head"><div><h2>Mailboxes sold by type</h2><div class="muted small">${rangeText(from, to)} · active on ${prettyDay(to)}</div></div></div>
           ${byType.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th class="num">Sold</th><th class="num">Before</th><th class="num">Active</th><th class="num">MRR</th></tr></thead><tbody>
-            ${byType.map((t) => `<tr><td><strong>${esc(t.label)}</strong><div class="hbar-track" style="margin-top:6px"><div class="hbar-fill" style="width:${(Number(t.sold) / maxSold) * 100}%"></div></div></td>
+            ${byType.map((t) => `<tr><td><strong>${typeChip(t.inbox_type, t.label)}</strong><div class="hbar-track" style="margin-top:6px"><div class="hbar-fill" style="width:${(Number(t.sold) / maxSold) * 100}%"></div></div></td>
               <td class="num"><strong>${count(t.sold)}</strong><div class="muted small">${money(t.sold_value)}/mo</div></td><td class="num">${count(t.prev_sold)}</td><td class="num">${count(t.active)}</td><td class="num">${money(t.mrr)}</td></tr>`).join('')}
             <tr class="an-total"><td><strong>Total</strong></td><td class="num"><strong>${count(cur.mailboxes_sold)}</strong></td><td class="num">${count(prev.mailboxes_sold)}</td><td class="num">${count(cur.mailboxes)}</td><td class="num">${money(cur.mrr)}</td></tr>
           </tbody></table></div>` : '<div class="card-pad muted">No mailboxes in this period.</div>'}</div>
@@ -2844,7 +2881,7 @@ function renderResellerDetail({ reseller: r, clients, orders, invoices, today, m
       <div class="card">
         <div class="card-head"><h2>Their batches</h2><span class="muted small">${active.length} active</span></div>
         ${orders.length ? `<div class="table-wrap"><table><thead><tr><th>Batch</th><th>Client</th><th class="num">Mailboxes</th><th class="num">Price</th><th>Renews</th><th>Status</th></tr></thead><tbody>
-          ${orders.map((o) => `<tr><td>${esc(batchTitle(o))}<div class="muted small">${esc(o.inbox_label)}${o.domains ? ` · ${esc(o.domains.split('\n').filter(Boolean).length)} domain(s)` : ''}</div></td>
+          ${orders.map((o) => `<tr><td>${esc(batchTitle(o))}<div class="muted small">${typeChip(o.inbox_type, o.inbox_label)}${o.domains ? ` · ${esc(o.domains.split('\n').filter(Boolean).length)} domain(s)` : ''}</div></td>
             <td>${esc(o.company || o.name || o.email)}<div class="muted small">${esc(o.email)}</div></td>
             <td class="num">${o.quantity}</td><td class="num">${money(o.price_per_mailbox)}<div class="muted small">${cycleName(cycleOf(o))}</div></td>
             <td>${o.status === 'active' && o.next_billing_date ? fmtDate(o.next_billing_date) : '—'}</td><td>${badge(o.status)}</td></tr>`).join('')}
@@ -3202,12 +3239,12 @@ function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, 
   if (!rows.length) return '';
   const typeCell = (m) => (admin
     ? `<select class="dom-type" data-mb-type="${m.id}" aria-label="Mailbox type for ${esc(m.email)}"><option value="">Not set</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === m.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`
-    : (m.inbox_label ? esc(m.inbox_label) : '<span class="muted">—</span>'));
+    : typeChip(m.inbox_type, m.inbox_label));
   return `<div class="table-wrap"><table class="mb-table">
     <thead><tr>${select ? '<th style="width:28px"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Email</th><th>Password</th><th>Mailbox type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
     <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}">
       ${select ? `<td><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
-      <td><div class="mb-email"><span class="mono">${esc(m.email)}</span>
+      <td><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}<span class="mono">${esc(m.email)}</span>
         <button class="icon-btn" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button>
         ${m.is_admin ? '<span class="badge b-in_progress">Admin</span>' : ''}</div></td>
       <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
@@ -3499,7 +3536,7 @@ function renderMyDomains(rows, hostsData = {}) {
         <thead><tr><th>Domain</th><th>Mailbox type</th><th class="num">Mailboxes</th><th>Cloudflare</th><th>DNS</th><th>Last checked</th><th></th></tr></thead>
         <tbody>${rows.map((d) => `<tr>
           <td><strong class="mono">${esc(d.domain)}</strong>${d.host_label ? `<div class="muted small">${esc(d.host_label)}</div>` : ''}</td>
-          <td>${d.inbox_label ? esc(d.inbox_label) : '<span class="muted">—</span>'}</td>
+          <td>${typeChip(d.inbox_type, d.inbox_label)}</td>
           <td class="num">${d.mailbox_count || '<span class="muted">0</span>'}</td>
           <td class="cf-cell">${cfCell(d, { client: true })}</td>
           <td>${dnsBadge(d)}${dnsChips(d)}</td>
@@ -3770,3 +3807,55 @@ function wireClientInvites() {
     };
   });
 }
+
+
+// ------------------------------------------------------------------ motion
+// The premium feel: a ripple where a button is pressed, pages that ease in on
+// navigation, and headline numbers that count up. All of it is skipped when
+// the person's system asks for reduced motion.
+const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+document.addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('.btn, .type, .sb-nav a, .icon-btn, .tab, .chip-btn');
+  if (!el || el.disabled || reduceMotion()) return;
+  const r = el.getBoundingClientRect();
+  const size = Math.max(r.width, r.height) * 2.2;
+  const dot = document.createElement('span');
+  dot.className = 'ripple';
+  dot.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size / 2}px;top:${e.clientY - r.top - size / 2}px`;
+  el.appendChild(dot);
+  dot.addEventListener('animationend', () => dot.remove());
+}, { passive: true });
+
+let enterTimer = null;
+function pageEnter() {
+  if (reduceMotion()) return;
+  document.body.dataset.enter = '1';
+  clearTimeout(enterTimer);
+  enterTimer = setTimeout(() => { delete document.body.dataset.enter; }, 900);
+}
+
+// "$1,234.50", "286", "12%": counts from 0 to the value, keeping its format.
+function countUp(el) {
+  const text = el.textContent.trim();
+  const m = text.match(/^([^\d-]*)(-?[\d,]+(?:\.\d+)?)(.*)$/);
+  if (!m) return;
+  const target = Number(m[2].replace(/,/g, ''));
+  if (!Number.isFinite(target) || target === 0) return;
+  const decimals = (m[2].split('.')[1] || '').length;
+  const fmt = (n) => m[1] + n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) + m[3];
+  const t0 = performance.now();
+  const dur = 900;
+  const tick = (t) => {
+    const k = Math.min(1, (t - t0) / dur);
+    const e = 1 - Math.pow(1 - k, 4);
+    el.textContent = fmt(target * e);
+    if (k < 1) requestAnimationFrame(tick); else el.textContent = text;
+  };
+  requestAnimationFrame(tick);
+}
+new MutationObserver(() => {
+  if (!document.body.dataset.enter) return;
+  document.querySelectorAll('.wv:not([data-counted]), .stat .value:not([data-counted])').forEach((el) => { el.dataset.counted = '1'; countUp(el); });
+}).observe(document.getElementById('app'), { childList: true, subtree: true });
+pageEnter();
