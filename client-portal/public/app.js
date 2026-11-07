@@ -3817,6 +3817,10 @@ function adminActiveDomains(data) {
   const active = rows.filter((r) => r.status === 'active');
   const cancelled = rows.filter((r) => r.status === 'cancelled');
   const users = active.reduce((n, r) => n + (r.users_count || 0), 0);
+  // The same domain can be bought more than once (more users on another date): count the purchases per domain.
+  const buys = new Map();
+  rows.forEach((r) => { const k = `${r.status}|${r.domain.toLowerCase()}`; buys.set(k, (buys.get(k) || 0) + 1); });
+  const distinctActive = new Set(active.map((r) => r.domain.toLowerCase())).size;
   const month = today.slice(0, 7);
   const addedMonth = active.filter((r) => String(r.created_on || '').slice(0, 7) === month).length;
   const who = (r) => r.added_name || r.added_email || '—';
@@ -3829,8 +3833,8 @@ function adminActiveDomains(data) {
       <div class="row"><a class="btn" href="/api/active-domains-template.csv">${icon('download')}Sample CSV</a><button class="btn btn-primary" id="ad-add">${icon('order')}Add domains</button></div></div>
     <div class="stack">
       <div class="inv-kpis">
-        ${card('green', 'shield', 'Active domains', active.length, `${addedMonth} created this month`)}
-        ${card('blue', 'team', 'Users', users, `across ${active.length} domain${active.length === 1 ? '' : 's'}`)}
+        ${card('green', 'shield', 'Active domains', distinctActive, `${active.length} purchase${active.length === 1 ? '' : 's'} · ${addedMonth} this month`)}
+        ${card('blue', 'team', 'Users', users, `across ${distinctActive} domain${distinctActive === 1 ? '' : 's'}`)}
         ${card('amber', 'calendar', 'Average age', active.length ? `${Math.round(active.reduce((n, r) => n + (age(r.created_on) || 0), 0) / active.length)} days` : '—', 'since creation')}
         ${card('red', 'close', 'Cancelled', cancelled.length, 'marked for cancellation')}
       </div>
@@ -3867,6 +3871,12 @@ function adminActiveDomains(data) {
   const reload = async () => adminActiveDomains(await api('GET', '/api/admin/active-domains'));
 
   function renderList() {
+    try { drawList(); } catch (err) {
+      console.error(err);
+      document.getElementById('ad-list').innerHTML = `<div class="empty">Couldn't show the list: ${esc(err.message)}. Please send this message to support.</div>`;
+    }
+  }
+  function drawList() {
     const filtered = matches();
     const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
     ui.page = Math.min(Math.max(1, ui.page), pages);
@@ -3884,7 +3894,7 @@ function adminActiveDomains(data) {
           const a = age(r.created_on);
           return `<tr data-id="${r.id}">
           <td class="mb-chk"><input type="checkbox" class="ad-sel" value="${r.id}" ${ui.sel.has(r.id) ? 'checked' : ''} aria-label="Select ${esc(r.domain)}"></td>
-          <td><div class="ad-dom"><span class="ad-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="ad-name">${esc(r.domain)}</strong>${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}</div>
+          <td><div class="ad-dom"><span class="ad-ico">${brandLogo(r.provider, r.provider)}</span><div><strong class="ad-name">${esc(r.domain)}</strong>${(buys.get(`${r.status}|${r.domain.toLowerCase()}`) || 0) > 1 ? `<button type="button" class="ad-multi" data-ad-domain="${esc(r.domain)}" title="Show all purchases of this domain">×${buys.get(`${r.status}|${r.domain.toLowerCase()}`)} purchases</button>` : ''}${r.provider || r.notes ? `<div class="pw-sub">${esc([r.provider, r.notes].filter(Boolean).join(' · '))}</div>` : ''}</div>
             <button class="icon-btn icon-btn-sm mb-copy" data-copy-ns="${esc(r.domain)}" data-copy-what="Domain" title="Copy domain">${icon('copy')}</button></div></td>
           <td class="nowrap">${r.created_on ? `<strong class="ad-date">${fmtDate(String(r.created_on).slice(0, 10))}</strong><div class="pw-sub">${a === 0 ? 'today' : a > 0 ? `${a} day${a === 1 ? '' : 's'} ago` : 'in the future'}</div>` : '<span class="muted">—</span>'}</td>
           <td class="num"><span class="ad-users">${icon('team')}${r.users_count}</span></td>
@@ -3905,6 +3915,7 @@ function adminActiveDomains(data) {
     document.querySelectorAll('[data-ad-cancel]').forEach((b) => { b.onclick = () => openDomainCancel([Number(b.dataset.adCancel)], rows, reload); });
     document.querySelectorAll('[data-ad-restore]').forEach((b) => { b.onclick = async () => { try { await api('POST', '/api/admin/active-domains/restore', { ids: [Number(b.dataset.adRestore)] }); toast('Restored to active'); await reload(); } catch (ex) { toast(ex.message); } }; });
     document.querySelectorAll('[data-ad-del]').forEach((b) => { b.onclick = () => del([Number(b.dataset.adDel)]); });
+    document.querySelectorAll('[data-ad-domain]').forEach((b) => { b.onclick = () => { ui.q = b.dataset.adDomain; ui.page = 1; document.getElementById('ad-q').value = ui.q; renderList(); }; });
     document.querySelectorAll('[data-ad-push]').forEach((b) => { b.onclick = () => openDomainPush([Number(b.dataset.adPush)], team, reload); });
     document.querySelectorAll('[data-ad-edit]').forEach((b) => { b.onclick = () => openDomainEdit(rows.find((r) => r.id === Number(b.dataset.adEdit)), reload); });
     const n = ui.sel.size;
@@ -3981,7 +3992,7 @@ function openDomainPush(ids, team, done) {
 
 function openDomainAdd(done, team) {
   const dlg = modalShell('Add domains', `
-    <p class="muted small" style="margin:-6px 0 12px">One domain per line. Optionally add the users and creation date after a comma: <span class="mono">acme.com, 3, 2026-10-01</span>. Or upload a CSV with columns <span class="mono">domain, users, created, provider, notes</span>.</p>
+    <p class="muted small" style="margin:-6px 0 12px">Each line is a purchase: the same domain on several lines (more users bought on another date) is kept as separate purchases. One domain per line. Optionally add the users and creation date after a comma: <span class="mono">acme.com, 3, 2026-10-01</span>. Or upload a CSV with columns <span class="mono">domain, users, created, provider, notes</span>.</p>
     <div class="field"><label>Domains</label><textarea name="text" style="min-height:140px" placeholder="acmeoutreach.com, 3, 2026-10-01&#10;tryacmeoutreach.com, 5"></textarea></div>
     <div class="field"><label>Or upload a CSV</label><input type="file" name="file" accept=".csv,text/csv"></div>
     <div class="grid-2">
@@ -3997,7 +4008,7 @@ function openDomainAdd(done, team) {
     const file = dlg.querySelector('[name=file]').files[0];
     const text = file ? await file.text() : d.text;
     const r = await api('POST', '/api/admin/active-domains', { text, users: d.users, created: d.created, provider: d.provider, sold_by: d.sold_by ? Number(d.sold_by) : null });
-    toast(`${r.added} added${r.updated ? `, ${r.updated} updated` : ''}${r.taken.length ? ` · ${r.taken.length} already added by someone else` : ''}`);
+    toast(`${r.added} added${r.skipped ? ` · ${r.skipped} already on the list (same domain, users and date), skipped` : ''}`);
     dlg.close();
     await done();
   });

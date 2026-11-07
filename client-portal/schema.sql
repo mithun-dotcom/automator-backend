@@ -518,3 +518,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS active_domains_domain ON active_domains (lower
 ALTER TABLE active_domains ADD COLUMN IF NOT EXISTS sold_by INT REFERENCES users(id) ON DELETE SET NULL;
 UPDATE active_domains d SET sold_by = d.added_by FROM users u
   WHERE d.sold_by IS NULL AND u.id = d.added_by AND u.role = 'staff';
+-- A domain can appear more than once: each line is a purchase (more users
+-- bought on another date). So the domain is no longer unique.
+DROP INDEX IF EXISTS active_domains_domain;
+CREATE INDEX IF NOT EXISTS active_domains_lower ON active_domains (lower(domain));

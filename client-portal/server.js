@@ -3282,9 +3282,10 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
   if (!items.length) throw new HttpError(400, bad.length ? `These aren't domains: ${bad.slice(0, 3).join(', ')}` : 'Add at least one domain');
   // Sold by: the owner may pick a team member; a team member's own domains are sold by them.
   const soldBy = req.user.role === 'admin' ? await teamMemberId(req.body.sold_by) : req.user.id;
-  let added = 0;
-  let updated = 0;
-  const taken = [];
+  // Each line is a purchase: the same domain on another line (other users or
+  // date) is another purchase and is kept. Only exact repeats (same domain,
+  // users and date) that are already on the list are skipped, as many times as
+  // they're there, so uploading a file twice doesn't double it.
   // A brief database lock (e.g. during a deploy) is retried rather than failing the upload.
   const q = async (sql, params) => {
     for (let i = 0; ; i++) {
@@ -3294,23 +3295,26 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
       }
     }
   };
+  let added = 0;
+  const updated = 0;
+  const taken = [];
+  let skipped = 0;
+  const key = (d, u, c) => `${d}|${u}|${c}`;
+  const { rows: existing } = await q('SELECT lower(domain) AS domain, users_count, created_on FROM active_domains WHERE lower(domain) = ANY($1)',
+    [[...new Set(items.map((i) => i.domain))]]);
+  const have = new Map();
+  for (const e of existing) { const k = key(e.domain, e.users_count, String(e.created_on).slice(0, 10)); have.set(k, (have.get(k) || 0) + 1); }
   for (const it of items) {
-    const { rows: [ex] } = await q('SELECT id, added_by, sold_by, status FROM active_domains WHERE lower(domain) = $1', [it.domain]);
-    if (ex) {
-      if (req.user.role !== 'admin' && ex.added_by !== req.user.id && ex.sold_by !== req.user.id) { taken.push(it.domain); it.skip = true; continue; }
-      await q(`UPDATE active_domains SET users_count = $2, created_on = $3, provider = COALESCE(NULLIF($4, ''), provider), notes = COALESCE(NULLIF($5, ''), notes),
-          sold_by = COALESCE($6, sold_by), status = 'active', cancelled_at = NULL, cancelled_by = NULL WHERE id = $1`, [ex.id, it.users, it.created, it.provider, it.notes, soldBy]);
-      updated += 1;
-    } else {
-      await q('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING',
-        [it.domain, it.users, it.created, it.provider, it.notes, req.user.id, soldBy]);
-      added += 1;
-    }
+    const k = key(it.domain, it.users, it.created);
+    if (have.get(k)) { have.set(k, have.get(k) - 1); skipped += 1; it.skip = true; continue; }
+    await q('INSERT INTO active_domains (domain, users_count, created_on, provider, notes, added_by, sold_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [it.domain, it.users, it.created, it.provider, it.notes, req.user.id, soldBy]);
+    added += 1;
   }
   if (added + updated) await audit.record(req.user, 'added', `${added + updated} active domain${added + updated === 1 ? '' : 's'}`,
     [{ field: 'Domains', from: '', to: items.filter((i) => !i.skip).slice(0, 10).map((i) => i.domain).join(', ') + (added + updated > 10 ? ` +${added + updated - 10} more` : '') }],
     { recipients: await activityRecipients(), appUrl: baseUrl(req) });
-  res.json({ added, updated, taken });
+  res.json({ added, updated, taken, skipped });
 }));
 
 admin.patch('/active-domains/:id', domainsAllowed, asyncRoute(async (req, res) => {
