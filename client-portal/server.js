@@ -3275,7 +3275,7 @@ admin.post('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
     if (!domain) { if (c[idx.domain]) bad.push(c[idx.domain]); continue; }
     const users = Number.parseInt(idx.users >= 0 ? c[idx.users] : '', 10);
     const created = idx.created >= 0 && c[idx.created] ? mailboxes.parseDate(c[idx.created]) : null;
-    if (created === undefined) throw new HttpError(400, `Couldn't read the date "${c[idx.created]}" for ${domain}. Use YYYY-MM-DD.`);
+    if (created === undefined) throw new HttpError(400, `Couldn't read the date "${c[idx.created]}" for ${domain}. Use a date like 8-Sep-25, 9 Oct 2026 or 2025-09-08.`);
     items.push({ domain, users: Number.isFinite(users) ? Math.max(0, users) : (Number.isFinite(formUsers) ? formUsers : 0),
       created: created || formDate || billing.today(), provider: (idx.provider >= 0 && String(c[idx.provider] || '').trim()) ? str(c[idx.provider], 80) : str(req.body.provider, 80), notes: idx.notes >= 0 ? str(c[idx.notes] || '', 300) : '' });
   }
