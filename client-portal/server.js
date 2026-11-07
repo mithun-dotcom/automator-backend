@@ -3384,7 +3384,18 @@ admin.delete('/active-domains/tags/:id', domainsAllowed, asyncRoute(async (req, 
 
 // Add or remove a tag on domains (only domains the caller can see).
 admin.post('/active-domains/tag', domainsAllowed, asyncRoute(async (req, res) => {
-  const ids = (Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);
+  let ids = (Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);
+  // Or a pasted list of domain names: every purchase of each domain.
+  let notFound = [];
+  if (!ids.length && req.body.domains !== undefined) {
+    const names = [...new Set(String(req.body.domains).split(/[\s,;]+/).map((d) => dnscheck.clean(d)).filter(Boolean))].slice(0, 5000);
+    if (!names.length) throw new HttpError(400, 'Paste the domains to tag');
+    const { rows: found } = await query(`SELECT id, lower(domain) AS domain FROM active_domains d WHERE lower(domain) = ANY($1) AND ${domScope(req)}`, [names]);
+    ids = found.map((r) => r.id);
+    const have = new Set(found.map((r) => r.domain));
+    notFound = names.filter((n) => !have.has(n));
+    if (!ids.length) throw new HttpError(400, `None of those domains are on your list${notFound.length ? ` (e.g. ${notFound.slice(0, 3).join(', ')})` : ''}`);
+  }
   if (!ids.length) throw new HttpError(400, 'Select the domains');
   const tagId = req.body.tag_id ? Number(req.body.tag_id) : await tagIdFor(req.body.name, req.user.id);
   if (!tagId) throw new HttpError(400, 'Choose a tag');
@@ -3393,7 +3404,7 @@ admin.post('/active-domains/tag', domainsAllowed, asyncRoute(async (req, res) =>
   const r = req.body.remove === true
     ? await query('DELETE FROM active_domain_tags WHERE tag_id = $1 AND domain_id = ANY($2)', [tagId, vis])
     : await query('INSERT INTO active_domain_tags (domain_id, tag_id) SELECT unnest($2::int[]), $1 ON CONFLICT DO NOTHING', [tagId, vis]);
-  res.json({ changed: r.rowCount, tag_id: tagId });
+  res.json({ changed: r.rowCount, tag_id: tagId, matched: vis.length, notFound });
 }));
 
 const domIds = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 5000);

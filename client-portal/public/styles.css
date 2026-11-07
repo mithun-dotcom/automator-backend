@@ -1119,3 +1119,4 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .tag-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #fff; background: var(--t-fg); box-shadow: 0 0 0 1px var(--border); cursor: pointer; padding: 0; }
 .tag-dot.on { box-shadow: 0 0 0 2px var(--t-fg); }
 @media (max-width: 700px) { .tag-row { grid-template-columns: 1fr; } }
+.tag-paste { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-soft); } .tag-paste h3 { font-size: 14px; }

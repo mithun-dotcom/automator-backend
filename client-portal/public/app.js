@@ -3845,7 +3845,7 @@ function adminActiveDomains(data) {
       <div class="card">
         <div class="filter-bar pw-filters">
           <div class="seg">${[['active', `Active · ${active.length}`], ['cancelled', `Cancelled · ${cancelled.length}`]].map(([k, l]) => `<button type="button" class="seg-btn ${ui.tab === k ? 'on' : ''}" data-dmntab="${k}">${l}</button>`).join('')}</div>
-          <input type="search" class="fb-q" id="dmn-q" placeholder="Search domain, provider, notes…" value="${esc(ui.q)}">
+          <input type="search" class="fb-q" id="dmn-q" placeholder="Search, or paste several domains…" value="${esc(ui.q)}">
           ${owner && team.length > 1 ? `<select id="dmn-by"><option value="">Sold by: anyone</option><option value="none" ${ui.by === 'none' ? 'selected' : ''}>Not assigned</option>${team.map((t) => `<option value="${t.id}" ${String(ui.by) === String(t.id) ? 'selected' : ''}>${esc(t.name || t.email)}</option>`).join('')}</select>` : ''}
           <select id="dmn-tagf"><option value="">Tag: any</option>${tags.map((t) => `<option value="${t.id}" ${String(ui.tag) === String(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}<option value="none" ${ui.tag === 'none' ? 'selected' : ''}>No tag</option></select>
           <button type="button" class="btn btn-sm" id="dmn-tags">${icon('settings')}Tags</button>
@@ -3866,6 +3866,12 @@ function adminActiveDomains(data) {
 
   const matches = () => {
     const words = ui.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    // Several domains pasted into search: show any of them.
+    const list = ui.q.toLowerCase().split(/[\s,;]+/).filter((w) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(w));
+    if (list.length > 1) {
+      const set = new Set(list);
+      return rows.filter((r) => r.status === ui.tab && set.has(r.domain.toLowerCase()));
+    }
     return rows.filter((r) => r.status === ui.tab && (!ui.by || (ui.by === 'none' ? !r.sold_by : String(r.sold_by) === String(ui.by)))
       && (!ui.tag || (ui.tag === 'none' ? !(r.tag_ids || []).length : (r.tag_ids || []).includes(Number(ui.tag))))
       && words.every((w) => `${r.domain} ${r.provider} ${r.notes} ${who(r)} ${seller(r)} ${tagsOf(r).map((t) => t.name).join(' ')}`.toLowerCase().includes(w)));
@@ -4039,7 +4045,15 @@ function openTagManager(tags, done) {
       <input data-f="name" value="${esc(t.name)}" maxlength="40" aria-label="Tag name">
       <div class="tag-colors">${COLORS.map((c) => `<button type="button" class="tag-dot dtag-${c} ${c === t.color ? 'on' : ''}" data-color="${c}" aria-label="${c}"></button>`).join('')}</div>
       <button type="button" class="btn btn-sm" data-save>Save</button><button type="button" class="btn btn-sm btn-ghost menu-danger" data-del>Delete</button></div>`).join('') : '<div class="muted small">No tags yet.</div>'}</div>
-    <div class="tag-new" style="margin-top:14px"><input name="newname" maxlength="40" placeholder="New tag name…"><button class="btn btn-primary btn-sm" type="submit">${icon('order')}Create tag</button></div>`);
+    <div class="tag-new" style="margin-top:14px"><input name="newname" maxlength="40" placeholder="New tag name…"><button class="btn btn-primary btn-sm" type="submit">${icon('order')}Create tag</button></div>
+    <div class="tag-paste">
+      <h3>Tag a list of domains</h3>
+      <p class="muted small" style="margin:2px 0 10px">Paste domains (one per line, or separated by commas or spaces) and the tag. Every purchase of each domain gets the tag; a new tag name is created.</p>
+      <textarea name="paste" style="min-height:110px" placeholder="irgleadership.com&#10;irgoperations.com"></textarea>
+      <div class="tag-new" style="padding:8px 0 0"><input name="pastetag" list="dmn-taglist2" maxlength="40" placeholder="Tag, e.g. Taj"><datalist id="dmn-taglist2">${tags.map((t) => `<option value="${esc(t.name)}">`).join('')}</datalist>
+        <button class="btn btn-primary btn-sm" type="button" data-paste-tag>${icon('check')}Tag these</button></div>
+      <div class="small" id="tag-paste-result"></div>
+    </div>`);
   dlg.querySelectorAll('.tag-row').forEach((row) => {
     let color = null;
     row.querySelectorAll('[data-color]').forEach((b) => { b.onclick = () => { color = b.dataset.color; row.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('on', x === b)); row.querySelector('.dtag').className = `dtag dtag-${color}`; }; });
@@ -4051,6 +4065,24 @@ function openTagManager(tags, done) {
       try { await api('DELETE', `/api/admin/active-domains/tags/${row.dataset.tag}`); toast('Tag deleted'); dlg.close(); await done(); } catch (ex) { toast(ex.message); }
     };
   });
+  dlg.querySelector('[data-paste-tag]').onclick = async () => {
+    const f = dlg.querySelector('form');
+    const out = dlg.querySelector('#tag-paste-result');
+    const name = f.pastetag.value.trim();
+    if (!f.paste.value.trim()) { out.textContent = 'Paste the domains first'; return; }
+    if (!name) { out.textContent = 'Type the tag name'; return; }
+    try {
+      const r = await api('POST', '/api/admin/active-domains/tag', { domains: f.paste.value, name });
+      toast(`Tagged "${name}" on ${r.matched} purchase${r.matched === 1 ? '' : 's'}`);
+      if (r.notFound.length) {
+        out.innerHTML = `<span class="access-off">Not on your list (${r.notFound.length}): ${r.notFound.map(esc).join(', ')}</span>`;
+        f.paste.value = r.notFound.join('\n');
+        return;
+      }
+      dlg.close();
+      await done();
+    } catch (ex) { out.innerHTML = `<span class="access-off">${esc(ex.message)}</span>`; }
+  };
   onSubmit(dlg.querySelector('form'), async (d) => {
     if (!d.newname.trim()) throw new Error('Name the tag');
     await api('POST', '/api/admin/active-domains/tags', { name: d.newname });
