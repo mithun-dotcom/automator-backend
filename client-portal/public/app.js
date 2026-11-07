@@ -214,6 +214,7 @@ function tawkIdentify() {
 }
 
 const ICONS = {
+  eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 7 10 7a9.8 9.8 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
   download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
   upload: '<path d="M12 15V3M7 8l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
   shield: '<path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>',
@@ -3357,23 +3358,24 @@ function deviceOf(ua) {
 // password; admin adds the batch column and Delete / admin switch.
 const CONN_LABEL = { queued: 'Queued', running: 'Connecting…', connected: 'Connected', failed: 'Failed' };
 const CONN_ICON = { queued: 'clock', running: 'refresh', connected: 'check', failed: 'x' };
-const connChips = (m) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}"><img class="conn-logo" src="/brand-logo/${encodeURIComponent(c.provider || 'other')}" alt=""><span>${esc(c.label)}</span><span class="conn-st">${icon(CONN_ICON[c.status] || 'clock')}${c.status !== 'connected' ? (CONN_LABEL[c.status] || c.status) : ''}</span></span>${c.status === 'failed' && c.error ? `<div class="small access-off conn-err">${esc(c.error)}</div>` : ''}`).join('');
+const connChips = (m) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}"><img class="conn-logo" src="/brand-logo/${encodeURIComponent(c.provider || 'other')}" alt=""><span>${esc(c.label)}</span><span class="conn-st">${icon(CONN_ICON[c.status] || 'clock')}${c.status !== 'connected' ? (CONN_LABEL[c.status] || c.status) : ''}</span></span>${c.status === 'failed' && c.error ? `<details class="conn-why"><summary>Why it failed</summary><div class="small conn-err">${esc(c.error)}</div></details>` : ''}`).join('');
 
 function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false }) {
   if (!rows.length) return '';
   const typeCell = (m) => (admin
     ? `<select class="dom-type" data-mb-type="${m.id}" aria-label="Mailbox type for ${esc(m.email)}"><option value="">Not set</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === m.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`
     : typeChip(m.inbox_type, m.inbox_label));
-  return `<div class="table-wrap"><table class="mb-table">
-    <thead><tr>${select ? '<th style="width:28px"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Email</th><th>Password</th><th>Mailbox type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
-    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}">
-      ${select ? `<td><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
-      <td><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}<span class="mono">${esc(m.email)}</span>
-        <button class="icon-btn" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button>
-        ${m.is_admin ? '<span class="badge b-in_progress">Admin</span>' : ''}</div></td>
+  return `<div class="table-wrap mb-wrap"><table class="mb-table">
+    <thead><tr>${select ? '<th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Mailbox</th><th>Role</th><th>Password</th><th>Type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
+    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}" class="${m.is_admin ? 'mb-is-admin' : ''}">
+      ${select ? `<td class="mb-chk"><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
+      <td class="mb-main"><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}
+        <span class="mb-addr" title="${esc(m.email)}"><span class="mb-local">${esc(m.email.split('@')[0])}</span><span class="mb-dom">@${esc(m.email.split('@').slice(1).join('@'))}</span></span>
+        <button class="icon-btn icon-btn-sm mb-copy" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button></div></td>
+      <td class="mb-role">${m.is_admin ? `<span class="role-pill role-admin">${icon('shield')}Admin</span>` : '<span class="role-pill">User</span>'}</td>
       <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
-        <button class="btn btn-sm" data-show-pw="${m.id}">Show password</button>
-        <button class="icon-btn" data-copy-pw="${m.id}" title="Copy password" aria-label="Copy password for ${esc(m.email)}">${icon('copy')}</button></div></td>
+        <button class="pw-btn" data-show-pw="${m.id}" title="Show password" aria-label="Show password for ${esc(m.email)}">${icon('eye')}</button>
+        <button class="pw-btn" data-copy-pw="${m.id}" title="Copy password" aria-label="Copy password for ${esc(m.email)}">${icon('copy')}</button></div></td>
       <td class="mb-type">${typeCell(m)}</td>
       <td class="small mb-created">${m.created_on ? fmtDate(String(m.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
       ${conns ? `<td class="mb-conns">${connChips(m) || '<span class="muted small">—</span>'}</td>` : ''}
@@ -3392,8 +3394,9 @@ function wireMailboxTable(pwUrl) {
   document.querySelectorAll('[data-show-pw]').forEach((b) => {
     b.onclick = async () => {
       const val = b.parentElement.querySelector('.mb-pw-val');
-      if (b.dataset.shown) { val.textContent = '••••••••••'; b.textContent = 'Show password'; delete b.dataset.shown; return; }
-      try { val.textContent = await getPw(b.dataset.showPw); b.textContent = 'Hide'; b.dataset.shown = '1'; } catch (ex) { toast(ex.message); }
+      const box = b.parentElement;
+      if (b.dataset.shown) { val.textContent = '••••••••••'; b.innerHTML = icon('eye'); b.title = 'Show password'; box.classList.remove('shown'); delete b.dataset.shown; return; }
+      try { val.textContent = await getPw(b.dataset.showPw); b.innerHTML = icon('eyeOff'); b.title = 'Hide password'; box.classList.add('shown'); b.dataset.shown = '1'; } catch (ex) { toast(ex.message); }
     };
   });
   document.querySelectorAll('[data-copy-pw]').forEach((b) => {
