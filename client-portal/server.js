@@ -3241,12 +3241,13 @@ async function teamMemberId(v) {
 admin.get('/active-domains', domainsAllowed, asyncRoute(async (req, res) => {
   const { rows } = await query(`SELECT d.*, a.name AS added_name, a.email AS added_email, c.name AS cancelled_name, c.email AS cancelled_email,
       s.name AS sold_name, s.email AS sold_email,
-      COALESCE((SELECT array_agg(t.tag_id ORDER BY t.tag_id) FROM active_domain_tags t WHERE t.domain_id = d.id), '{}') AS tag_ids
+      COALESCE((SELECT array_agg(t.tag_id ORDER BY t.tag_id) FROM active_domain_tags t JOIN domain_tags g ON g.id = t.tag_id
+        WHERE t.domain_id = d.id AND g.owner_id = ${Number(req.user.id)}), '{}') AS tag_ids
     FROM active_domains d LEFT JOIN users a ON a.id = d.added_by LEFT JOIN users c ON c.id = d.cancelled_by LEFT JOIN users s ON s.id = d.sold_by
     WHERE ${domScope(req)} ORDER BY d.status, d.created_on DESC NULLS LAST, d.domain`);
   const team = req.user.role === 'admin'
     ? (await query("SELECT id, name, email FROM users WHERE role IN ('admin', 'staff') ORDER BY role, name")).rows : [];
-  const { rows: tags } = await query('SELECT id, name, color FROM domain_tags ORDER BY lower(name)');
+  const { rows: tags } = await query('SELECT id, name, color FROM domain_tags WHERE owner_id = $1 ORDER BY lower(name)', [req.user.id]);
   res.json({ rows, team, tags, today: billing.today() });
 }));
 
@@ -3343,11 +3344,12 @@ const TAG_COLORS = ['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'oran
 async function tagIdFor(name, userId, color) {
   const n = String(name || '').trim().slice(0, 40);
   if (!n) return null;
-  const { rows: [t] } = await query('SELECT id FROM domain_tags WHERE lower(name) = lower($1)', [n]);
+  const { rows: [t] } = await query('SELECT id FROM domain_tags WHERE owner_id = $2 AND lower(name) = lower($1)', [n, userId]);
   if (t) return t.id;
-  const { rows: [{ count }] } = await query('SELECT count(*)::int AS count FROM domain_tags');
+  const { rows: [{ count }] } = await query('SELECT count(*)::int AS count FROM domain_tags WHERE owner_id = $1', [userId]);
   const { rows: [c] } = await query(
-    'INSERT INTO domain_tags (name, color, created_by) VALUES ($1, $2, $3) ON CONFLICT (lower(name)) DO UPDATE SET name = domain_tags.name RETURNING id',
+    `INSERT INTO domain_tags (name, color, created_by, owner_id) VALUES ($1, $2, $3, $3)
+     ON CONFLICT (owner_id, lower(name)) DO UPDATE SET name = domain_tags.name RETURNING id`,
     [n, TAG_COLORS.includes(color) ? color : TAG_COLORS[count % TAG_COLORS.length], userId]);
   return c.id;
 }
@@ -3364,7 +3366,7 @@ admin.patch('/active-domains/tags/:id', domainsAllowed, asyncRoute(async (req, r
   if (name === '') throw new HttpError(400, 'Name the tag');
   const color = TAG_COLORS.includes(req.body.color) ? req.body.color : null;
   try {
-    const r = await query('UPDATE domain_tags SET name = COALESCE($2, name), color = COALESCE($3, color) WHERE id = $1', [Number(req.params.id), name, color]);
+    const r = await query('UPDATE domain_tags SET name = COALESCE($2, name), color = COALESCE($3, color) WHERE id = $1 AND owner_id = $4', [Number(req.params.id), name, color, req.user.id]);
     if (!r.rowCount) throw new HttpError(404, 'Tag not found');
   } catch (err) {
     if (err.code === '23505') throw new HttpError(400, 'There is already a tag with that name');
@@ -3374,11 +3376,8 @@ admin.patch('/active-domains/tags/:id', domainsAllowed, asyncRoute(async (req, r
 }));
 
 admin.delete('/active-domains/tags/:id', domainsAllowed, asyncRoute(async (req, res) => {
-  if (req.user.role !== 'admin') {
-    const { rows: [t] } = await query('SELECT created_by FROM domain_tags WHERE id = $1', [Number(req.params.id)]);
-    if (!t || t.created_by !== req.user.id) throw new HttpError(403, 'Only the owner or whoever created this tag can delete it');
-  }
-  await query('DELETE FROM domain_tags WHERE id = $1', [Number(req.params.id)]);
+  const r = await query('DELETE FROM domain_tags WHERE id = $1 AND owner_id = $2', [Number(req.params.id), req.user.id]);
+  if (!r.rowCount) throw new HttpError(404, 'Tag not found');
   res.json({ ok: true });
 }));
 
@@ -3399,6 +3398,8 @@ admin.post('/active-domains/tag', domainsAllowed, asyncRoute(async (req, res) =>
   if (!ids.length) throw new HttpError(400, 'Select the domains');
   const tagId = req.body.tag_id ? Number(req.body.tag_id) : await tagIdFor(req.body.name, req.user.id);
   if (!tagId) throw new HttpError(400, 'Choose a tag');
+  const { rows: [mine] } = await query('SELECT 1 FROM domain_tags WHERE id = $1 AND owner_id = $2', [tagId, req.user.id]);
+  if (!mine) throw new HttpError(404, 'Tag not found');
   const { rows: visible } = await query(`SELECT id FROM active_domains d WHERE id = ANY($1) AND ${domScope(req)}`, [ids]);
   const vis = visible.map((r) => r.id);
   const r = req.body.remove === true

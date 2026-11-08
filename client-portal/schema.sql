@@ -522,7 +522,7 @@ UPDATE active_domains d SET sold_by = d.added_by FROM users u
 DROP INDEX IF EXISTS active_domains_domain;
 CREATE INDEX IF NOT EXISTS active_domains_lower ON active_domains (lower(domain));
 
--- Tags on active domains (e.g. "Client X", "Warm-up batch 3"), shared by the team.
+-- Tags on active domains (e.g. "Client X", "Warm-up batch 3"), personal to each person (owner_id, below).
 CREATE TABLE IF NOT EXISTS domain_tags (
   id         SERIAL PRIMARY KEY,
   name       TEXT NOT NULL,
@@ -530,10 +530,15 @@ CREATE TABLE IF NOT EXISTS domain_tags (
   created_by INT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS domain_tags_name ON domain_tags (lower(name));
 CREATE TABLE IF NOT EXISTS active_domain_tags (
   domain_id INT NOT NULL REFERENCES active_domains(id) ON DELETE CASCADE,
   tag_id    INT NOT NULL REFERENCES domain_tags(id) ON DELETE CASCADE,
   PRIMARY KEY (domain_id, tag_id)
 );
 CREATE INDEX IF NOT EXISTS active_domain_tags_tag ON active_domain_tags (tag_id);
+-- Tags are personal: each person has their own (owner_id) and only sees
+-- their own tags on domains. Existing tags belong to whoever created them.
+ALTER TABLE domain_tags ADD COLUMN IF NOT EXISTS owner_id INT REFERENCES users(id) ON DELETE CASCADE;
+UPDATE domain_tags SET owner_id = COALESCE(created_by, (SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1)) WHERE owner_id IS NULL;
+DROP INDEX IF EXISTS domain_tags_name;
+CREATE UNIQUE INDEX IF NOT EXISTS domain_tags_owner_name ON domain_tags (owner_id, lower(name));

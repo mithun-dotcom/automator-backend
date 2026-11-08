@@ -4065,7 +4065,7 @@ function openDomainPush(ids, team, done) {
 function openTagManager(tags, done) {
   const COLORS = ['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'orange', 'teal', 'slate', 'pink'];
   const dlg = modalShell('Tags', `
-    <p class="muted small" style="margin:-6px 0 12px">Tags group your domains (e.g. a client, a campaign or a batch). Select domains and use <strong>Tag</strong> to add them, or put a <span class="mono">tags</span> column in the CSV.</p>
+    <p class="muted small" style="margin:-6px 0 12px"><strong>Your tags are private:</strong> only you see them, and others (team members, or you on pushed domains) keep their own. Tags group your domains (e.g. a client, a campaign or a batch). Select domains and use <strong>Tag</strong> to add them, or put a <span class="mono">tags</span> column in the CSV.</p>
     <div class="tag-list">${tags.length ? tags.map((t) => `<div class="tag-row" data-tag="${t.id}">
       <span class="dtag dtag-${esc(t.color)}">${esc(t.name)}</span>
       <input data-f="name" value="${esc(t.name)}" maxlength="40" aria-label="Tag name">
