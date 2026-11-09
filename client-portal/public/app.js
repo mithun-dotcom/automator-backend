@@ -3486,7 +3486,7 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
         ${seqs.length ? `<div class="acct-list">${seqs.map((s) => acctCard({
           key: s.provider,
           title: esc(s.label),
-          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}${prov(s.provider).consent ? '<br><span class="small">After Connect, click <strong>Authorize</strong> next to each mailbox below, sign in as that mailbox and click Allow. We confirm each one with the sequencer.</span>' : ''}${prov(s.provider).comingSoon ? '<br><span class="small">Coming soon for your account.</span>' : ''}`,
+          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}${prov(s.provider).consent ? '<br><span class="small">Then click <strong>Authorize</strong> on each mailbox below.</span>' : ''}${prov(s.provider).comingSoon ? '<br><span class="small">Coming soon for your account.</span>' : ''}`,
           stats: prov(s.provider).csvOnly ? '<span class="pill">Import with the CSV</span>' : `<span class="pill pill-ok"><strong>${s.connected}</strong> connected</span>${s.pending ? `<span class="pill pill-run"><span class="spin"></span>${s.pending} in progress</span>` : ''}${s.awaiting ? `<span class="pill pill-run" title="Click Authorize next to each of these mailboxes">${s.awaiting} need approval</span>` : ''}${s.failed ? `<span class="pill pill-bad">${s.failed} failed</span>` : ''}`,
           actions: `${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">${icon('download')} CSV for ${esc(s.label)}</a>` : `
               <button class="btn btn-sm btn-primary" data-seq-all="${s.id}" ${rows.length ? '' : 'disabled'}>Connect all mailboxes</button>
@@ -3528,26 +3528,40 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
       <p class="muted small" style="margin:0 0 10px">${esc(p.help)}</p>
       <div class="grid-2">${p.fields.map((f) => f.type === 'plusvibe_workspace' ? `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
         <div class="row"><select id="sf-${f.key}" name="cred_${f.key}" required><option value="">Paste the API key, then load</option></select>
-        <button type="button" class="btn btn-sm" id="pv-load">Load workspaces</button></div></div>` : `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
+        <button type="button" class="btn btn-sm" id="pv-load">Load workspaces</button></div><div class="small muted pv-ws-note" id="pv-ws-note" role="status" aria-live="polite">Paste your PlusVibe API key above; your workspaces load automatically.</div></div>` : `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
         <input id="sf-${f.key}" name="cred_${f.key}" ${f.secret ? 'type="password"' : ''} autocomplete="off" required></div>`).join('')}
         <div class="field"><label for="sf-label">Name it <span class="muted small">(optional)</span></label><input id="sf-label" name="label" placeholder="e.g. ${esc(provName(p).name)} main workspace"></div></div>`;
     const load = document.getElementById('pv-load');
     if (load) {
       const keyEl = document.getElementById('sf-api_key');
       const sel = document.getElementById('sf-workspace_id');
-      const fetchWs = async () => {
-        if (!keyEl.value.trim()) { toast('Paste your PlusVibe API key first'); return; }
+      const note = document.getElementById('pv-ws-note');
+      const say = (text, bad = false) => { note.textContent = text; note.classList.toggle('pv-bad', bad); };
+      let lastKey = '';
+      let timer = null;
+      const fetchWs = async (force = false) => {
+        const key = keyEl.value.trim();
+        if (!key) { say('Paste your PlusVibe API key above.'); return; }
+        if (key === lastKey && !force) return;
+        lastKey = key;
         load.disabled = true;
+        say('Loading your PlusVibe workspaces…');
         try {
-          const { workspaces } = await api('POST', '/api/sequencers/plusvibe/workspaces', { api_key: keyEl.value.trim() });
+          const { workspaces } = await api('POST', '/api/sequencers/plusvibe/workspaces', { api_key: key });
           sel.innerHTML = workspaces.length
             ? `<option value="">Choose a workspace</option>${workspaces.map((w) => `<option value="${esc(w.id)}">${esc(w.name)}${w.status && w.status !== 'ACTIVE' ? ` (${esc(w.status)})` : ''}</option>`).join('')}`
             : '<option value="">No workspaces on this key</option>';
           if (workspaces.length === 1) sel.value = workspaces[0].id;
-        } catch (ex) { toast(ex.message); } finally { load.disabled = false; }
+          say(workspaces.length ? `${workspaces.length} workspace${workspaces.length === 1 ? '' : 's'} found.` : 'This API key has no workspaces.', !workspaces.length);
+        } catch (ex) {
+          lastKey = '';
+          sel.innerHTML = '<option value="">Couldn\'t load workspaces</option>';
+          say(ex.message, true);
+        } finally { load.disabled = false; }
       };
-      load.onclick = fetchWs;
-      keyEl.addEventListener('change', fetchWs);
+      load.onclick = () => fetchWs(true);
+      keyEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => fetchWs(), 700); });
+      keyEl.addEventListener('change', () => fetchWs());
     }
   });
   onSubmit(document.getElementById('seq-form'), async (d) => {

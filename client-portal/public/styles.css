@@ -598,6 +598,8 @@ tr.an-quiet td { color: var(--muted); }
 .conn-connected { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
 .conn-failed { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
 .conn-queued, .conn-running { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.pv-ws-note { margin-top: 6px; }
+.pv-ws-note.pv-bad { color: #b91c1c; font-weight: 600; }
 .conn-authorize { background: #fffbeb; color: #b45309; border-color: #fde68a; }
 .conn-auth { margin: 2px 0 6px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .prov-tile.prov-soon, .prov-tile:disabled { opacity: .55; cursor: not-allowed; transform: none; box-shadow: none; }

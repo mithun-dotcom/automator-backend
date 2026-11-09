@@ -13,7 +13,14 @@ class PlusVibeError extends Error {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const base = () => (process.env.PLUSVIBE_API_BASE || 'https://api.plusvibe.ai/api/v1').replace(/\/$/, '');
+// PlusVibe's docs give two base URLs. Unless PLUSVIBE_API_BASE pins one, try the
+// endpoint specs' /api/v1 first and fall back to the guide's /v1 on a 404,
+// remembering whichever answers.
+const BASES = ['https://api.plusvibe.ai/api/v1', 'https://api.plusvibe.ai/v1'];
+let preferred = 0;
+const bases = () => (process.env.PLUSVIBE_API_BASE
+  ? [process.env.PLUSVIBE_API_BASE.replace(/\/$/, '')]
+  : [BASES[preferred], BASES[1 - preferred]]);
 
 function providerId() {
   const id = (process.env.PLUSVIBE_PROVIDER_ID || '').trim();
@@ -27,8 +34,22 @@ function allowedFor(email) {
   return Boolean(email) && list.includes(String(email).trim().toLowerCase());
 }
 
-async function request(apiKey, method, path, { query, body } = {}) {
-  const url = new URL(base() + path);
+async function request(apiKey, method, path, opts = {}) {
+  const list = bases();
+  for (let i = 0; i < list.length; i += 1) {
+    try {
+      const out = await requestAt(list[i], apiKey, method, path, opts);
+      if (!process.env.PLUSVIBE_API_BASE) preferred = BASES.indexOf(list[i]);
+      return out;
+    } catch (err) {
+      if (err.status !== 404 || i === list.length - 1) throw err;
+    }
+  }
+  throw new PlusVibeError('NOT_FOUND', 'PlusVibe endpoint not found');
+}
+
+async function requestAt(baseUrl, apiKey, method, path, { query, body } = {}) {
+  const url = new URL(baseUrl + path);
   for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
   for (let attempt = 0; ; attempt += 1) {
     let res;
@@ -45,7 +66,9 @@ async function request(apiKey, method, path, { query, body } = {}) {
     let json = {};
     try { json = text ? JSON.parse(text) : {}; } catch { json = { message: text.slice(0, 200) }; }
     if (res.ok) return json;
-    if (res.status === 401 || res.status === 403) throw new PlusVibeError('INVALID_API_KEY', 'PlusVibe rejected the API key', res.status);
+    if (res.status === 401 || res.status === 403 || (res.status === 400 && /api key/i.test(`${json.message} ${json.error}`))) {
+      throw new PlusVibeError('INVALID_API_KEY', 'PlusVibe rejected the API key. Use a key from PlusVibe → Settings → API access (Business plan)', res.status);
+    }
     if ((res.status === 429 || res.status >= 500) && attempt < 3) {
       const ra = Number(res.headers.get('retry-after'));
       await sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 1000 * 2 ** attempt);
@@ -63,10 +86,25 @@ function unwrap(json, what) {
   throw new PlusVibeError(/^[A-Z_]+$/.test(m) ? m : 'PLUSVIBE_REJECTED', `PlusVibe ${what}: ${m === 'MAX_ALLOWED_ACCOUNTS_REACHED' ? 'your PlusVibe plan has no free email-account slots' : m}`);
 }
 
-// POST /webhook/partner-list-workspace — also proves the key + our provider ID work.
+// The workspaces this API key can use. GET /authenticate ("Get workspaces":
+// tests the key, needs no partner ID); if that answers in an unexpected way,
+// the partner endpoint POST /webhook/partner-list-workspace.
 async function listWorkspaces(apiKey) {
-  const data = unwrap(await request(apiKey, 'POST', '/webhook/partner-list-workspace', { body: { flow: 'app_user', provider_id: providerId() } }), 'workspaces');
-  return (data || []).map((w) => ({ id: w.workspace_id, name: w.workspace_name || w.workspace_id, status: w.workspace_status || '' }));
+  let first;
+  try {
+    const json = await request(apiKey, 'GET', '/authenticate');
+    if (Array.isArray(json.workspaces)) return json.workspaces.map((w) => ({ id: w._id || w.workspace_id || w.id, name: w.name || w.workspace_name || w._id, status: w.status || '' })).filter((w) => w.id);
+    first = new PlusVibeError('UNEXPECTED', `PlusVibe /authenticate answered without workspaces (${String(json.message || json.status || '').slice(0, 80)})`);
+  } catch (err) {
+    if (err.code === 'INVALID_API_KEY') throw err;
+    first = err;
+  }
+  try {
+    const data = unwrap(await request(apiKey, 'POST', '/webhook/partner-list-workspace', { body: { flow: 'app_user', provider_id: providerId() } }), 'workspaces');
+    return (data || []).map((w) => ({ id: w.workspace_id, name: w.workspace_name || w.workspace_id, status: w.workspace_status || '' }));
+  } catch (err) {
+    throw new PlusVibeError(err.code || first.code, `${first.message}; partner endpoint: ${err.message}`, err.status);
+  }
 }
 
 // GET /webhook/partner-check-email-account → { existed_in_other_ws, current, max_allowed }

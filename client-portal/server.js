@@ -1750,7 +1750,8 @@ app.post('/api/sequencers/plusvibe/workspaces', auth, clientOnly, asyncRoute(asy
   try {
     res.json({ workspaces: await plusvibe.listWorkspaces(apiKey) });
   } catch (err) {
-    throw new HttpError(err.code === 'PROVIDER_NOT_CONFIGURED' ? 503 : 400, err.message);
+    console.warn(`[plusvibe] load workspaces for user ${req.user.id} failed: ${err.code || ''} ${err.status || ''} ${err.message}`);
+    throw new HttpError(400, err.message);
   }
 }));
 
