@@ -329,7 +329,7 @@ function mailboxAvatar(email, type, label) {
   return `<span class="mb-avatar" style="--av-bg:${bg};--av-fg:${fg}">${esc(ini)}${type || label ? `<span class="mb-avatar-badge">${brandLogo(type, label)}</span>` : ''}</span>`;
 }
 const NAV_ICONS = {
-  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/admin/prewarmed': 'flame', '#/admin/active-domains': 'shield', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
+  '#/dashboard': 'dashboard', '#/mailboxes': 'mail', '#/sequencers': 'send', '#/admin/mailboxes': 'mail', '#/domains': 'globe', '#/admin/domains': 'globe', '#/admin/prewarmed': 'flame', '#/admin/active-domains': 'shield', '#/order': 'order', '#/billing': 'billing', '#/notifications': 'bell',
   '#/admin/orders': 'orders', '#/admin/clients': 'clients', '#/admin/invoices': 'invoices', '#/admin/team': 'team', '#/admin/settings': 'settings', '#/admin/analytics': 'chart', '#/admin/resellers': 'reseller', '#/admin/payouts': 'billing', '#/admin/locations': 'map',
 };
 
@@ -590,7 +590,7 @@ function renderPassword() {
 
 // ------------------------------------------------------------------ client
 
-const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/domains', 'Domains'], ['#/order', 'New order'], ['#/billing', 'Billing']];
+const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/sequencers', 'Sequencer Connect'], ['#/domains', 'Domains'], ['#/order', 'New order'], ['#/billing', 'Billing']];
 
 async function renderClient(page, arg, sub) {
   state.dash = await api('GET', '/api/dashboard');
@@ -603,9 +603,9 @@ async function renderClient(page, arg, sub) {
   if (page === 'order') return state.me.resellerClient ? go('#/dashboard') : renderOrder();
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
-  if (page === 'mailboxes') {
+  if (page === 'mailboxes' || page === 'sequencers') {
     const [{ mailboxes: rows }, seq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
-    return renderMyMailboxes(rows, seq);
+    return renderMyMailboxes(rows, seq, page);
   }
   if (page === 'domains') {
     const [{ domains }, hosts] = await Promise.all([api('GET', '/api/domains'), api('GET', '/api/domain-hosts')]);
@@ -3467,13 +3467,18 @@ const acctCard = ({ key, title, meta, stats = '', actions = '', error = '' }) =>
 // Client: their mailbox logins, and their sequencers (Instantly, …) to
 // connect the mailboxes to in the background with one click.
 let mbRefresh = null;
-function renderMyMailboxes(rows, seqData = {}) {
+// view 'sequencers': the same sequencer card and mailbox table on its own
+// sidebar page, "Sequencer Connect".
+function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
+  const seqPage = view === 'sequencers';
   const { sequencers: seqs = [], providers = [] } = seqData;
   const admins = rows.filter((m) => m.is_admin).length;
   const prov = (k) => providers.find((p) => p.key === k) || {};
   const pending = seqs.some((s) => s.pending || s.awaiting);
-  shell(CLIENT_TABS, '#/mailboxes', `
-    <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p></div>
+  shell(CLIENT_TABS, seqPage ? '#/sequencers' : '#/mailboxes', `
+    <div class="page-head"><div>${seqPage
+      ? '<h1>Sequencer Connect</h1><p class="muted">Connect your sequencer, then add your mailboxes to it. PlusVibe: click Authorize next to each mailbox and approve it with Google.</p>'
+      : '<h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p>'}</div>
       ${rows.length ? `<div class="row"><a class="btn" href="/api/mailboxes.csv">${icon('download')} Download CSV</a></div>` : ''}</div>
     <div class="stack">
       <div class="card">
@@ -3507,9 +3512,9 @@ function renderMyMailboxes(rows, seqData = {}) {
     </div>`);
   wireMailboxTable((id) => `/api/mailboxes/${id}/password`);
   const reload = async () => {
-    if (!location.hash.startsWith('#/mailboxes')) return;
+    if (!location.hash.startsWith(`#/${view}`)) return;
     const [{ mailboxes: r }, sq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
-    renderMyMailboxes(r, sq);
+    renderMyMailboxes(r, sq, view);
   };
   // While connections are running or waiting for approval, refresh every 8 seconds.
   clearTimeout(mbRefresh);
