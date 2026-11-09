@@ -21,12 +21,16 @@ const setConn = (mailboxId, sequencerId, status, error = '', consentUrl = null) 
      consent_url = EXCLUDED.consent_url, consent_at = EXCLUDED.consent_at`,
   [mailboxId, sequencerId, status, String(error).slice(0, 500), consentUrl ? onboarding.encrypt(consentUrl) : null]);
 
-// Google or Microsoft: what the domain's MX records say (that's where the
-// mailbox really lives), else the mailbox's type.
-async function providerOf(m) {
+// Google or Microsoft. For consent-based sequencers (PlusVibe) the mailbox's
+// type comes first: the client approves the link it gets, so a stale or wrong
+// DNS result must not send a Google mailbox to Microsoft. Otherwise (and when
+// no type is set) what the domain's MX records say, as before.
+async function providerOf(m, { typeFirst = false } = {}) {
+  const byType = m.inbox_type ? dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }) : null;
+  if (typeFirst && byType) return byType;
   const { rows: [d] } = await query("SELECT dns->>'detected' AS detected FROM domains WHERE user_id = $1 AND domain = lower(split_part($2, '@', 2))", [m.user_id, m.email]);
   if (d && ['google', 'microsoft'].includes(d.detected)) return d.detected;
-  return m.inbox_type ? dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }) : null;
+  return byType;
 }
 
 // Adds jobs for these mailboxes (skipping ones already connected or waiting).
@@ -53,7 +57,7 @@ async function runJob(job) {
   if (!seq || !m) throw new sequencers.SeqError('The sequencer or mailbox was removed');
   const provider = sequencers.PROVIDERS[seq.provider];
   if (!provider || (!provider.connect && !provider.consent)) throw new sequencers.SeqError('This sequencer is CSV-only');
-  const kind = await providerOf(m);
+  const kind = await providerOf(m, { typeFirst: Boolean(provider && provider.consent) });
   if (!kind) throw new sequencers.SeqError('Unknown mailbox type: set it to a Google or Microsoft type (Mailboxes → type) and retry');
   const creds = JSON.parse(onboarding.decrypt(seq.creds));
   if (provider.consent) {

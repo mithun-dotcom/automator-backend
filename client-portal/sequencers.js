@@ -178,7 +178,15 @@ const PROVIDERS = {
         }
         step('PlusVibe: create sign-in link');
         const url = await plusvibe.consentUrl(creds.api_key, creds.workspace_id, mailbox.provider, mailbox.email);
-        return { authorizeUrl: url, note: existing ? `PlusVibe shows ${existing.status}: approve again` : '' };
+        // Never hand out a Microsoft sign-in for a Google mailbox (or the reverse).
+        const host = (() => { try { return new URL(url).host; } catch { return ''; } })();
+        const linkKind = /(^|\.)google\.com$/.test(host) ? 'google' : /microsoftonline\.com$|live\.com$|microsoft\.com$/.test(host) ? 'microsoft' : '';
+        const want = mailbox.provider === 'microsoft' ? 'Microsoft' : 'Google';
+        if (linkKind && linkKind !== mailbox.provider) {
+          throw new SeqError(`PlusVibe returned a ${linkKind === 'google' ? 'Google' : 'Microsoft'} sign-in link for this ${want} mailbox. Check the mailbox type on Mailboxes, then retry`);
+        }
+        step(`PlusVibe: ${want} sign-in link ready`);
+        return { authorizeUrl: url, note: `${existing ? `PlusVibe shows ${existing.status}. ` : ''}Approve with ${want}` };
       } catch (err) {
         throw err instanceof SeqError ? err : new SeqError(err.message);
       }
