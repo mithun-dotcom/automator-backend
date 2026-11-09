@@ -3,9 +3,13 @@
 // consent link (partner-google-oauth-url / partner-microsoft-oauth-url); a person opens it, signs
 // in as the mailbox and clicks Allow. We then confirm the mailbox with GET /account/list.
 //
-// Auth: `x-api-key` (the client's PlusVibe API key, Business plan) + our partner provider_id.
-// Base URL: the endpoint specs say https://api.plusvibe.ai/api/v1; the Email Infra Provider Guide
-// says https://api.plusvibe.ai/v1. Default is the spec value; set PLUSVIBE_API_BASE to change it.
+// Auth: `x-api-key` (the client's PlusVibe API key, Business plan) + our partner ID.
+// Base URLs, confirmed against api.plusvibe.ai on 2026-11-10 (the docs disagree):
+//   partner endpoints  /webhook/partner-*            → https://api.plusvibe.ai/v1      (404 under /api/v1)
+//   account endpoints  /authenticate, /account/list  → https://api.plusvibe.ai/api/v1  (404 under /v1)
+// Also found live (not in the docs): partner-google-oauth-url needs the mailbox's email, and the
+// server reads the partner ID as `partner_id` (the docs say `provider_id`), so we send both.
+// PlusVibe returns validation errors as HTTP 500 with { code: 0, message }; those aren't retried.
 // Rate limit: 10 requests/second per account.
 
 class PlusVibeError extends Error {
@@ -13,14 +17,9 @@ class PlusVibeError extends Error {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// PlusVibe's docs give two base URLs. Unless PLUSVIBE_API_BASE pins one, try the
-// endpoint specs' /api/v1 first and fall back to the guide's /v1 on a 404,
-// remembering whichever answers.
-const BASES = ['https://api.plusvibe.ai/api/v1', 'https://api.plusvibe.ai/v1'];
-let preferred = 0;
-const bases = () => (process.env.PLUSVIBE_API_BASE
-  ? [process.env.PLUSVIBE_API_BASE.replace(/\/$/, '')]
-  : [BASES[preferred], BASES[1 - preferred]]);
+const baseFor = (path) => (path.startsWith('/webhook/')
+  ? process.env.PLUSVIBE_PARTNER_API_BASE || 'https://api.plusvibe.ai/v1'
+  : process.env.PLUSVIBE_API_BASE || 'https://api.plusvibe.ai/api/v1').replace(/\/$/, '');
 
 function providerId() {
   const id = (process.env.PLUSVIBE_PROVIDER_ID || '').trim();
@@ -34,22 +33,8 @@ function allowedFor(email) {
   return Boolean(email) && list.includes(String(email).trim().toLowerCase());
 }
 
-async function request(apiKey, method, path, opts = {}) {
-  const list = bases();
-  for (let i = 0; i < list.length; i += 1) {
-    try {
-      const out = await requestAt(list[i], apiKey, method, path, opts);
-      if (!process.env.PLUSVIBE_API_BASE) preferred = BASES.indexOf(list[i]);
-      return out;
-    } catch (err) {
-      if (err.status !== 404 || i === list.length - 1) throw err;
-    }
-  }
-  throw new PlusVibeError('NOT_FOUND', 'PlusVibe endpoint not found');
-}
-
-async function requestAt(baseUrl, apiKey, method, path, { query, body } = {}) {
-  const url = new URL(baseUrl + path);
+async function request(apiKey, method, path, { query, body } = {}) {
+  const url = new URL(baseFor(path) + path);
   for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
   for (let attempt = 0; ; attempt += 1) {
     let res;
@@ -68,6 +53,11 @@ async function requestAt(baseUrl, apiKey, method, path, { query, body } = {}) {
     if (res.ok) return json;
     if (res.status === 401 || res.status === 403 || (res.status === 400 && /api key/i.test(`${json.message} ${json.error}`))) {
       throw new PlusVibeError('INVALID_API_KEY', 'PlusVibe rejected the API key. Use a key from PlusVibe → Settings → API access (Business plan)', res.status);
+    }
+    // A readable PlusVibe answer ({ code: 0, message }) is final, even on HTTP 500.
+    const readable = json && json.code === 0 && typeof json.message === 'string' && json.message;
+    if (readable && res.status !== 429) {
+      throw new PlusVibeError(/^[A-Z_]+$/.test(readable) ? readable : 'PLUSVIBE_REJECTED', `PlusVibe: ${readable}`, res.status);
     }
     if ((res.status === 429 || res.status >= 500) && attempt < 3) {
       const ra = Number(res.headers.get('retry-after'));
@@ -100,7 +90,8 @@ async function listWorkspaces(apiKey) {
     first = err;
   }
   try {
-    const data = unwrap(await request(apiKey, 'POST', '/webhook/partner-list-workspace', { body: { flow: 'app_user', provider_id: providerId() } }), 'workspaces');
+    const pid = providerId();
+    const data = unwrap(await request(apiKey, 'POST', '/webhook/partner-list-workspace', { body: { flow: 'app_user', provider_id: pid, partner_id: pid } }), 'workspaces');
     return (data || []).map((w) => ({ id: w.workspace_id, name: w.workspace_name || w.workspace_id, status: w.workspace_status || '' }));
   } catch (err) {
     throw new PlusVibeError(err.code || first.code, `${first.message}; partner endpoint: ${err.message}`, err.status);
@@ -110,14 +101,17 @@ async function listWorkspaces(apiKey) {
 // GET /webhook/partner-check-email-account → { existed_in_other_ws, current, max_allowed }
 async function checkEmail(apiKey, workspaceId, email) {
   return unwrap(await request(apiKey, 'GET', '/webhook/partner-check-email-account', {
-    query: { workspace_id: workspaceId, provider_id: providerId(), email },
+    query: { workspace_id: workspaceId, provider_id: providerId(), partner_id: providerId(), email },
   }), 'email check');
 }
 
 // POST /webhook/partner-{google|microsoft}-oauth-url → the consent URL for adding one mailbox.
-async function consentUrl(apiKey, workspaceId, kind) {
+async function consentUrl(apiKey, workspaceId, kind, email) {
   const path = kind === 'microsoft' ? '/webhook/partner-microsoft-oauth-url' : '/webhook/partner-google-oauth-url';
-  const data = unwrap(await request(apiKey, 'POST', path, { body: { flow: 'app_user', workspace_id: workspaceId, provider_id: providerId() } }), 'sign-in link');
+  const pid = providerId();
+  const data = unwrap(await request(apiKey, 'POST', path, {
+    body: { flow: 'app_user', workspace_id: workspaceId, provider_id: pid, partner_id: pid, email },
+  }), 'sign-in link');
   if (!data || !data.redirect_url) throw new PlusVibeError('NO_REDIRECT_URL', 'PlusVibe returned no sign-in link');
   return data.redirect_url;
 }

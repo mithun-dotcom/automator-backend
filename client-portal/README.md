@@ -245,7 +245,7 @@ https://<your-app>.onrender.com/api/cron/billing?key=<CRON_SECRET>
 | `NODE_ENV` | optional | `production` makes the login cookie HTTPS-only |
 | `PLUSVIBE_PROVIDER_ID` | for PlusVibe | Mithmill's PlusVibe partner provider ID (24 hex characters) |
 | `PLUSVIBE_ALLOWED_EMAILS` | optional | Clients who can use PlusVibe (comma-separated). Default `mithun@mithmill.com`; everyone else sees "Soon" |
-| `PLUSVIBE_API_BASE` | optional | Default `https://api.plusvibe.ai/api/v1` (PlusVibe's provider guide also mentions `/v1`) |
+| `PLUSVIBE_API_BASE`, `PLUSVIBE_PARTNER_API_BASE` | optional | Defaults `https://api.plusvibe.ai/api/v1` (account endpoints) and `https://api.plusvibe.ai/v1` (partner `/webhook/partner-*` endpoints), as PlusVibe's live API answers |
 
 For Google Workspace SMTP, use `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, and an [app password](https://support.google.com/accounts/answer/185833) for `SMTP_PASS`.
 

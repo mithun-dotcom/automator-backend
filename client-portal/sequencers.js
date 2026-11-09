@@ -177,7 +177,7 @@ const PROVIDERS = {
           if (chk && chk.max_allowed != null && chk.current >= chk.max_allowed) throw new SeqError(`PlusVibe: your plan has no free email-account slots (${chk.current}/${chk.max_allowed})`);
         }
         step('PlusVibe: create sign-in link');
-        const url = await plusvibe.consentUrl(creds.api_key, creds.workspace_id, mailbox.provider);
+        const url = await plusvibe.consentUrl(creds.api_key, creds.workspace_id, mailbox.provider, mailbox.email);
         return { authorizeUrl: url, note: existing ? `PlusVibe shows ${existing.status}: approve again` : '' };
       } catch (err) {
         throw err instanceof SeqError ? err : new SeqError(err.message);
