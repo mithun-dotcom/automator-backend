@@ -437,6 +437,10 @@ CREATE TABLE IF NOT EXISTS connect_jobs (
   finished_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS connect_jobs_queue ON connect_jobs (status, id);
+-- Consent-based sequencers (PlusVibe): status 'authorize' while the client
+-- opens the sign-in link (encrypted here) and approves it.
+ALTER TABLE mailbox_connections ADD COLUMN IF NOT EXISTS consent_url BYTEA;
+ALTER TABLE mailbox_connections ADD COLUMN IF NOT EXISTS consent_at TIMESTAMPTZ;
 
 -- White-label reseller whose clients pay through Mithmill's processor
 -- (Mixxbee LLC): their brand and logo, with "Payments powered by Mixxbee".

@@ -4,11 +4,13 @@
 // sign-in (OAuth), done in the background by a headless browser (signin.js):
 // - Instantly: its API gives a sign-in link per mailbox and confirms the
 //   result (developer.instantly.ai → OAuth connection flow).
-// - PlusVibe (beta): its partner API gives the sign-in link.
+// - PlusVibe (beta): no browser. Its partner API gives a consent link per
+//   mailbox that the client opens and approves; the API confirms the result.
 // - Smartlead (beta): no API for this, so the browser logs in to Smartlead
 //   and uses its "connect Google / Microsoft" button; the API confirms it.
 // - Anything else: a CSV to import.
 const signin = require('./signin');
+const plusvibe = require('./plusvibe');
 
 class SeqError extends Error {
   constructor(message, diag) { super(message); this.diag = diag; }
@@ -145,20 +147,50 @@ const PROVIDERS = {
   },
   plusvibe: {
     name: 'PlusVibe (beta)',
-    fields: [{ key: 'api_key', label: 'API key', secret: true }, { key: 'username', label: 'PlusVibe login email' }],
-    help: 'PlusVibe → Settings → API (Business plan). Uses PlusVibe\'s partner sign-in API; if your plan doesn\'t include it, PlusVibe returns an error and you can use the CSV instead.',
-    async test(c) { if (!c.api_key) throw new SeqError('Enter the API key'); },
-    async connect({ creds, mailbox, page, step }) {
-      step('PlusVibe: get sign-in link');
-      const path = mailbox.provider === 'google' ? 'partner-google-oauth-url' : 'partner-microsoft-oauth-url';
-      const r = must(await http('POST', `https://api.plusvibe.ai/api/v1/webhook/${path}`, {
-        headers: { 'x-api-key': creds.api_key }, body: { flow: mailbox.provider, pipl_username: creds.username },
-      }), 'PlusVibe');
-      const url = findAuthUrl(r.data) || findAuthUrl(r.text);
-      if (!url) throw new SeqError(`PlusVibe didn't return a sign-in link (${(r.text || '').slice(0, 150)})`);
-      const end = await signin.completeSignIn(page, url, mailbox.provider, mailbox.email, mailbox.password, step);
-      if (/error|failed|denied/i.test(end.text) && !/success/i.test(end.text)) throw new SeqError(`PlusVibe: ${end.text.slice(0, 150)}`, await signin.diag(page));
-      return { note: 'Signed in; PlusVibe adds it to your account' };
+    // No browser: PlusVibe's partner API gives a Google / Microsoft consent link per mailbox, the
+    // client opens it and clicks Allow, and PlusVibe's account list confirms it (plusvibe.js).
+    consent: true,
+    restricted: true, // live only for PLUSVIBE_ALLOWED_EMAILS; "Coming soon" for everyone else
+    fields: [
+      { key: 'api_key', label: 'API key', secret: true },
+      { key: 'workspace_id', label: 'PlusVibe workspace', type: 'plusvibe_workspace' },
+    ],
+    help: 'PlusVibe → Settings → API access (Business plan). Paste the key, load your workspaces and pick one. Then click Authorize next to each mailbox and approve it with Google (one click per mailbox).',
+    async test(c) {
+      if (!/^[a-f0-9]{24}$/.test(c.workspace_id)) throw new SeqError('Load your workspaces and choose one');
+      let list;
+      try { list = await plusvibe.listWorkspaces(c.api_key); } catch (err) { throw new SeqError(err.message); }
+      const ws = list.find((w) => w.id === c.workspace_id);
+      if (!ws) throw new SeqError('That workspace isn\'t visible to this API key');
+      return { label: `PlusVibe · ${ws.name}` };
+    },
+    // One mailbox: already there → connected; otherwise pre-check and return a consent link.
+    async startConsent({ creds, mailbox, step }) {
+      try {
+        if (!creds.workspace_id) throw new SeqError('Remove this PlusVibe connection and add it again to choose a workspace');
+        step('PlusVibe: check mailbox');
+        const existing = await plusvibe.findAccount(creds.api_key, creds.workspace_id, mailbox.email);
+        if (plusvibe.isActive(existing)) return { note: 'Already in this PlusVibe workspace' };
+        if (!existing) {
+          const chk = await plusvibe.checkEmail(creds.api_key, creds.workspace_id, mailbox.email);
+          if (chk && chk.existed_in_other_ws) throw new SeqError('PlusVibe: this mailbox is already in another PlusVibe workspace. Remove it there first, then retry');
+          if (chk && chk.max_allowed != null && chk.current >= chk.max_allowed) throw new SeqError(`PlusVibe: your plan has no free email-account slots (${chk.current}/${chk.max_allowed})`);
+        }
+        step('PlusVibe: create sign-in link');
+        const url = await plusvibe.consentUrl(creds.api_key, creds.workspace_id, mailbox.provider);
+        return { authorizeUrl: url, note: existing ? `PlusVibe shows ${existing.status}: approve again` : '' };
+      } catch (err) {
+        throw err instanceof SeqError ? err : new SeqError(err.message);
+      }
+    },
+    // Many mailboxes at once: email → PlusVibe account (or undefined). One paged call per domain.
+    async verify(creds, emails) {
+      const out = new Map();
+      const domains = [...new Set(emails.map((e) => e.split('@')[1]))];
+      for (const d of domains) {
+        for (const a of await plusvibe.listDomain(creds.api_key, creds.workspace_id, d)) out.set(String(a.email).toLowerCase(), a);
+      }
+      return out;
     },
   },
   other: {
@@ -170,9 +202,13 @@ const PROVIDERS = {
   },
 };
 
-const publicList = () => Object.entries(PROVIDERS).map(([key, p]) => ({
-  key, name: p.name, help: p.help, csvOnly: Boolean(p.csvOnly),
-  fields: p.fields.map((f) => ({ key: f.key, label: f.label, secret: Boolean(f.secret) })),
+// What the client's browser sees. Restricted providers show as "Coming soon"
+// unless the client's email is allowed.
+const allowed = (key, email) => !PROVIDERS[key] || !PROVIDERS[key].restricted || plusvibe.allowedFor(email);
+const publicList = (email) => Object.entries(PROVIDERS).map(([key, p]) => ({
+  key, name: p.name, help: p.help, csvOnly: Boolean(p.csvOnly), consent: Boolean(p.consent),
+  comingSoon: !allowed(key, email),
+  fields: p.fields.map((f) => ({ key: f.key, label: f.label, secret: Boolean(f.secret), type: f.type || '' })),
 }));
 
 function cleanCreds(provider, input) {
@@ -198,4 +234,4 @@ function csvRow(m) {
   return [m.email, m.password, m.provider === 'google' ? 'Google Workspace' : m.provider === 'microsoft' ? 'Microsoft 365' : '', local[0] || '', local.slice(1).join(' '), ...s];
 }
 
-module.exports = { PROVIDERS, publicList, cleanCreds, csvRow, CSV_HEADER, SeqError, findAuthUrl };
+module.exports = { PROVIDERS, publicList, allowed, cleanCreds, csvRow, CSV_HEADER, SeqError, findAuthUrl };

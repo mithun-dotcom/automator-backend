@@ -3367,9 +3367,11 @@ function deviceOf(ua) {
 
 // Mailbox logins with the password hidden until Show. pwUrl(id) fetches one
 // password; admin adds the batch column and Delete / admin switch.
-const CONN_LABEL = { queued: 'Queued', running: 'Connecting…', connected: 'Connected', failed: 'Failed' };
-const CONN_ICON = { queued: 'clock', running: 'refresh', connected: 'check', failed: 'x' };
-const connChips = (m) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}"><img class="conn-logo" src="/brand-logo/${encodeURIComponent(c.provider || 'other')}" alt=""><span>${esc(c.label)}</span><span class="conn-st">${icon(CONN_ICON[c.status] || 'clock')}${c.status !== 'connected' ? (CONN_LABEL[c.status] || c.status) : ''}</span></span>${c.status === 'failed' && c.error ? `<details class="conn-why"><summary>Why it failed</summary><div class="small conn-err">${esc(c.error)}</div></details>` : ''}`).join('');
+const CONN_LABEL = { queued: 'Queued', running: 'Connecting…', connected: 'Connected', failed: 'Failed', authorize: 'Needs approval' };
+const CONN_ICON = { queued: 'clock', running: 'refresh', connected: 'check', failed: 'x', authorize: 'lock' };
+// authorize: consent-based sequencers (PlusVibe). The client opens the link,
+// signs in as this mailbox and clicks Allow; the server confirms it.
+const connChips = (m, { client = false } = {}) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}"><img class="conn-logo" src="/brand-logo/${encodeURIComponent(c.provider || 'other')}" alt=""><span>${esc(c.label)}</span><span class="conn-st">${icon(CONN_ICON[c.status] || 'clock')}${c.status !== 'connected' ? (CONN_LABEL[c.status] || c.status) : ''}</span></span>${c.status === 'failed' && c.error ? `<details class="conn-why"><summary>Why it failed</summary><div class="small conn-err">${esc(c.error)}</div></details>` : ''}${c.status === 'authorize' && client ? `<div class="conn-auth"><a class="btn btn-sm btn-primary" href="/api/sequencers/${encodeURIComponent(c.sequencer_id)}/authorize/${encodeURIComponent(m.id)}" target="_blank" rel="noopener noreferrer" title="Sign in as ${esc(m.email)} and click Allow">${icon('lock')} Authorize ${esc(m.email.split('@')[0])}</a>${c.error ? `<div class="small muted">${esc(c.error)}</div>` : ''}</div>` : ''}`).join('');
 
 function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false }) {
   if (!rows.length) return '';
@@ -3389,7 +3391,7 @@ function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, 
         <button class="pw-btn" data-copy-pw="${m.id}" title="Copy password" aria-label="Copy password for ${esc(m.email)}">${icon('copy')}</button></div></td>
       <td class="mb-type">${typeCell(m)}</td>
       <td class="small mb-created">${m.created_on ? fmtDate(String(m.created_on).slice(0, 10)) : '<span class="muted">—</span>'}</td>
-      ${conns ? `<td class="mb-conns">${connChips(m) || '<span class="muted small">—</span>'}</td>` : ''}
+      ${conns ? `<td class="mb-conns">${connChips(m, { client: !admin }) || '<span class="muted small">—</span>'}</td>` : ''}
       ${admin ? `<td class="small">${m.order_id ? esc(m.batch_name || `#${m.order_id}`) : '<span class="muted">—</span>'}</td>
         <td><label class="switch switch-sm" title="Admin mailbox"><input type="checkbox" data-mb-admin="${m.id}" aria-label="Admin: ${esc(m.email)}" ${m.is_admin ? 'checked' : ''}><span></span></label></td>
         <td><button class="btn btn-sm btn-ghost" data-mb-del="${m.id}" data-email="${esc(m.email)}">Delete</button></td>` : ''}
@@ -3431,8 +3433,9 @@ function providerPicker(providers, id) {
   return `<input type="hidden" name="provider" id="${id}">
     <div class="prov-grid" data-picker="${id}">${providers.map((p, i) => {
       const { name, tag } = provName(p);
-      return `<button type="button" class="prov-tile" data-prov="${esc(p.key)}" style="--i:${i}" aria-pressed="false">
-        ${provLogo(p.key)}<span class="prov-name">${esc(name)}</span>${tag ? `<span class="prov-tag">${esc(tag)}</span>` : ''}
+      const soon = Boolean(p.comingSoon);
+      return `<button type="button" class="prov-tile${soon ? ' prov-soon' : ''}" data-prov="${esc(p.key)}" style="--i:${i}" aria-pressed="false" ${soon ? 'disabled aria-disabled="true" title="Coming soon"' : ''}>
+        ${provLogo(p.key)}<span class="prov-name">${esc(name)}</span>${soon ? '<span class="prov-tag" aria-label="Coming soon">Soon</span>' : tag ? `<span class="prov-tag">${esc(tag)}</span>` : ''}
         <span class="prov-check" aria-hidden="true">${icon('check')}</span></button>`;
     }).join('')}</div>`;
 }
@@ -3468,7 +3471,7 @@ function renderMyMailboxes(rows, seqData = {}) {
   const { sequencers: seqs = [], providers = [] } = seqData;
   const admins = rows.filter((m) => m.is_admin).length;
   const prov = (k) => providers.find((p) => p.key === k) || {};
-  const pending = seqs.some((s) => s.pending);
+  const pending = seqs.some((s) => s.pending || s.awaiting);
   shell(CLIENT_TABS, '#/mailboxes', `
     <div class="page-head"><div><h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p></div>
       ${rows.length ? `<div class="row"><a class="btn" href="/api/mailboxes.csv">${icon('download')} Download CSV</a></div>` : ''}</div>
@@ -3478,8 +3481,8 @@ function renderMyMailboxes(rows, seqData = {}) {
         ${seqs.length ? `<div class="acct-list">${seqs.map((s) => acctCard({
           key: s.provider,
           title: esc(s.label),
-          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}`,
-          stats: prov(s.provider).csvOnly ? '<span class="pill">Import with the CSV</span>' : `<span class="pill pill-ok"><strong>${s.connected}</strong> connected</span>${s.pending ? `<span class="pill pill-run"><span class="spin"></span>${s.pending} in progress</span>` : ''}${s.failed ? `<span class="pill pill-bad">${s.failed} failed</span>` : ''}`,
+          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}${prov(s.provider).consent ? '<br><span class="small">After Connect, click <strong>Authorize</strong> next to each mailbox below, sign in as that mailbox and click Allow. We confirm each one with the sequencer.</span>' : ''}${prov(s.provider).comingSoon ? '<br><span class="small">Coming soon for your account.</span>' : ''}`,
+          stats: prov(s.provider).csvOnly ? '<span class="pill">Import with the CSV</span>' : `<span class="pill pill-ok"><strong>${s.connected}</strong> connected</span>${s.pending ? `<span class="pill pill-run"><span class="spin"></span>${s.pending} in progress</span>` : ''}${s.awaiting ? `<span class="pill pill-run" title="Click Authorize next to each of these mailboxes">${s.awaiting} need approval</span>` : ''}${s.failed ? `<span class="pill pill-bad">${s.failed} failed</span>` : ''}`,
           actions: `${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">${icon('download')} CSV for ${esc(s.label)}</a>` : `
               <button class="btn btn-sm btn-primary" data-seq-all="${s.id}" ${rows.length ? '' : 'disabled'}>Connect all mailboxes</button>
               <button class="btn btn-sm" data-seq-sel="${s.id}" ${rows.length ? '' : 'disabled'}>Connect selected</button>
@@ -3508,7 +3511,7 @@ function renderMyMailboxes(rows, seqData = {}) {
     const [{ mailboxes: r }, sq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
     renderMyMailboxes(r, sq);
   };
-  // While connections are running, refresh every 8 seconds.
+  // While connections are running or waiting for approval, refresh every 8 seconds.
   clearTimeout(mbRefresh);
   if (pending) mbRefresh = setTimeout(() => { reload().catch(() => {}); }, 8000);
 
@@ -3518,9 +3521,29 @@ function renderMyMailboxes(rows, seqData = {}) {
     const p = prov(key);
     document.getElementById('seq-fields').innerHTML = !p.key ? '' : `
       <p class="muted small" style="margin:0 0 10px">${esc(p.help)}</p>
-      <div class="grid-2">${p.fields.map((f) => `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
+      <div class="grid-2">${p.fields.map((f) => f.type === 'plusvibe_workspace' ? `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
+        <div class="row"><select id="sf-${f.key}" name="cred_${f.key}" required><option value="">Paste the API key, then load</option></select>
+        <button type="button" class="btn btn-sm" id="pv-load">Load workspaces</button></div></div>` : `<div class="field"><label for="sf-${f.key}">${esc(f.label)}</label>
         <input id="sf-${f.key}" name="cred_${f.key}" ${f.secret ? 'type="password"' : ''} autocomplete="off" required></div>`).join('')}
         <div class="field"><label for="sf-label">Name it <span class="muted small">(optional)</span></label><input id="sf-label" name="label" placeholder="e.g. ${esc(provName(p).name)} main workspace"></div></div>`;
+    const load = document.getElementById('pv-load');
+    if (load) {
+      const keyEl = document.getElementById('sf-api_key');
+      const sel = document.getElementById('sf-workspace_id');
+      const fetchWs = async () => {
+        if (!keyEl.value.trim()) { toast('Paste your PlusVibe API key first'); return; }
+        load.disabled = true;
+        try {
+          const { workspaces } = await api('POST', '/api/sequencers/plusvibe/workspaces', { api_key: keyEl.value.trim() });
+          sel.innerHTML = workspaces.length
+            ? `<option value="">Choose a workspace</option>${workspaces.map((w) => `<option value="${esc(w.id)}">${esc(w.name)}${w.status && w.status !== 'ACTIVE' ? ` (${esc(w.status)})` : ''}</option>`).join('')}`
+            : '<option value="">No workspaces on this key</option>';
+          if (workspaces.length === 1) sel.value = workspaces[0].id;
+        } catch (ex) { toast(ex.message); } finally { load.disabled = false; }
+      };
+      load.onclick = fetchWs;
+      keyEl.addEventListener('change', fetchWs);
+    }
   });
   onSubmit(document.getElementById('seq-form'), async (d) => {
     const creds = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('cred_')).map(([k, v]) => [k.slice(5), v]));
@@ -3532,7 +3555,10 @@ function renderMyMailboxes(rows, seqData = {}) {
     b.disabled = true;
     try {
       const r = await api('POST', `/api/sequencers/${id}/connect`, body);
-      toast(r.queued ? `Connecting ${r.queued} mailbox${r.queued === 1 ? '' : 'es'} in the background (about a minute each). You can leave this page.` : 'Those mailboxes are already connected or in progress');
+      const consent = prov((seqs.find((x) => String(x.id) === String(id)) || {}).provider).consent;
+      toast(!r.queued ? 'Those mailboxes are already connected or in progress'
+        : consent ? `Creating sign-in links for ${r.queued} mailbox${r.queued === 1 ? '' : 'es'}. Click Authorize next to each one when it appears.`
+          : `Connecting ${r.queued} mailbox${r.queued === 1 ? '' : 'es'} in the background (about a minute each). You can leave this page.`);
     } catch (ex) { toast(ex.message); }
     await reload();
   };

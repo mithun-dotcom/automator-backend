@@ -15,6 +15,7 @@ const cloudflare = require('./cloudflare');
 const registrars = require('./registrars');
 const sequencers = require('./sequencers');
 const connector = require('./connector');
+const plusvibe = require('./plusvibe');
 const audit = require('./audit');
 const emailTemplate = require('./emailTemplate');
 const brands = require('./brands');
@@ -1710,30 +1711,60 @@ app.delete('/api/domains/:id', auth, clientOnly, asyncRoute(async (req, res) => 
 const SEQ_LIST = `SELECT s.id, s.provider, s.label, s.hint, s.last_ok_at, s.created_at,
     (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status = 'connected')::int AS connected,
     (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status IN ('queued', 'running'))::int AS pending,
-    (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status = 'failed')::int AS failed
+    (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status = 'failed')::int AS failed,
+    (SELECT count(*) FROM mailbox_connections c WHERE c.sequencer_id = s.id AND c.status = 'authorize')::int AS awaiting
   FROM sequencer_accounts s WHERE s.user_id = $1 ORDER BY s.created_at`;
 
 app.get('/api/sequencers', auth, clientOnly, asyncRoute(async (req, res) => {
   const { rows } = await query(SEQ_LIST, [req.user.id]);
-  res.json({ sequencers: rows, providers: sequencers.publicList() });
+  if (rows.some((r) => r.awaiting)) connector.kick(); // re-check waiting approvals (rate-limited inside)
+  res.json({ sequencers: rows, providers: sequencers.publicList(req.user.email) });
 }));
 
 app.post('/api/sequencers', auth, clientOnly, asyncRoute(async (req, res) => {
   const provider = str(req.body.provider, 30);
+  if (!sequencers.allowed(provider, req.user.email)) throw new HttpError(403, 'This sequencer is coming soon for your account');
   let creds;
+  let tested;
   try {
     creds = sequencers.cleanCreds(provider, req.body.creds);
-    await sequencers.PROVIDERS[provider].test(creds);
+    tested = await sequencers.PROVIDERS[provider].test(creds);
   } catch (err) {
     throw new HttpError(400, err instanceof sequencers.SeqError ? `${err.message}. Check and try again.` : err.message);
   }
   const p = sequencers.PROVIDERS[provider];
   const secret = p.fields.find((f) => f.secret);
-  const label = str(req.body.label, 100) || (provider === 'other' ? creds.name : p.name.replace(/ \(beta\)$/, ''));
+  const label = str(req.body.label, 100) || (tested && tested.label) || (provider === 'other' ? creds.name : p.name.replace(/ \(beta\)$/, ''));
   const { rows: [s] } = await query(
     'INSERT INTO sequencer_accounts (user_id, provider, label, creds, hint) VALUES ($1, $2, $3, $4, $5) RETURNING id',
     [req.user.id, provider, label, onboarding.encrypt(JSON.stringify(creds)), secret ? registrars.mask(creds[secret.key]) : '']);
   res.status(201).json({ id: s.id });
+}));
+
+// PlusVibe: the workspaces an API key can see, to pick one before saving.
+// The key is only used for this call; it's saved (encrypted) by POST /api/sequencers.
+app.post('/api/sequencers/plusvibe/workspaces', auth, clientOnly, asyncRoute(async (req, res) => {
+  if (!sequencers.allowed('plusvibe', req.user.email)) throw new HttpError(403, 'PlusVibe is coming soon for your account');
+  const apiKey = str(req.body.api_key, 500);
+  if (!apiKey) throw new HttpError(400, 'Paste your PlusVibe API key first');
+  try {
+    res.json({ workspaces: await plusvibe.listWorkspaces(apiKey) });
+  } catch (err) {
+    throw new HttpError(err.code === 'PROVIDER_NOT_CONFIGURED' ? 503 : 400, err.message);
+  }
+}));
+
+// Consent-based sequencers: send the client to the sign-in link for one of
+// their mailboxes (the link is stored encrypted and never put in page data).
+app.get('/api/sequencers/:id/authorize/:mailboxId', auth, clientOnly, asyncRoute(async (req, res) => {
+  const { rows: [c] } = await query(
+    `SELECT c.consent_url FROM mailbox_connections c
+       JOIN sequencer_accounts s ON s.id = c.sequencer_id AND s.user_id = $3
+       JOIN mailboxes m ON m.id = c.mailbox_id AND m.user_id = $3
+      WHERE c.sequencer_id = $1 AND c.mailbox_id = $2 AND c.status = 'authorize'`,
+    [Number(req.params.id) || 0, Number(req.params.mailboxId) || 0, req.user.id]);
+  if (!c || !c.consent_url) return res.redirect('/#/mailboxes');
+  res.set('Cache-Control', 'no-store').set('Referrer-Policy', 'no-referrer').redirect(onboarding.decrypt(c.consent_url));
 }));
 
 app.delete('/api/sequencers/:id', auth, clientOnly, asyncRoute(async (req, res) => {
@@ -1748,6 +1779,7 @@ app.post('/api/sequencers/:id/connect', auth, clientOnly, asyncRoute(async (req,
   const { rows: [s] } = await query('SELECT * FROM sequencer_accounts WHERE id = $1 AND user_id = $2', [Number(req.params.id) || 0, req.user.id]);
   if (!s) throw new HttpError(404, 'Sequencer not found');
   if (!sequencers.PROVIDERS[s.provider] || sequencers.PROVIDERS[s.provider].csvOnly) throw new HttpError(400, 'This sequencer is CSV-only: download the CSV and import it there');
+  if (!sequencers.allowed(s.provider, req.user.email)) throw new HttpError(403, 'This sequencer is coming soon for your account');
   const ids = Array.isArray(req.body.mailbox_ids) ? req.body.mailbox_ids.map(Number).filter(Boolean) : null;
   const { rows } = ids
     ? await query('SELECT id FROM mailboxes WHERE user_id = $1 AND id = ANY($2)', [req.user.id, ids])

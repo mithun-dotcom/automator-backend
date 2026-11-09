@@ -44,7 +44,12 @@ Clients connect their sequencer on **Mailboxes → Sequencers**, then click **Co
 **Sequencers**
 - **Instantly** (API key, "all:all" scope): uses Instantly's OAuth-session API (`/api/v2/oauth/{google|microsoft}/init`, then `/api/v2/oauth/session/status/{id}` to confirm).
 - **Smartlead (beta)** (API key plus Smartlead login, no 2FA): Smartlead has no API for this, so the browser logs in to Smartlead and uses its connect button. The API confirms the mailbox arrived.
-- **PlusVibe (beta)** (API key plus login email): uses PlusVibe's partner OAuth-link API.
+- **PlusVibe (beta)** (API key + workspace): **no browser and no mailbox passwords.** Live only for the clients in `PLUSVIBE_ALLOWED_EMAILS` (default `mithun@mithmill.com`); everyone else sees "Soon" and the server refuses it. PlusVibe documents no way to add a Google mailbox without the Google consent screen, so:
+  1. The client pastes their PlusVibe API key, clicks **Load workspaces** and picks one (`POST /webhook/partner-list-workspace`).
+  2. **Connect** checks each mailbox (`GET /account/list?email=`, `GET /webhook/partner-check-email-account`): already there → Connected; in another PlusVibe workspace or plan full → Failed with the reason. Otherwise it asks for a sign-in link (`POST /webhook/partner-google-oauth-url`, or the Microsoft one) and the mailbox shows **Needs approval** with an **Authorize** button.
+  3. The client clicks Authorize, signs in **as that mailbox** in their own browser and clicks Allow. (The link is stored encrypted and only handed out through a redirect after checking the mailbox is theirs.)
+  4. Every ~15 s the server checks PlusVibe (`GET /account/list?domain=`, one call per domain) and marks the mailbox **Connected only when PlusVibe reports it ACTIVE**. Links not approved within 24 hours fail with "Retry for a new link".
+  Setup: `PLUSVIBE_PROVIDER_ID` (from PlusVibe partner support). In each Google Workspace tenant, a super admin should mark PlusVibe's OAuth app as Trusted (Admin console → Security → API controls → Manage app access) so Workspace doesn't block it.
 - **Other:** a CSV download (email, password, provider, IMAP / SMTP) for the sequencer's bulk import.
 
 **What mailboxes need.** The password uploaded on Mailboxes, and a Google or Microsoft mailbox type (or a domain whose MX shows it). They also need no extra sign-in checks:
@@ -238,6 +243,9 @@ https://<your-app>.onrender.com/api/cron/billing?key=<CRON_SECRET>
 | `DATABASE_SCHEMA` | optional | Postgres schema for the portal's tables (default `public`). Set it to `client_portal` when you share a database with another app. |
 | `DATABASE_SSL` | optional | `true` when you connect through Render's *external* database URL |
 | `NODE_ENV` | optional | `production` makes the login cookie HTTPS-only |
+| `PLUSVIBE_PROVIDER_ID` | for PlusVibe | Mithmill's PlusVibe partner provider ID (24 hex characters) |
+| `PLUSVIBE_ALLOWED_EMAILS` | optional | Clients who can use PlusVibe (comma-separated). Default `mithun@mithmill.com`; everyone else sees "Soon" |
+| `PLUSVIBE_API_BASE` | optional | Default `https://api.plusvibe.ai/api/v1` (PlusVibe's provider guide also mentions `/v1`) |
 
 For Google Workspace SMTP, use `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, and an [app password](https://support.google.com/accounts/answer/185833) for `SMTP_PASS`.
 
