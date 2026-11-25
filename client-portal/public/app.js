@@ -3386,7 +3386,7 @@ function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, 
     ? `<select class="dom-type" data-mb-type="${m.id}" aria-label="Mailbox type for ${esc(m.email)}"><option value="">Not set</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === m.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`
     : typeChip(m.inbox_type, m.inbox_label));
   return `<div class="table-wrap mb-wrap"><table class="mb-table">
-    <thead><tr>${select ? '<th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Mailbox</th><th>Role</th><th>Password</th><th>Type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
+    <thead><tr>${select ? '<th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Mailbox</th><th>Role</th><th>Password</th><th>Type</th><th class="mb-created">Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
     <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-kind="${mailKind(m)}" data-search="${searchText(m.email, m.batch_name)}" data-seqs="${(m.connections || []).filter((c) => c.status === 'connected').map((c) => c.sequencer_id).join(' ')}" class="${m.is_admin ? 'mb-is-admin' : ''}">
       ${select ? `<td class="mb-chk"><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
       <td class="mb-main"><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}

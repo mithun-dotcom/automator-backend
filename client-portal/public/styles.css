@@ -1165,3 +1165,26 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 }
 @media (min-width: 1024px) and (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
 .mb-google-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #fde68a; } .mb-google-note[hidden] { display: none; } .mb-google-note .ico { width: 14px; height: 14px; } .mb-google-note .link-btn { color: #fff; }
+
+/* ---- use the screen width: no fixed 1280px column with big side margins */
+.header-inner { max-width: 1680px; padding: 16px 28px; }
+.main { max-width: 1680px; padding: 22px 28px 56px; }
+@media (min-width: 1024px) and (max-width: 1500px) {
+  .header-inner { padding: 14px 22px; }
+  .main { padding: 18px 22px 48px; }
+}
+/* mailbox list: fit the columns instead of running off the right edge */
+.mb-table td, .mb-table th { padding-left: 10px; padding-right: 10px; }
+.mb-table .mb-addr { max-width: 230px; }
+.mb-table .mb-pw { min-width: 150px; }
+.mb-table .mb-pw-val { min-width: 80px; }
+.mb-table .type-chip { white-space: normal; line-height: 1.3; }
+.mb-table .mb-conns { min-width: 190px; }
+.mb-wrap { padding-left: 10px; padding-right: 10px; }
+@media (max-width: 1400px) { .mb-table .mb-created { display: none; } }
+@media (max-width: 1250px) { .mb-table .mb-role { width: auto; } .mb-table .mb-copy { display: none; } }
+.header-inner, .main { max-width: none; }
+.mb-table .mb-pw-val { white-space: nowrap; overflow: hidden; }
+.mb-table .mb-pw { min-width: 140px; }
+@media (max-width: 1250px) { .mb-table .mb-pw-val { min-width: 64px; letter-spacing: 0; } }
+.conn-why + .conn-chip, .conn-err + .conn-chip { margin-top: 6px; }
