@@ -604,8 +604,8 @@ async function renderClient(page, arg, sub) {
   if (page === 'billing') return renderBilling();
   if (page === 'notifications') return renderNotifications();
   if (page === 'mailboxes' || page === 'sequencers') {
-    const [{ mailboxes: rows }, seq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
-    return renderMyMailboxes(rows, seq, page);
+    const [{ mailboxes: rows, tags }, seq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
+    return renderMyMailboxes(rows, seq, page, tags);
   }
   if (page === 'domains') {
     const [{ domains }, hosts] = await Promise.all([api('GET', '/api/domains'), api('GET', '/api/domain-hosts')]);
@@ -3380,18 +3380,19 @@ function mailKind(m) {
   return b === 'azure' ? 'microsoft' : b === 'google' || b === 'microsoft' ? b : '';
 }
 
-function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false }) {
+function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false, tagById = null }) {
+  const chips = (m) => (tagById && (m.tag_ids || []).length ? `<div class="dtags mb-tags">${m.tag_ids.map((id) => tagById.get(id)).filter(Boolean).map((t) => `<span class="dtag dtag-${esc(t.color)}" data-mb-tagfilter="${t.id}" title="Show only ${esc(t.name)}">${esc(t.name)}</span>`).join('')}</div>` : '');
   if (!rows.length) return '';
   const typeCell = (m) => (admin
     ? `<select class="dom-type" data-mb-type="${m.id}" aria-label="Mailbox type for ${esc(m.email)}"><option value="">Not set</option>${types.map((t) => `<option value="${esc(t.inbox_type)}" ${t.inbox_type === m.inbox_type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`
     : typeChip(m.inbox_type, m.inbox_label));
   return `<div class="table-wrap mb-wrap"><table class="mb-table">
     <thead><tr>${select ? '<th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Mailbox</th><th>Role</th><th>Password</th><th>Type</th><th class="mb-created">Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
-    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-kind="${mailKind(m)}" data-search="${searchText(m.email, m.batch_name)}" data-seqs="${(m.connections || []).filter((c) => c.status === 'connected').map((c) => c.sequencer_id).join(' ')}" class="${m.is_admin ? 'mb-is-admin' : ''}">
+    <tbody>${rows.map((m) => `<tr data-mb="${m.id}"  data-kind="${mailKind(m)}" data-type="${esc(m.inbox_type || '')}" data-tags="${(m.tag_ids || []).join(' ')}" data-search="${searchText(m.email, m.batch_name)}" data-seqs="${(m.connections || []).filter((c) => c.status === 'connected').map((c) => c.sequencer_id).join(' ')}" class="${m.is_admin ? 'mb-is-admin' : ''}">
       ${select ? `<td class="mb-chk"><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
       <td class="mb-main"><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}
         <span class="mb-addr" title="${esc(m.email)}"><span class="mb-local">${esc(m.email.split('@')[0])}</span><span class="mb-dom">@${esc(m.email.split('@').slice(1).join('@'))}</span></span>
-        <button class="icon-btn icon-btn-sm mb-copy" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button></div></td>
+        <button class="icon-btn icon-btn-sm mb-copy" data-copy-text="${esc(m.email)}" title="Copy email" aria-label="Copy ${esc(m.email)}">${icon('copy')}</button></div>${chips(m)}</td>
       <td class="mb-role">${m.is_admin ? `<span class="role-pill role-admin">${icon('shield')}Admin</span>` : '<span class="role-pill">User</span>'}</td>
       <td><div class="mb-pw"><span class="mono mb-pw-val">••••••••••</span>
         <button class="pw-btn" data-show-pw="${m.id}" title="Show password" aria-label="Show password for ${esc(m.email)}">${icon('eye')}</button>
@@ -3476,7 +3477,9 @@ const acctCard = ({ key, title, meta, stats = '', actions = '', error = '' }) =>
 let mbRefresh = null;
 // view 'sequencers': the same sequencer card and mailbox table on its own
 // sidebar page, "Sequencer Connect".
-function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
+function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes', mbTags = []) {
+  const tagById = new Map((mbTags || []).map((t) => [t.id, t]));
+  const typeOpts = [...new Map(rows.filter((m) => m.inbox_type).map((m) => [m.inbox_type, m.inbox_label || m.inbox_type])).entries()];
   const seqPage = view === 'sequencers';
   const { sequencers: seqs = [], providers = [] } = seqData;
   const admins = rows.filter((m) => m.is_admin).length;
@@ -3516,21 +3519,28 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
         <div class="filter-bar">
           <input id="mbf-q" class="fb-q" type="search" placeholder="Search email…">
           ${seqs.length ? `<select id="mbf-seq" aria-label="Filter by sequencer"><option value="">Sequencer: any</option>${seqs.filter((x) => !prov(x.provider).csvOnly).map((x) => `<option value="${x.id}" ${String(state.mbSeqFilter || '') === String(x.id) ? 'selected' : ''}>Connected to ${esc(x.label)}</option>`).join('')}<option value="none" ${state.mbSeqFilter === 'none' ? 'selected' : ''}>Not connected to any</option></select>` : ''}
+          ${typeOpts.length > 1 ? `<select id="mbf-type" aria-label="Filter by mailbox type"><option value="">Type: any</option>${typeOpts.map(([v, l]) => `<option value="${esc(v)}" ${state.mbTypeFilter === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : ''}
+          <select id="mbf-tag" aria-label="Filter by tag"><option value="">Tag: any</option>${(mbTags || []).map((t) => `<option value="${t.id}" ${String(state.mbTagFilter || '') === String(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}<option value="none" ${state.mbTagFilter === 'none' ? 'selected' : ''}>No tag</option></select>
+          <button type="button" class="btn btn-sm" id="mb-tags">${icon('settings')}Tags</button>
           <select id="mbf-kind" aria-label="Filter by provider"><option value="">Provider: any</option><option value="microsoft">Microsoft only</option><option value="google">Google only</option></select>
           <span class="muted small" id="mbf-count"></span>
         </div>
         <div class="pw-bulk" id="mb-bulk" hidden><span id="mb-count"></span>
           <button class="btn btn-sm btn-primary" id="mb-connect">${icon('send')}Connect to sequencer</button>
           <span class="mb-google-note" id="mb-gnote" hidden></span>
+          <details class="menu tag-menu"><summary class="btn btn-sm">${icon('link')}Tag</summary><div class="menu-pop">
+            ${(mbTags || []).length ? `<div class="menu-label">Add or remove</div>${mbTags.map((t) => `<button type="button" class="menu-item" data-mbtag="${t.id}"><span class="dtag dtag-${esc(t.color)}">${esc(t.name)}</span></button>`).join('')}<div class="menu-sep"></div>` : ''}
+            <form class="tag-new" id="mb-tagnew"><input name="name" maxlength="40" placeholder="New tag name…" autocomplete="off"><button class="btn btn-sm btn-primary" type="submit">Add</button></form>
+          </div></details>
           <button class="btn btn-sm btn-ghost" id="mb-clear">Clear</button></div>
-        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password`, select: true, conns: seqs.length > 0 })}
+        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password`, select: true, conns: seqs.length > 0, tagById })}
       </div>` : '<div class="card"><div class="empty">Your mailboxes will appear here once they\'re set up. We\'ll let you know when they\'re ready.</div></div>'}
     </div>`);
   wireMailboxTable((id) => `/api/mailboxes/${id}/password`);
   const reload = async () => {
     if (!location.hash.startsWith(`#/${view}`)) return;
-    const [{ mailboxes: r }, sq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
-    renderMyMailboxes(r, sq, view);
+    const [{ mailboxes: r, tags: t }, sq] = await Promise.all([api('GET', '/api/mailboxes'), api('GET', '/api/sequencers')]);
+    renderMyMailboxes(r, sq, view, t);
   };
   // While connections are running or waiting for approval, refresh every 8 seconds.
   clearTimeout(mbRefresh);
@@ -3608,11 +3618,18 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
       const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const f = seqSel ? seqSel.value : '';
       const kindF = document.getElementById('mbf-kind').value;
+      const typeEl = document.getElementById('mbf-type');
+      const typeF = typeEl ? typeEl.value : '';
+      const tagF = document.getElementById('mbf-tag').value;
+      state.mbTypeFilter = typeF;
+      state.mbTagFilter = tagF;
       state.mbSeqFilter = f;
       let shown = 0;
       trs.forEach((tr) => {
         const ids = (tr.dataset.seqs || '').split(' ').filter(Boolean);
-        const ok = words.every((w) => tr.dataset.search.includes(w)) && (!f || (f === 'none' ? !ids.length : ids.includes(f))) && (!kindF || tr.dataset.kind === kindF);
+        const ok = words.every((w) => tr.dataset.search.includes(w)) && (!f || (f === 'none' ? !ids.length : ids.includes(f))) && (!kindF || tr.dataset.kind === kindF)
+          && (!typeF || tr.dataset.type === typeF)
+          && (!tagF || (tagF === 'none' ? !tr.dataset.tags : tr.dataset.tags.split(' ').includes(tagF)));
         tr.hidden = !ok;
         if (ok) shown += 1;
       });
@@ -3622,6 +3639,9 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
     const syncSel = () => {
       const checked = [...document.querySelectorAll('.mb-sel:checked')];
       const n = checked.length;
+      const selSet = new Set(checked.map((c) => Number(c.value)));
+      const chosenMb = rows.filter((m) => selSet.has(m.id));
+      document.querySelectorAll('[data-mbtag]').forEach((b) => { const id = Number(b.dataset.mbtag); b.classList.toggle('on', chosenMb.length > 0 && chosenMb.every((m) => (m.tag_ids || []).includes(id))); });
       const google = checked.filter((c) => c.closest('tr').dataset.kind !== 'microsoft').length;
       document.getElementById('mb-bulk').hidden = !n;
       document.getElementById('mb-count').innerHTML = `<strong>${n}</strong> selected`;
@@ -3637,6 +3657,27 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
     q.oninput = applyFilter;
     if (seqSel) seqSel.onchange = applyFilter;
     document.getElementById('mbf-kind').onchange = applyFilter;
+    document.getElementById('mbf-tag').onchange = applyFilter;
+    if (document.getElementById('mbf-type')) document.getElementById('mbf-type').onchange = applyFilter;
+    document.querySelectorAll('[data-mb-tagfilter]').forEach((b) => { b.onclick = () => { document.getElementById('mbf-tag').value = b.dataset.mbTagfilter; applyFilter(); }; });
+    const selectedIds = () => [...document.querySelectorAll('.mb-sel:checked')].filter((c) => !c.closest('tr').hidden).map((c) => Number(c.value));
+    const applyTag = async (body) => {
+      try {
+        const r = await api('POST', '/api/mailbox-tags/apply', { ids: selectedIds(), ...body });
+        toast(body.remove ? `Tag removed from ${r.changed}` : `Tagged ${r.changed} mailbox${r.changed === 1 ? '' : 'es'}`);
+        await reload();
+      } catch (ex) { toast(ex.message); }
+    };
+    document.querySelectorAll('[data-mbtag]').forEach((b) => {
+      b.onclick = () => {
+        const id = Number(b.dataset.mbtag);
+        const sel = new Set(selectedIds());
+        const chosen = rows.filter((m) => sel.has(m.id));
+        applyTag({ tag_id: id, remove: chosen.length > 0 && chosen.every((m) => (m.tag_ids || []).includes(id)) });
+      };
+    });
+    document.getElementById('mb-tagnew').onsubmit = (e) => { e.preventDefault(); const n = e.target.name.value.trim(); if (n) applyTag({ name: n }); };
+    document.getElementById('mb-tags').onclick = () => openMailboxTags(mbTags || [], reload);
     document.querySelectorAll('.mb-sel').forEach((c) => { c.addEventListener('change', syncSel); });
     if (all) all.addEventListener('change', syncSel);
     document.getElementById('mb-clear').onclick = () => { document.querySelectorAll('.mb-sel').forEach((c) => { c.checked = false; }); if (all) all.checked = false; syncSel(); };
@@ -3663,6 +3704,37 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
       if (!confirm(`Remove ${b.dataset.name}? Its keys are deleted here (mailboxes already added stay in the sequencer).`)) return;
       try { await api('DELETE', `/api/sequencers/${b.dataset.seqDel}`); await reload(); } catch (ex) { toast(ex.message); }
     };
+  });
+}
+
+// Client's own mailbox tags: create, rename, recolour, delete.
+function openMailboxTags(tags, done) {
+  const COLORS = ['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'orange', 'teal', 'slate', 'pink'];
+  const dlg = modalShell('Mailbox tags', `
+    <p class="muted small" style="margin:-6px 0 12px">Group your mailboxes your way (a client, a campaign, a warm-up batch). Select mailboxes and use <strong>Tag</strong> to add them. Only you see your tags.</p>
+    <div class="tag-list">${tags.length ? tags.map((t) => `<div class="tag-row" data-tag="${t.id}">
+      <span class="dtag dtag-${esc(t.color)}">${esc(t.name)}</span>
+      <input data-f="name" value="${esc(t.name)}" maxlength="40" aria-label="Tag name">
+      <div class="tag-colors">${COLORS.map((c) => `<button type="button" class="tag-dot dtag-${c} ${c === t.color ? 'on' : ''}" data-color="${c}" aria-label="${c}"></button>`).join('')}</div>
+      <button type="button" class="btn btn-sm" data-save>Save</button><button type="button" class="btn btn-sm btn-ghost menu-danger" data-del>Delete</button></div>`).join('') : '<div class="muted small">No tags yet.</div>'}</div>
+    <div class="tag-new" style="margin-top:14px"><input name="newname" maxlength="40" placeholder="New tag name…"><button class="btn btn-primary btn-sm" type="submit">${icon('order')}Create tag</button></div>`);
+  dlg.querySelectorAll('.tag-row').forEach((row) => {
+    let color = null;
+    row.querySelectorAll('[data-color]').forEach((b) => { b.onclick = () => { color = b.dataset.color; row.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('on', x === b)); row.querySelector('.dtag').className = `dtag dtag-${color}`; }; });
+    row.querySelector('[data-save]').onclick = async () => {
+      try { await api('PATCH', `/api/mailbox-tags/${row.dataset.tag}`, { name: row.querySelector('[data-f=name]').value, ...(color ? { color } : {}) }); toast('Tag saved'); dlg.close(); await done(); } catch (ex) { toast(ex.message); }
+    };
+    row.querySelector('[data-del]').onclick = async () => {
+      if (!confirm('Delete this tag? The mailboxes stay; only the tag is removed from them.')) return;
+      try { await api('DELETE', `/api/mailbox-tags/${row.dataset.tag}`); toast('Tag deleted'); dlg.close(); await done(); } catch (ex) { toast(ex.message); }
+    };
+  });
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    if (!d.newname.trim()) throw new Error('Name the tag');
+    await api('POST', '/api/mailbox-tags', { name: d.newname });
+    toast('Tag created');
+    dlg.close();
+    await done();
   });
 }
 

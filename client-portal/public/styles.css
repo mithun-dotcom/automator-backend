@@ -1189,3 +1189,23 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 @media (max-width: 1250px) { .mb-table .mb-pw-val { min-width: 64px; letter-spacing: 0; } }
 .conn-why + .conn-chip, .conn-err + .conn-chip { margin-top: 6px; }
 .prov-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); } .prov-tile .prov-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- premium checkboxes in lists */
+.mb-table input[type="checkbox"], .mb-chk input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; width: 22px; height: 22px; margin: 0; flex-shrink: 0; cursor: pointer;
+  border: 2px solid #cbd5e1; border-radius: 7px; background: #fff; display: inline-grid; place-content: center; vertical-align: middle;
+  box-shadow: 0 1px 2px rgb(16 24 40 / .06); transition: background .18s var(--ease), border-color .18s var(--ease), box-shadow .2s var(--ease), transform .2s var(--spring);
+}
+.mb-table input[type="checkbox"]::after, .mb-chk input[type="checkbox"]::after {
+  content: ''; width: 11px; height: 6px; border: solid #fff; border-width: 0 0 2.5px 2.5px; transform: rotate(-45deg) scale(0); margin-top: -3px; transition: transform .22s var(--spring);
+}
+.mb-table input[type="checkbox"]:hover, .mb-chk input[type="checkbox"]:hover { border-color: var(--brand-500); box-shadow: 0 0 0 4px rgb(61 71 168 / .12); }
+.mb-table input[type="checkbox"]:checked, .mb-chk input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, var(--brand-500), var(--brand-800)); border-color: var(--brand-700); box-shadow: 0 4px 10px -3px rgb(45 49 146 / .55);
+}
+.mb-table input[type="checkbox"]:checked::after, .mb-chk input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
+.mb-table input[type="checkbox"]:active, .mb-chk input[type="checkbox"]:active { transform: scale(.88); }
+.mb-table input[type="checkbox"]:focus-visible, .mb-chk input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px #fff, 0 0 0 5px var(--brand-500); }
+.mb-chk { width: 44px; }
+.mb-tags { margin: 6px 0 0 44px; }
+.mb-tags .dtag { cursor: pointer; }

@@ -1821,7 +1821,65 @@ admin.get('/clients/:id/connect-jobs', ownerOnly, asyncRoute(async (req, res) =>
 const clientRole = (req, res, next) => (req.user.role === 'client' ? next() : next(new HttpError(403, 'Clients only')));
 app.get('/api/mailboxes', auth, clientRole, asyncRoute(async (req, res) => {
   const { rows } = await query(MAILBOX_LIST, [req.user.id]);
-  res.json({ mailboxes: rows });
+  const { rows: tags } = await query('SELECT id, name, color FROM mailbox_tags WHERE user_id = $1 ORDER BY lower(name)', [req.user.id]);
+  const { rows: links } = await query(
+    'SELECT l.mailbox_id, l.tag_id FROM mailbox_tag_links l JOIN mailbox_tags t ON t.id = l.tag_id WHERE t.user_id = $1', [req.user.id]);
+  const byMb = new Map();
+  for (const l of links) byMb.set(l.mailbox_id, [...(byMb.get(l.mailbox_id) || []), l.tag_id]);
+  res.json({ mailboxes: rows.map((m) => ({ ...m, tag_ids: byMb.get(m.id) || [] })), tags });
+}));
+
+// Clients' own mailbox tags.
+const MB_TAG_COLORS = ['indigo', 'emerald', 'amber', 'rose', 'sky', 'violet', 'orange', 'teal', 'slate', 'pink'];
+async function mailboxTagId(userId, name, color) {
+  const n = String(name || '').trim().slice(0, 40);
+  if (!n) return null;
+  const { rows: [t] } = await query('SELECT id FROM mailbox_tags WHERE user_id = $1 AND lower(name) = lower($2)', [userId, n]);
+  if (t) return t.id;
+  const { rows: [{ count }] } = await query('SELECT count(*)::int AS count FROM mailbox_tags WHERE user_id = $1', [userId]);
+  const { rows: [c] } = await query(
+    `INSERT INTO mailbox_tags (user_id, name, color) VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, lower(name)) DO UPDATE SET name = mailbox_tags.name RETURNING id`,
+    [userId, n, MB_TAG_COLORS.includes(color) ? color : MB_TAG_COLORS[count % MB_TAG_COLORS.length]]);
+  return c.id;
+}
+app.post('/api/mailbox-tags', auth, clientRole, asyncRoute(async (req, res) => {
+  const id = await mailboxTagId(req.user.id, str(req.body.name, 40), req.body.color);
+  if (!id) throw new HttpError(400, 'Name the tag');
+  res.status(201).json({ id });
+}));
+app.patch('/api/mailbox-tags/:id', auth, clientRole, asyncRoute(async (req, res) => {
+  const name = req.body.name === undefined ? null : str(req.body.name, 40);
+  if (name === '') throw new HttpError(400, 'Name the tag');
+  const color = MB_TAG_COLORS.includes(req.body.color) ? req.body.color : null;
+  try {
+    const r = await query('UPDATE mailbox_tags SET name = COALESCE($3, name), color = COALESCE($4, color) WHERE id = $1 AND user_id = $2',
+      [Number(req.params.id), req.user.id, name, color]);
+    if (!r.rowCount) throw new HttpError(404, 'Tag not found');
+  } catch (err) {
+    if (err.code === '23505') throw new HttpError(400, 'You already have a tag with that name');
+    throw err;
+  }
+  res.json({ ok: true });
+}));
+app.delete('/api/mailbox-tags/:id', auth, clientRole, asyncRoute(async (req, res) => {
+  const r = await query('DELETE FROM mailbox_tags WHERE id = $1 AND user_id = $2', [Number(req.params.id), req.user.id]);
+  if (!r.rowCount) throw new HttpError(404, 'Tag not found');
+  res.json({ ok: true });
+}));
+// Add (or remove) a tag on the client's own mailboxes.
+app.post('/api/mailbox-tags/apply', auth, clientRole, asyncRoute(async (req, res) => {
+  const ids = (Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : []).slice(0, 10000);
+  if (!ids.length) throw new HttpError(400, 'Select the mailboxes');
+  const tagId = req.body.tag_id ? Number(req.body.tag_id) : await mailboxTagId(req.user.id, str(req.body.name, 40));
+  const { rows: [t] } = await query('SELECT id FROM mailbox_tags WHERE id = $1 AND user_id = $2', [tagId || 0, req.user.id]);
+  if (!t) throw new HttpError(400, 'Choose a tag');
+  const { rows: mine } = await query('SELECT id FROM mailboxes WHERE user_id = $1 AND id = ANY($2)', [req.user.id, ids]);
+  const own = mine.map((r) => r.id);
+  const r = req.body.remove === true
+    ? await query('DELETE FROM mailbox_tag_links WHERE tag_id = $1 AND mailbox_id = ANY($2)', [t.id, own])
+    : await query('INSERT INTO mailbox_tag_links (mailbox_id, tag_id) SELECT unnest($2::int[]), $1 ON CONFLICT DO NOTHING', [t.id, own]);
+  res.json({ changed: r.rowCount, tag_id: t.id });
 }));
 app.get('/api/mailboxes.csv', auth, clientRole, asyncRoute(async (req, res) => {
   const { rows } = await query(MAILBOX_ROWS, [req.user.id]);

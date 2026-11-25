@@ -546,3 +546,18 @@ ALTER TABLE domain_tags ADD COLUMN IF NOT EXISTS owner_id INT REFERENCES users(i
 UPDATE domain_tags SET owner_id = COALESCE(created_by, (SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1)) WHERE owner_id IS NULL;
 DROP INDEX IF EXISTS domain_tags_name;
 CREATE UNIQUE INDEX IF NOT EXISTS domain_tags_owner_name ON domain_tags (owner_id, lower(name));
+
+-- Clients' own tags on their mailboxes (e.g. "Campaign A", "Client X").
+CREATE TABLE IF NOT EXISTS mailbox_tags (
+  id         SERIAL PRIMARY KEY,
+  user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  color      TEXT NOT NULL DEFAULT 'indigo',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mailbox_tags_user_name ON mailbox_tags (user_id, lower(name));
+CREATE TABLE IF NOT EXISTS mailbox_tag_links (
+  mailbox_id INT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  tag_id     INT NOT NULL REFERENCES mailbox_tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (mailbox_id, tag_id)
+);
