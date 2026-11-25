@@ -341,7 +341,7 @@ function shell(tabs, active, content) {
   const unread = isClient && state.dash ? state.dash.notifications.filter((n) => !n.read_at).length : 0;
   const items = isClient ? [...tabs, ['#/notifications', 'Notifications']] : tabs;
   const current = active || (location.hash.startsWith('#/notifications') ? '#/notifications' : '');
-  const nav = items.map(([href, label]) => `<a href="${href}" class="${href === current ? 'active' : ''}">${icon(NAV_ICONS[href])}<span class="label">${label}</span>${href === '#/notifications' && unread ? `<span class="sb-badge">${unread}</span>` : ''}</a>`).join('');
+  const nav = items.map(([href, label]) => `<a href="${href}" class="${href === current ? 'active' : ''}" title="${esc(label)}">${icon(NAV_ICONS[href])}<span class="label">${label}</span>${href === '#/notifications' && unread ? `<span class="sb-badge">${unread}</span>` : ''}</a>`).join('');
   const b = isClient && state.me.brand;
   const logo = (sub) => (b
     ? `<a class="sb-logo sb-logo-brand" href="#/">${b.logo ? `<span class="sb-brand-logo"><img src="${esc(b.logo)}" alt=""></span>` : ''}<div><div class="sb-name">${esc(b.name)}</div><div class="sb-sub">${sub}</div></div></a>`

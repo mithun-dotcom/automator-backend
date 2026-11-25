@@ -1140,3 +1140,27 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .seq-choice:has(input:checked) { border-color: var(--brand-600); background: var(--brand-50); }
 .seq-choice input { width: 16px; height: 16px; accent-color: var(--brand-600); margin: 0; }
 .seq-choice > span:last-child { display: grid; gap: 1px; }
+
+/* ---- desktop: sidebar shows icons only and expands while the pointer is on it */
+@media (min-width: 1024px) {
+  :root { --sidebar-mini: 76px; }
+  .content { margin-left: var(--sidebar-mini); }
+  .sidebar { width: var(--sidebar-mini); overflow: hidden; transition: width .28s var(--ease), box-shadow .28s var(--ease); }
+  .sidebar:hover, .sidebar:focus-within { width: var(--sidebar); box-shadow: 18px 0 48px -18px rgb(17 15 48 / .55); }
+  .sidebar .sb-name, .sidebar .sb-sub, .sidebar .sb-nav .label, .sidebar .sb-user-info, .sidebar .sb-icon-btn, .sidebar .sb-brand-logo + div {
+    opacity: 0; white-space: nowrap; transition: opacity .18s var(--ease); pointer-events: none;
+  }
+  .sidebar:hover .sb-name, .sidebar:hover .sb-sub, .sidebar:hover .sb-nav .label, .sidebar:hover .sb-user-info, .sidebar:hover .sb-icon-btn, .sidebar:hover .sb-brand-logo + div,
+  .sidebar:focus-within .sb-name, .sidebar:focus-within .sb-sub, .sidebar:focus-within .sb-nav .label, .sidebar:focus-within .sb-user-info, .sidebar:focus-within .sb-icon-btn, .sidebar:focus-within .sb-brand-logo + div {
+    opacity: 1; pointer-events: auto; transition-delay: .08s;
+  }
+  .sidebar .sb-nav { overflow-x: hidden; }
+  .sidebar .sb-nav a { padding-left: 17px; white-space: nowrap; }
+  .sidebar:hover .sb-nav a:hover { padding-left: 21px; }
+  .sidebar .sb-sep { margin-left: 14px; margin-right: 14px; }
+  .sidebar .sb-user { padding-left: 10px; flex-wrap: nowrap; }
+  /* the unread count becomes a dot on the bell while collapsed */
+  .sidebar .sb-nav a { position: relative; }
+  .sidebar:not(:hover):not(:focus-within) .sb-badge { position: absolute; left: 30px; top: 6px; min-width: 8px; height: 8px; padding: 0; font-size: 0; border-radius: 50%; box-shadow: 0 0 0 2px var(--brand-900); }
+}
+@media (min-width: 1024px) and (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
