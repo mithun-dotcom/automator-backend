@@ -3373,6 +3373,13 @@ const CONN_ICON = { queued: 'clock', running: 'refresh', connected: 'check', fai
 // signs in as this mailbox and clicks Allow; the server confirms it.
 const connChips = (m, { client = false } = {}) => (m.connections || []).map((c) => `<span class="conn-chip conn-${c.status}" title="${esc(c.error || '')}"><img class="conn-logo" src="/brand-logo/${encodeURIComponent(c.provider || 'other')}" alt=""><span>${esc(c.label)}</span><span class="conn-st">${icon(CONN_ICON[c.status] || 'clock')}${c.status !== 'connected' ? (CONN_LABEL[c.status] || c.status) : ''}</span></span>${c.status === 'failed' && c.error ? `<details class="conn-why"><summary>Why it failed</summary><div class="small conn-err">${esc(c.error)}</div></details>` : ''}${c.status === 'authorize' && client ? `<div class="conn-auth"><a class="btn btn-sm btn-primary" href="/api/sequencers/${encodeURIComponent(c.sequencer_id)}/authorize/${encodeURIComponent(m.id)}" target="_blank" rel="noopener noreferrer" title="Sign in as ${esc(m.email)} and click Allow">${icon('lock')} Authorize${/Approve with (Google|Microsoft)/.test(c.error || '') ? ` with ${esc(c.error.match(/Approve with (Google|Microsoft)/)[1])}` : ` ${esc(m.email.split('@')[0])}`}</a>${c.error ? `<div class="small muted">${esc(c.error)}</div>` : ''}</div>` : ''}`).join('');
 
+// Where a mailbox lives: the domain's DNS check, else its type (Azure is Microsoft).
+function mailKind(m) {
+  if (['google', 'microsoft'].includes(m.mx_detected)) return m.mx_detected;
+  const b = brandOf(m.inbox_type, m.inbox_label).brand;
+  return b === 'azure' ? 'microsoft' : b === 'google' || b === 'microsoft' ? b : '';
+}
+
 function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, conns = false }) {
   if (!rows.length) return '';
   const typeCell = (m) => (admin
@@ -3380,7 +3387,7 @@ function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, 
     : typeChip(m.inbox_type, m.inbox_label));
   return `<div class="table-wrap mb-wrap"><table class="mb-table">
     <thead><tr>${select ? '<th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Mailbox</th><th>Role</th><th>Password</th><th>Type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
-    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}" data-seqs="${(m.connections || []).filter((c) => c.status === 'connected').map((c) => c.sequencer_id).join(' ')}" class="${m.is_admin ? 'mb-is-admin' : ''}">
+    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-kind="${mailKind(m)}" data-search="${searchText(m.email, m.batch_name)}" data-seqs="${(m.connections || []).filter((c) => c.status === 'connected').map((c) => c.sequencer_id).join(' ')}" class="${m.is_admin ? 'mb-is-admin' : ''}">
       ${select ? `<td class="mb-chk"><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
       <td class="mb-main"><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}
         <span class="mb-addr" title="${esc(m.email)}"><span class="mb-local">${esc(m.email.split('@')[0])}</span><span class="mb-dom">@${esc(m.email.split('@').slice(1).join('@'))}</span></span>
@@ -3477,8 +3484,8 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
   const pending = seqs.some((s) => s.pending || s.awaiting);
   shell(CLIENT_TABS, seqPage ? '#/sequencers' : '#/mailboxes', `
     <div class="page-head"><div>${seqPage
-      ? '<h1>Sequencers</h1><p class="muted">Add your sequencer with its API key. Then go to Mailboxes, select mailboxes and click Connect to sequencer: we sign each one in to Google / Microsoft for you in the background.</p>'
-      : '<h1>Mailboxes</h1><p class="muted">Your mailbox logins. Select mailboxes and click <strong>Connect to sequencer</strong> to add them to one of your sequencers.</p>'}</div>
+      ? '<h1>Sequencers</h1><p class="muted">Add your sequencer with its API key. Then go to Mailboxes, select <strong>Microsoft</strong> mailboxes and click Connect to sequencer: we sign each one in for you in the background. (Automatic connection is for Microsoft mailboxes only.)</p>'
+      : '<h1>Mailboxes</h1><p class="muted">Your mailbox logins. Select <strong>Microsoft</strong> mailboxes and click <strong>Connect to sequencer</strong> to add them to one of your sequencers automatically.</p>'}</div>
       ${!seqPage && rows.length ? `<div class="row"><a class="btn" href="/api/mailboxes.csv">${icon('download')} Download CSV</a></div>` : ''}</div>
     <div class="stack">
       ${seqPage ? `<div class="card">
@@ -3509,10 +3516,12 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
         <div class="filter-bar">
           <input id="mbf-q" class="fb-q" type="search" placeholder="Search email…">
           ${seqs.length ? `<select id="mbf-seq" aria-label="Filter by sequencer"><option value="">Sequencer: any</option>${seqs.filter((x) => !prov(x.provider).csvOnly).map((x) => `<option value="${x.id}" ${String(state.mbSeqFilter || '') === String(x.id) ? 'selected' : ''}>Connected to ${esc(x.label)}</option>`).join('')}<option value="none" ${state.mbSeqFilter === 'none' ? 'selected' : ''}>Not connected to any</option></select>` : ''}
+          <select id="mbf-kind" aria-label="Filter by provider"><option value="">Provider: any</option><option value="microsoft">Microsoft only</option><option value="google">Google only</option></select>
           <span class="muted small" id="mbf-count"></span>
         </div>
         <div class="pw-bulk" id="mb-bulk" hidden><span id="mb-count"></span>
           <button class="btn btn-sm btn-primary" id="mb-connect">${icon('send')}Connect to sequencer</button>
+          <span class="mb-google-note" id="mb-gnote" hidden></span>
           <button class="btn btn-sm btn-ghost" id="mb-clear">Clear</button></div>
         ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password`, select: true, conns: seqs.length > 0 })}
       </div>` : '<div class="card"><div class="empty">Your mailboxes will appear here once they\'re set up. We\'ll let you know when they\'re ready.</div></div>'}
@@ -3598,11 +3607,12 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
     const applyFilter = () => {
       const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const f = seqSel ? seqSel.value : '';
+      const kindF = document.getElementById('mbf-kind').value;
       state.mbSeqFilter = f;
       let shown = 0;
       trs.forEach((tr) => {
         const ids = (tr.dataset.seqs || '').split(' ').filter(Boolean);
-        const ok = words.every((w) => tr.dataset.search.includes(w)) && (!f || (f === 'none' ? !ids.length : ids.includes(f)));
+        const ok = words.every((w) => tr.dataset.search.includes(w)) && (!f || (f === 'none' ? !ids.length : ids.includes(f))) && (!kindF || tr.dataset.kind === kindF);
         tr.hidden = !ok;
         if (ok) shown += 1;
       });
@@ -3610,17 +3620,28 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
       syncSel();
     };
     const syncSel = () => {
-      const n = document.querySelectorAll('.mb-sel:checked').length;
+      const checked = [...document.querySelectorAll('.mb-sel:checked')];
+      const n = checked.length;
+      const google = checked.filter((c) => c.closest('tr').dataset.kind !== 'microsoft').length;
       document.getElementById('mb-bulk').hidden = !n;
       document.getElementById('mb-count').innerHTML = `<strong>${n}</strong> selected`;
+      // Automatic sequencer connection is for Microsoft mailboxes only.
+      const btn = document.getElementById('mb-connect');
+      btn.hidden = google > 0;
+      const note = document.getElementById('mb-gnote');
+      note.hidden = !google;
+      note.innerHTML = google ? `${icon('info')}Sequencer connection is for Microsoft mailboxes only. ${google} selected ${google === 1 ? 'isn\'t' : 'aren\'t'} Microsoft. <button type="button" class="link-btn" id="mb-only-ms">Select only Microsoft</button>` : '';
+      const only = document.getElementById('mb-only-ms');
+      if (only) only.onclick = () => { checked.forEach((c) => { if (c.closest('tr').dataset.kind !== 'microsoft') c.checked = false; }); syncSel(); };
     };
     q.oninput = applyFilter;
     if (seqSel) seqSel.onchange = applyFilter;
+    document.getElementById('mbf-kind').onchange = applyFilter;
     document.querySelectorAll('.mb-sel').forEach((c) => { c.addEventListener('change', syncSel); });
     if (all) all.addEventListener('change', syncSel);
     document.getElementById('mb-clear').onclick = () => { document.querySelectorAll('.mb-sel').forEach((c) => { c.checked = false; }); if (all) all.checked = false; syncSel(); };
     document.getElementById('mb-connect').onclick = () => {
-      const ids = [...document.querySelectorAll('.mb-sel:checked')].filter((c) => !c.closest('tr').hidden).map((c) => Number(c.value));
+      const ids = [...document.querySelectorAll('.mb-sel:checked')].filter((c) => !c.closest('tr').hidden && c.closest('tr').dataset.kind === 'microsoft').map((c) => Number(c.value));
       if (!ids.length) { toast('Select the mailboxes to connect first'); return; }
       openConnectDialog(ids, seqs.filter((x) => !prov(x.provider).csvOnly), providers, async (seqId) => {
         const r = await api('POST', `/api/sequencers/${seqId}/connect`, { mailbox_ids: ids, retry: true });

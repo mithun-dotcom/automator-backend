@@ -26,7 +26,15 @@ const setConn = (mailboxId, sequencerId, status, error = '', consentUrl = null) 
 // Microsoft sign-in); then the last saved DNS check; then the mailbox's type.
 const MX_GOOGLE = /(^|\.)(google\.com|googlemail\.com)$/i;
 const MX_MICROSOFT = /(^|\.)(outlook\.com|office365\.us|protection\.outlook\.com)$/i;
+const mxCache = new Map(); // domain -> { at, kind }
 async function liveMx(domain) {
+  const hit = mxCache.get(domain);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.kind;
+  const kind = await lookupMx(domain);
+  mxCache.set(domain, { at: Date.now(), kind });
+  return kind;
+}
+async function lookupMx(domain) {
   try {
     const mx = await Promise.race([
       require('dns').promises.resolveMx(domain),
@@ -73,6 +81,8 @@ async function runJob(job) {
   if (!provider || (!provider.connect && !provider.consent)) throw new sequencers.SeqError('This sequencer is CSV-only');
   const kind = await providerOf(m);
   if (!kind) throw new sequencers.SeqError('Unknown mailbox type: set it to a Google or Microsoft type (Mailboxes → type) and retry');
+  // Automatic sequencer connection is offered for Microsoft mailboxes only.
+  if (kind !== 'microsoft') throw new sequencers.SeqError('Automatic sequencer connection is for Microsoft mailboxes only. Add Google mailboxes in the sequencer directly (or with the CSV)');
   const creds = JSON.parse(onboarding.decrypt(seq.creds));
   if (provider.consent) {
     // API only: no browser, no mailbox password. Returns { authorizeUrl } or { note } when already connected.
@@ -227,4 +237,4 @@ async function start() {
   kick();
 }
 
-module.exports = { enqueue, start, kick, verifyConsents, timer: () => timer };
+module.exports = { providerOf, enqueue, start, kick, verifyConsents, timer: () => timer };

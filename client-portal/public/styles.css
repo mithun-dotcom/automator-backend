@@ -1164,3 +1164,4 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
   .sidebar:not(:hover):not(:focus-within) .sb-badge { position: absolute; left: 30px; top: 6px; min-width: 8px; height: 8px; padding: 0; font-size: 0; border-radius: 50%; box-shadow: 0 0 0 2px var(--brand-900); }
 }
 @media (min-width: 1024px) and (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+.mb-google-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: #fde68a; } .mb-google-note[hidden] { display: none; } .mb-google-note .ico { width: 14px; height: 14px; } .mb-google-note .link-btn { color: #fff; }

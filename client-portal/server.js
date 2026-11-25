@@ -1099,7 +1099,8 @@ shared.delete('/clients/:id', audited('deleted', 'user', byParam, async (req, re
 
 const MAILBOX_LIST = `SELECT m.id, m.email, m.is_admin, m.order_id, o.batch_name, m.inbox_type, p.label AS inbox_label, m.created_on, m.created_at, m.updated_at,
     (SELECT COALESCE(json_agg(json_build_object('sequencer_id', c.sequencer_id, 'label', s.label, 'provider', s.provider, 'status', c.status, 'error', c.error, 'updated_at', c.updated_at) ORDER BY s.id), '[]')
-       FROM mailbox_connections c JOIN sequencer_accounts s ON s.id = c.sequencer_id WHERE c.mailbox_id = m.id) AS connections
+       FROM mailbox_connections c JOIN sequencer_accounts s ON s.id = c.sequencer_id WHERE c.mailbox_id = m.id) AS connections,
+    (SELECT d.dns->>'detected' FROM domains d WHERE d.user_id = m.user_id AND d.domain = lower(split_part(m.email, '@', 2)) LIMIT 1) AS mx_detected
   FROM mailboxes m LEFT JOIN orders o ON o.id = m.order_id LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
   WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`;
 const MAILBOX_ROWS = `SELECT m.*, p.label AS inbox_label FROM mailboxes m LEFT JOIN pricing p ON p.inbox_type = m.inbox_type
@@ -1782,12 +1783,17 @@ app.post('/api/sequencers/:id/connect', auth, clientOnly, asyncRoute(async (req,
   if (!sequencers.PROVIDERS[s.provider] || sequencers.PROVIDERS[s.provider].csvOnly) throw new HttpError(400, 'This sequencer is CSV-only: download the CSV and import it there');
   if (!sequencers.allowed(s.provider, req.user.email)) throw new HttpError(403, 'This sequencer is coming soon for your account');
   const ids = Array.isArray(req.body.mailbox_ids) ? req.body.mailbox_ids.map(Number).filter(Boolean) : null;
+  const MB = 'SELECT m.id, m.email, m.user_id, m.inbox_type, p.label AS inbox_label FROM mailboxes m LEFT JOIN pricing p ON p.inbox_type = m.inbox_type';
   const { rows } = ids
-    ? await query('SELECT id FROM mailboxes WHERE user_id = $1 AND id = ANY($2)', [req.user.id, ids])
-    : await query('SELECT id FROM mailboxes WHERE user_id = $1 ORDER BY is_admin DESC, email', [req.user.id]);
+    ? await query(`${MB} WHERE m.user_id = $1 AND m.id = ANY($2)`, [req.user.id, ids])
+    : await query(`${MB} WHERE m.user_id = $1 ORDER BY m.is_admin DESC, m.email`, [req.user.id]);
   if (!rows.length) throw new HttpError(400, 'No mailboxes to connect yet');
-  const added = await connector.enqueue(req.user.id, s.id, rows.map((r) => r.id), { retry: req.body.retry === true });
-  res.json({ queued: added, skipped: rows.length - added });
+  // Automatic connection is for Microsoft mailboxes only.
+  const ms = [];
+  for (const m of rows) if ((await connector.providerOf(m)) === 'microsoft') ms.push(m.id);
+  if (!ms.length) throw new HttpError(400, 'Automatic sequencer connection is for Microsoft mailboxes only. Select Microsoft mailboxes');
+  const added = await connector.enqueue(req.user.id, s.id, ms, { retry: req.body.retry === true });
+  res.json({ queued: added, skipped: ms.length - added, notMicrosoft: rows.length - ms.length });
 }));
 
 app.get('/api/sequencers/:id/export.csv', auth, clientOnly, asyncRoute(async (req, res) => {
