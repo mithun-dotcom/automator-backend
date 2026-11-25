@@ -205,6 +205,51 @@ const PROVIDERS = {
       return out;
     },
   },
+  reachinbox: {
+    name: 'ReachInbox (beta)',
+    // ReachInbox's API (docs.reachinbox.ai/account): POST /account/get-oauth-url returns a
+    // Google ("oauth") or Microsoft ("outlookOauth") sign-in link; the connector signs in to it
+    // as the mailbox (autoSignIn), and GET /account/all confirms the account.
+    consent: true,
+    autoSignIn: true,
+    fields: [{ key: 'api_key', label: 'API key', secret: true }],
+    help: 'ReachInbox → Settings → Integrations → API: copy your API key. We then sign each mailbox in to Google / Microsoft for you in the background.',
+    base: 'https://api.reachinbox.ai/api/v1',
+    headers: (c) => ({ Authorization: `Bearer ${c.api_key}` }),
+    async test(c) {
+      const r = await http('GET', `${this.base}/account/all?limit=1`, { headers: this.headers(c) });
+      if (!r.ok) throw new SeqError(r.status === 401 || r.status === 403 ? 'ReachInbox rejected the API key' : `ReachInbox: ${errOf(r)}`);
+    },
+    async find(c, email) {
+      const r = await http('GET', `${this.base}/account/all?contains=${encodeURIComponent(email)}&limit=50`, { headers: this.headers(c) });
+      if (!r.ok) throw new SeqError(`ReachInbox: ${errOf(r)}`);
+      const list = (r.data && r.data.data && r.data.data.emailsConnected) || [];
+      return list.find((a) => String(a.email).toLowerCase() === email.toLowerCase()) || null;
+    },
+    // Healthy = no error and connection health at least 75 (ReachInbox's "has_error" threshold).
+    statusOf: (a) => (a && !a.error && (a.statusConnection == null || Number(a.statusConnection) >= 75) ? 'ACTIVE' : a ? 'ERROR' : ''),
+    async startConsent({ creds, mailbox, step }) {
+      step('ReachInbox: check mailbox');
+      const existing = await this.find(creds, mailbox.email);
+      if (existing && this.statusOf(existing) === 'ACTIVE') return { note: 'Already in this ReachInbox account' };
+      step('ReachInbox: create sign-in link');
+      const r = await http('POST', `${this.base}/account/get-oauth-url`, {
+        headers: this.headers(creds),
+        body: { type: mailbox.provider === 'microsoft' ? 'outlookOauth' : 'oauth', redirectTo: 'https://client.mithmill.com/', ...(existing ? { updateAccount: true } : {}) },
+      });
+      const url = r.data && (r.data.redirectUrl || (r.data.data && r.data.data.redirectUrl));
+      if (!r.ok || !url) throw new SeqError(`ReachInbox didn't return a sign-in link (${errOf(r)})`);
+      return { authorizeUrl: url, note: `Approve with ${mailbox.provider === 'microsoft' ? 'Microsoft' : 'Google'}` };
+    },
+    async verify(creds, emails) {
+      const out = new Map();
+      for (const e of emails) {
+        const a = await this.find(creds, e);
+        if (a) out.set(e.toLowerCase(), { id: a.id, status: this.statusOf(a) });
+      }
+      return out;
+    },
+  },
   other: {
     name: 'Other sequencer (CSV)',
     fields: [{ key: 'name', label: 'Sequencer name (e.g. SendKit)' }],

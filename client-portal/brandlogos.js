@@ -13,6 +13,7 @@ const SITES = {
   instantly: { site: 'instantly.ai', name: 'Instantly', color: '#3f6bff' },
   smartlead: { site: 'smartlead.ai', name: 'Smartlead', color: '#6a5cff' },
   plusvibe: { site: 'plusvibe.ai', name: 'PlusVibe', color: '#7c3aed' },
+  reachinbox: { site: 'reachinbox.ai', name: 'ReachInbox', color: '#2563eb' },
   dynadot: { site: 'www.dynadot.com', name: 'Dynadot', color: '#0a7ad8' },
   namecom: { site: 'www.name.com', name: 'Name.com', color: '#2c9b5d' },
 };

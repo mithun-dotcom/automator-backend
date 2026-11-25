@@ -1135,3 +1135,8 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .bulk-stat .ico { width: 15px; height: 15px; stroke-width: 2.6; }
 .bulk-stat.ok { color: #047857; } .bulk-stat.bad { color: #b91c1c; }
 .bulk-result .btn { margin-left: auto; }
+.seq-choices { display: grid; gap: 8px; }
+.seq-choice { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: 12px; cursor: pointer; margin: 0; font-weight: 400; transition: border-color .2s, background .2s; }
+.seq-choice:has(input:checked) { border-color: var(--brand-600); background: var(--brand-50); }
+.seq-choice input { width: 16px; height: 16px; accent-color: var(--brand-600); margin: 0; }
+.seq-choice > span:last-child { display: grid; gap: 1px; }

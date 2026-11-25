@@ -590,7 +590,7 @@ function renderPassword() {
 
 // ------------------------------------------------------------------ client
 
-const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/sequencers', 'Sequencer Connect'], ['#/domains', 'Domains'], ['#/order', 'New order'], ['#/billing', 'Billing']];
+const CLIENT_TABS = [['#/dashboard', 'Dashboard'], ['#/mailboxes', 'Mailboxes'], ['#/sequencers', 'Sequencers'], ['#/domains', 'Domains'], ['#/order', 'New order'], ['#/billing', 'Billing']];
 
 async function renderClient(page, arg, sub) {
   state.dash = await api('GET', '/api/dashboard');
@@ -3380,7 +3380,7 @@ function mailboxTable(rows, { pwUrl, admin = false, types = [], select = false, 
     : typeChip(m.inbox_type, m.inbox_label));
   return `<div class="table-wrap mb-wrap"><table class="mb-table">
     <thead><tr>${select ? '<th class="mb-chk"><input type="checkbox" id="mb-all" aria-label="Select all"></th>' : ''}<th>Mailbox</th><th>Role</th><th>Password</th><th>Type</th><th>Created</th>${conns ? '<th>Sequencers</th>' : ''}${admin ? '<th>Batch</th><th>Admin</th><th></th>' : ''}</tr></thead>
-    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}" class="${m.is_admin ? 'mb-is-admin' : ''}">
+    <tbody>${rows.map((m) => `<tr data-mb="${m.id}" data-search="${searchText(m.email, m.batch_name)}" data-seqs="${(m.connections || []).filter((c) => c.status === 'connected').map((c) => c.sequencer_id).join(' ')}" class="${m.is_admin ? 'mb-is-admin' : ''}">
       ${select ? `<td class="mb-chk"><input type="checkbox" class="mb-sel" value="${m.id}" aria-label="Select ${esc(m.email)}"></td>` : ''}
       <td class="mb-main"><div class="mb-email">${mailboxAvatar(m.email, m.inbox_type, m.inbox_label)}
         <span class="mb-addr" title="${esc(m.email)}"><span class="mb-local">${esc(m.email.split('@')[0])}</span><span class="mb-dom">@${esc(m.email.split('@').slice(1).join('@'))}</span></span>
@@ -3477,20 +3477,19 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
   const pending = seqs.some((s) => s.pending || s.awaiting);
   shell(CLIENT_TABS, seqPage ? '#/sequencers' : '#/mailboxes', `
     <div class="page-head"><div>${seqPage
-      ? '<h1>Sequencer Connect</h1><p class="muted">Connect your sequencer, then add your mailboxes to it. PlusVibe: click Authorize next to each mailbox and approve it with Google.</p>'
-      : '<h1>Mailboxes</h1><p class="muted">Your mailbox logins. Keep these passwords private.</p>'}</div>
-      ${rows.length ? `<div class="row"><a class="btn" href="/api/mailboxes.csv">${icon('download')} Download CSV</a></div>` : ''}</div>
+      ? '<h1>Sequencers</h1><p class="muted">Add your sequencer with its API key. Then go to Mailboxes, select mailboxes and click Connect to sequencer: we sign each one in to Google / Microsoft for you in the background.</p>'
+      : '<h1>Mailboxes</h1><p class="muted">Your mailbox logins. Select mailboxes and click <strong>Connect to sequencer</strong> to add them to one of your sequencers.</p>'}</div>
+      ${!seqPage && rows.length ? `<div class="row"><a class="btn" href="/api/mailboxes.csv">${icon('download')} Download CSV</a></div>` : ''}</div>
     <div class="stack">
-      <div class="card">
+      ${seqPage ? `<div class="card">
         <div class="card-head"><div class="head-ico"><span class="head-badge">${icon('send')}</span><div><h2>Sequencers</h2><div class="muted small">Connect your sequencer once, then add your mailboxes to it with one click. We sign each mailbox in to Google / Microsoft for you in the background.</div></div></div></div>
         ${seqs.length ? `<div class="acct-list">${seqs.map((s) => acctCard({
           key: s.provider,
           title: esc(s.label),
-          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}${prov(s.provider).consent ? '<br><span class="small">Then click <strong>Authorize</strong> on each mailbox below.</span>' : ''}${prov(s.provider).comingSoon ? '<br><span class="small">Coming soon for your account.</span>' : ''}`,
+          meta: `${esc(provName(prov(s.provider)).name || s.provider)}${s.hint ? ` · key <span class="mono">${esc(s.hint)}</span>` : ''}${prov(s.provider).comingSoon ? '<br><span class="small">Coming soon for your account.</span>' : ''}`,
           stats: prov(s.provider).csvOnly ? '<span class="pill">Import with the CSV</span>' : `<span class="pill pill-ok"><strong>${s.connected}</strong> connected</span>${s.pending ? `<span class="pill pill-run"><span class="spin"></span>${s.pending} in progress</span>` : ''}${s.awaiting ? `<span class="pill pill-run" title="Click Authorize next to each of these mailboxes">${s.awaiting} need approval</span>` : ''}${s.failed ? `<span class="pill pill-bad">${s.failed} failed</span>` : ''}`,
           actions: `${prov(s.provider).csvOnly ? `<a class="btn btn-sm btn-primary" href="/api/sequencers/${s.id}/export.csv">${icon('download')} CSV for ${esc(s.label)}</a>` : `
-              <button class="btn btn-sm btn-primary" data-seq-all="${s.id}" ${rows.length ? '' : 'disabled'}>Connect all mailboxes</button>
-              <button class="btn btn-sm" data-seq-sel="${s.id}" ${rows.length ? '' : 'disabled'}>Connect selected</button>
+              <a class="btn btn-sm btn-primary" href="#/mailboxes" data-goto-seq="${s.id}">${icon('mail')}Connect mailboxes</a>
               ${s.failed ? `<button class="btn btn-sm" data-seq-retry="${s.id}">Retry failed</button>` : ''}`}
             <button class="btn btn-sm btn-ghost" data-seq-del="${s.id}" data-name="${esc(s.label)}">Remove</button>`,
         })).join('')}</div>` : ''}
@@ -3503,11 +3502,19 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
             <div class="error"></div>
           </div>
         </form>
-      </div>
-      ${rows.length ? `<div class="card">
+      </div>` : ''}
+      ${seqPage ? '' : rows.length ? `<div class="card">
         <div class="card-head"><div><h2>${rows.length} mailbox${rows.length === 1 ? '' : 'es'}</h2>${admins ? `<div class="muted small">${admins === 1 ? 'The admin mailbox is' : 'Admin mailboxes are'} marked <strong>Admin</strong>.${seqs.length ? ' Tick mailboxes to connect only those.' : ''}</div>` : ''}</div>
-          ${rows.length > 8 ? '<input id="mb-search" class="mb-search" type="search" placeholder="Search email…">' : ''}</div>
-        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password`, select: seqs.length > 0, conns: seqs.length > 0 })}
+        </div>
+        <div class="filter-bar">
+          <input id="mbf-q" class="fb-q" type="search" placeholder="Search email…">
+          ${seqs.length ? `<select id="mbf-seq" aria-label="Filter by sequencer"><option value="">Sequencer: any</option>${seqs.filter((x) => !prov(x.provider).csvOnly).map((x) => `<option value="${x.id}" ${String(state.mbSeqFilter || '') === String(x.id) ? 'selected' : ''}>Connected to ${esc(x.label)}</option>`).join('')}<option value="none" ${state.mbSeqFilter === 'none' ? 'selected' : ''}>Not connected to any</option></select>` : ''}
+          <span class="muted small" id="mbf-count"></span>
+        </div>
+        <div class="pw-bulk" id="mb-bulk" hidden><span id="mb-count"></span>
+          <button class="btn btn-sm btn-primary" id="mb-connect">${icon('send')}Connect to sequencer</button>
+          <button class="btn btn-sm btn-ghost" id="mb-clear">Clear</button></div>
+        ${mailboxTable(rows, { pwUrl: (id) => `/api/mailboxes/${id}/password`, select: true, conns: seqs.length > 0 })}
       </div>` : '<div class="card"><div class="empty">Your mailboxes will appear here once they\'re set up. We\'ll let you know when they\'re ready.</div></div>'}
     </div>`);
   wireMailboxTable((id) => `/api/mailboxes/${id}/password`);
@@ -3564,7 +3571,7 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
       keyEl.addEventListener('change', () => fetchWs());
     }
   });
-  onSubmit(document.getElementById('seq-form'), async (d) => {
+  if (document.getElementById('seq-form')) onSubmit(document.getElementById('seq-form'), async (d) => {
     const creds = Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('cred_')).map(([k, v]) => [k.slice(5), v]));
     await api('POST', '/api/sequencers', { provider: d.provider, label: d.label, creds });
     toast('Sequencer connected');
@@ -3581,20 +3588,78 @@ function renderMyMailboxes(rows, seqData = {}, view = 'mailboxes') {
     } catch (ex) { toast(ex.message); }
     await reload();
   };
-  document.querySelectorAll('[data-seq-all]').forEach((b) => { b.onclick = () => start(b.dataset.seqAll, {}, b); });
+  document.querySelectorAll('[data-goto-seq]').forEach((b) => { b.onclick = () => { state.mbConnectTo = b.dataset.gotoSeq; }; });
   document.querySelectorAll('[data-seq-retry]').forEach((b) => { b.onclick = () => start(b.dataset.seqRetry, { mailbox_ids: rows.filter((m) => (m.connections || []).some((c) => String(c.sequencer_id) === b.dataset.seqRetry && c.status === 'failed')).map((m) => m.id), retry: true }, b); });
-  document.querySelectorAll('[data-seq-sel]').forEach((b) => {
-    b.onclick = () => {
-      const ids = [...document.querySelectorAll('.mb-sel:checked')].map((c) => Number(c.value));
-      if (!ids.length) { toast('Tick the mailboxes to connect first'); return; }
-      start(b.dataset.seqSel, { mailbox_ids: ids, retry: true }, b);
+  // Mailboxes page: filter by search and sequencer; select; Connect to sequencer.
+  const q = document.getElementById('mbf-q');
+  if (q) {
+    const seqSel = document.getElementById('mbf-seq');
+    const trs = [...document.querySelectorAll('.mb-table tbody tr[data-mb]')];
+    const applyFilter = () => {
+      const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const f = seqSel ? seqSel.value : '';
+      state.mbSeqFilter = f;
+      let shown = 0;
+      trs.forEach((tr) => {
+        const ids = (tr.dataset.seqs || '').split(' ').filter(Boolean);
+        const ok = words.every((w) => tr.dataset.search.includes(w)) && (!f || (f === 'none' ? !ids.length : ids.includes(f)));
+        tr.hidden = !ok;
+        if (ok) shown += 1;
+      });
+      document.getElementById('mbf-count').textContent = shown === trs.length ? '' : `${shown} of ${trs.length}`;
+      syncSel();
     };
-  });
+    const syncSel = () => {
+      const n = document.querySelectorAll('.mb-sel:checked').length;
+      document.getElementById('mb-bulk').hidden = !n;
+      document.getElementById('mb-count').innerHTML = `<strong>${n}</strong> selected`;
+    };
+    q.oninput = applyFilter;
+    if (seqSel) seqSel.onchange = applyFilter;
+    document.querySelectorAll('.mb-sel').forEach((c) => { c.addEventListener('change', syncSel); });
+    if (all) all.addEventListener('change', syncSel);
+    document.getElementById('mb-clear').onclick = () => { document.querySelectorAll('.mb-sel').forEach((c) => { c.checked = false; }); if (all) all.checked = false; syncSel(); };
+    document.getElementById('mb-connect').onclick = () => {
+      const ids = [...document.querySelectorAll('.mb-sel:checked')].filter((c) => !c.closest('tr').hidden).map((c) => Number(c.value));
+      if (!ids.length) { toast('Select the mailboxes to connect first'); return; }
+      openConnectDialog(ids, seqs.filter((x) => !prov(x.provider).csvOnly), providers, async (seqId) => {
+        const r = await api('POST', `/api/sequencers/${seqId}/connect`, { mailbox_ids: ids, retry: true });
+        toast(r.queued ? `Connecting ${r.queued} mailbox${r.queued === 1 ? '' : 'es'} in the background (about a minute each). You can leave this page.` : 'Those mailboxes are already connected or in progress');
+        await reload();
+      });
+    };
+    applyFilter();
+    // Arrived from "Connect mailboxes" on the Sequencers page: open the picker.
+    if (state.mbConnectTo) {
+      const pre = state.mbConnectTo;
+      state.mbConnectTo = null;
+      toast('Select the mailboxes, then click Connect to sequencer');
+      state.mbPreSeq = pre;
+    }
+  }
   document.querySelectorAll('[data-seq-del]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm(`Remove ${b.dataset.name}? Its keys are deleted here (mailboxes already added stay in the sequencer).`)) return;
       try { await api('DELETE', `/api/sequencers/${b.dataset.seqDel}`); await reload(); } catch (ex) { toast(ex.message); }
     };
+  });
+}
+
+// Mailboxes → Connect to sequencer: pick one of the client's sequencers.
+function openConnectDialog(ids, seqs, providers, go) {
+  const prov = (k) => providers.find((p) => p.key === k) || {};
+  const dlg = modalShell(`Connect ${ids.length} mailbox${ids.length === 1 ? '' : 'es'}`, seqs.length ? `
+    <p class="muted small" style="margin:-6px 0 12px">Choose the sequencer. We sign each mailbox in to Google / Microsoft in the background and mark it Connected once the sequencer confirms it.</p>
+    <div class="seq-choices">${seqs.map((x, i) => `<label class="seq-choice"><input type="radio" name="seq" value="${x.id}" ${String(state.mbPreSeq || '') === String(x.id) || (!state.mbPreSeq && i === 0) ? 'checked' : ''}>
+      ${provLogo(x.provider)}<span><strong>${esc(x.label)}</strong><span class="muted small">${esc(provName(prov(x.provider)).name || x.provider)} · ${x.connected} connected</span></span></label>`).join('')}</div>
+    <div class="row" style="margin-top:14px"><button class="btn btn-primary" type="submit">${icon('send')}Connect</button><a class="btn btn-ghost" href="#/sequencers">Add another sequencer</a></div>`
+    : `<div class="empty" style="padding:24px">You haven't added a sequencer yet.</div><div class="row"><a class="btn btn-primary" href="#/sequencers">Add a sequencer</a></div>`);
+  state.mbPreSeq = null;
+  dlg.querySelectorAll('a[href="#/sequencers"]').forEach((a) => { a.addEventListener('click', () => dlg.close()); });
+  onSubmit(dlg.querySelector('form'), async (d) => {
+    if (!d.seq) throw new Error('Choose a sequencer');
+    await go(d.seq);
+    dlg.close();
   });
 }
 
