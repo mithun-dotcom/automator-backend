@@ -21,16 +21,30 @@ const setConn = (mailboxId, sequencerId, status, error = '', consentUrl = null) 
      consent_url = EXCLUDED.consent_url, consent_at = EXCLUDED.consent_at`,
   [mailboxId, sequencerId, status, String(error).slice(0, 500), consentUrl ? onboarding.encrypt(consentUrl) : null]);
 
-// Google or Microsoft. For consent-based sequencers (PlusVibe) the mailbox's
-// type comes first: the client approves the link it gets, so a stale or wrong
-// DNS result must not send a Google mailbox to Microsoft. Otherwise (and when
-// no type is set) what the domain's MX records say, as before.
-async function providerOf(m, { typeFirst = false } = {}) {
-  const byType = m.inbox_type ? dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }) : null;
-  if (typeFirst && byType) return byType;
-  const { rows: [d] } = await query("SELECT dns->>'detected' AS detected FROM domains WHERE user_id = $1 AND domain = lower(split_part($2, '@', 2))", [m.user_id, m.email]);
+// Google or Microsoft: where the mailbox really lives. The domain's live MX
+// records decide (a mailbox typed "Google" on a Microsoft domain must get a
+// Microsoft sign-in); then the last saved DNS check; then the mailbox's type.
+const MX_GOOGLE = /(^|\.)(google\.com|googlemail\.com)$/i;
+const MX_MICROSOFT = /(^|\.)(outlook\.com|office365\.us|protection\.outlook\.com)$/i;
+async function liveMx(domain) {
+  try {
+    const mx = await Promise.race([
+      require('dns').promises.resolveMx(domain),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+    ]);
+    const hosts = mx.map((r) => String(r.exchange).replace(/\.$/, ''));
+    if (hosts.some((h) => MX_GOOGLE.test(h))) return 'google';
+    if (hosts.some((h) => MX_MICROSOFT.test(h))) return 'microsoft';
+  } catch { /* fall back below */ }
+  return null;
+}
+async function providerOf(m) {
+  const domain = String(m.email).split('@')[1].toLowerCase();
+  const live = await liveMx(domain);
+  if (live) return live;
+  const { rows: [d] } = await query("SELECT dns->>'detected' AS detected FROM domains WHERE user_id = $1 AND domain = $2", [m.user_id, domain]);
   if (d && ['google', 'microsoft'].includes(d.detected)) return d.detected;
-  return byType;
+  return m.inbox_type ? dnscheck.providerOf({ inbox_type: m.inbox_type, label: m.inbox_label }) : null;
 }
 
 // Adds jobs for these mailboxes (skipping ones already connected or waiting).
@@ -57,13 +71,15 @@ async function runJob(job) {
   if (!seq || !m) throw new sequencers.SeqError('The sequencer or mailbox was removed');
   const provider = sequencers.PROVIDERS[seq.provider];
   if (!provider || (!provider.connect && !provider.consent)) throw new sequencers.SeqError('This sequencer is CSV-only');
-  const kind = await providerOf(m, { typeFirst: Boolean(provider && provider.consent) });
+  const kind = await providerOf(m);
   if (!kind) throw new sequencers.SeqError('Unknown mailbox type: set it to a Google or Microsoft type (Mailboxes → type) and retry');
   const creds = JSON.parse(onboarding.decrypt(seq.creds));
   if (provider.consent) {
     // API only: no browser, no mailbox password. Returns { authorizeUrl } or { note } when already connected.
     if (provider.restricted && !(await allowedUser(seq.user_id, seq.provider))) throw new sequencers.SeqError('Coming soon for this account');
-    return provider.startConsent({ creds, mailbox: { email: m.email, provider: kind }, step });
+    const res = await provider.startConsent({ creds, mailbox: { email: m.email, provider: kind }, step });
+    if (!res.authorizeUrl || !provider.autoSignIn) return res;
+    return autoApprove({ provider, creds, m, kind, res, step, job });
   }
   const mailbox = { email: m.email, password: onboarding.decrypt(m.password), provider: kind };
 
@@ -83,6 +99,39 @@ async function runJob(job) {
   }
 }
 
+// Signs in to the sequencer's Google / Microsoft link as the mailbox, with the
+// mailbox's credentials from the dashboard, then waits for the sequencer to
+// report the mailbox ACTIVE. If the sign-in can't finish (e.g. 2-Step
+// Verification), the link is kept so it can still be approved by hand.
+async function autoApprove({ provider, creds, m, kind, res, step, job }) {
+  const name = provider.name.replace(/ \(beta\)$/, '');
+  const who = kind === 'microsoft' ? 'Microsoft' : 'Google';
+  let browser;
+  try {
+    step(`${who}: signing in as the mailbox`);
+    browser = await signin.launch();
+    const page = await signin.newPage(browser);
+    const work = signin.completeSignIn(page, res.authorizeUrl, kind, m.email, onboarding.decrypt(m.password), step);
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new sequencers.SeqError(`Timed out at "${job.step}"`)), JOB_TIMEOUT));
+    await Promise.race([work, timeout]);
+    step(`${name}: confirm`);
+    for (let i = 0; i < 15; i += 1) {
+      const accounts = await provider.verify(creds, [String(m.email).toLowerCase()]).catch(() => new Map());
+      const acc = accounts.get(String(m.email).toLowerCase());
+      if (acc && String(acc.status).toUpperCase() === 'ACTIVE') return { note: acc.id ? `Connected (${name} id ${acc.id})` : 'Connected' };
+      await signin.sleep(6000);
+    }
+    // Signed in, but not confirmed yet: keep checking in the background.
+    return { authorizeUrl: res.authorizeUrl, note: `Signed in; waiting for ${name} to confirm` };
+  } catch (err) {
+    console.warn(`[connect] job ${job.id} automatic ${who} sign-in failed: ${err.message}`);
+    await query('UPDATE connect_jobs SET diag = $2 WHERE id = $1', [job.id, err.diag ? JSON.stringify(err.diag) : null]).catch(() => {});
+    return { authorizeUrl: res.authorizeUrl, note: `Automatic sign-in failed: ${String(err.message).slice(0, 200)}. Fix that and Retry, or click Authorize` };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
 async function tick() {
   if (busy) return;
   busy = true;
@@ -98,7 +147,7 @@ async function tick() {
         const result = await runJob(job) || {};
         if (result.authorizeUrl) {
           // Waiting for the client to open the link and click Allow; verifyConsents() confirms it.
-          await query("UPDATE connect_jobs SET status = 'done', step = $2, error = $3, finished_at = now() WHERE id = $1", [job.id, job.step || '', 'Sign-in link ready; waiting for approval']);
+          await query("UPDATE connect_jobs SET status = 'done', step = $2, error = $3, finished_at = now() WHERE id = $1", [job.id, job.step || '', result.note || 'Sign-in link ready; waiting for approval']);
           await setConn(job.mailbox_id, job.sequencer_id, 'authorize', result.note || '', result.authorizeUrl);
           continue;
         }

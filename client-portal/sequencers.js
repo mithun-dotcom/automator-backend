@@ -150,12 +150,16 @@ const PROVIDERS = {
     // No browser: PlusVibe's partner API gives a Google / Microsoft consent link per mailbox, the
     // client opens it and clicks Allow, and PlusVibe's account list confirms it (plusvibe.js).
     consent: true,
+    // PlusVibe's partner docs: "Infrastructure provider is required to have its own browser
+    // automation". The connector signs in to the link as the mailbox with its dashboard
+    // credentials, then PlusVibe's account list confirms it (connector.js autoApprove).
+    autoSignIn: true,
     restricted: true, // live only for PLUSVIBE_ALLOWED_EMAILS; "Coming soon" for everyone else
     fields: [
       { key: 'api_key', label: 'API key', secret: true },
       { key: 'workspace_id', label: 'PlusVibe workspace', type: 'plusvibe_workspace' },
     ],
-    help: 'PlusVibe → Settings → API access (Business plan). Paste the key, load your workspaces and pick one. Then click Authorize next to each mailbox and approve it with Google (one click per mailbox).',
+    help: 'PlusVibe → Settings → API access (Business plan). Paste the key, load your workspaces and pick one. Then connect your mailboxes: we sign each one in to Google / Microsoft for you in the background.',
     async test(c) {
       if (!/^[a-f0-9]{24}$/.test(c.workspace_id)) throw new SeqError('Load your workspaces and choose one');
       let list;
