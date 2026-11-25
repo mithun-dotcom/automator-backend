@@ -1188,3 +1188,4 @@ details.menu[open] > .menu-btn { background: var(--brand-50); color: var(--brand
 .mb-table .mb-pw { min-width: 140px; }
 @media (max-width: 1250px) { .mb-table .mb-pw-val { min-width: 64px; letter-spacing: 0; } }
 .conn-why + .conn-chip, .conn-err + .conn-chip { margin-top: 6px; }
+.prov-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); } .prov-tile .prov-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
